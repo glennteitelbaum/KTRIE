@@ -88,7 +88,7 @@ class data_ptr<T, A> {
 
   /**
    * @brief Allocate and copy-construct a value
-   * @param p Source value pointer (may be null)
+   * @param p Source value pointer (might be null)
    * @param alloc Allocator to use
    * @return Pointer to newly allocated copy, or nullptr if p is null
    */
@@ -96,7 +96,7 @@ class data_ptr<T, A> {
 
   /**
    * @brief Deallocate a value
-   * @param p Pointer to deallocate (may be null)
+   * @param p Pointer to deallocate (might be null)
    * @param alloc Allocator to use
    */
   KTRIE_FORCE_INLINE static void dealloc(T* p, A& alloc);
@@ -243,7 +243,7 @@ class data_ptr<T, A> {
    * @brief Construct from raw integer (from node's data field)
    * @param i Raw integer value
    *
-   * Uses bit_cast for floating-point types to preserve bit representation,
+   * Uses bit_cast for floating-point types to preserve its bit representation,
    * static_cast for integral types.
    */
   explicit data_ptr(intptr_type i) {
@@ -257,7 +257,7 @@ class data_ptr<T, A> {
 
   /**
    * @brief Construct from pointer to value
-   * @param p Pointer to value (may be null)
+   * @param p Pointer to value (might be null)
    */
   explicit data_ptr(const T* p) : val_(safe(p)) {}
 
@@ -341,7 +341,7 @@ class data_ptr<T, A> {
    * @param data Pointer to value
    * @return Raw uint64_t for storage
    *
-   * Uses bit_cast for floating-point types to preserve bit representation.
+   * Uses bit_cast for floating-point types to preserve its bit representation.
    * For example, 3.14 becomes its IEEE 754 bit pattern, not 3.
    */
   KTRIE_FORCE_INLINE static uint64_t make_val(const T* data) {

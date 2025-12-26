@@ -204,7 +204,7 @@ static_assert(sizeof(node<std::array<int, 100>, 16>) == 8);
  * 
  * For each of the 4 words (w = 0, 1, 2, 3):
  *   While the word has set bits:
- *     1. Find lowest set bit: bit = countr_zero(word)
+ *     1. Find the lowest set bit: bit = countr_zero(word)
  *        countr_zero returns number of trailing zeros
  *        This is the bit position (0-63)
  *     

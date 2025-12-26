@@ -253,14 +253,14 @@ class ktrie_base {
    * @brief Merge elements from another trie
    * @param other Trie to merge from
    * 
-   * Attempts to insert each element from other into this trie.
-   * Elements with keys already in this trie remain in other.
+   * Attempts to insert each element from 'other' into this trie.
+   * Elements with keys already in this trie remain in 'other'.
    * This matches std::map::merge behavior.
    */
   void merge(ktrie_base& other) {
     if (this == &other) return;
     
-    // Collect keys that were successfully merged (to erase from other)
+    // Collect keys that were successfully merged (to erase from 'other')
     std::vector<std::string> merged_keys;
     
     for (auto item = other.first_internal(); item.exists; 
@@ -414,7 +414,7 @@ class ktrie_base {
    * @param value Value to insert
    * @return Pair of (pointer to value, true if inserted)
    * 
-   * If the key already exists, does not modify the value.
+   * If the key already exists, the value is not modified .
    */
   std::pair<const T*, bool> insert_internal(const char* key, size_t sz, const T& value) {
     using ih = insert_helper<T, fixed_len, A>;
@@ -515,7 +515,7 @@ class ktrie_base {
    * 3. TRAVERSAL: We consume input characters by:
    *    a. Matching HOP/SKIP compressed sequences
    *    b. Looking up single characters in LIST/POP branch points
-   *    c. Following child pointers to the next node array
+   *    c. Following child pointers to the next 'node' array
    * 
    * NODE ARRAY STRUCTURE (fixed_len > 0, i.e., numeric keys):
    * ┌─────────────────────────────────────────────────────────────────┐
@@ -555,7 +555,7 @@ class ktrie_base {
    *   memory. This hides memory latency by initiating the fetch while we
    *   do other work (incrementing input pointer, updating flags).
    * 
-   * - The if constexpr (fixed_len > 0) branch is optimized for numeric keys
+   * - The 'if constexpr' (fixed_len > 0) branch is optimized for numeric keys
    *   where the structure is simpler (no repeated EOS/HOP/SKIP).
    * 
    * - LIST lookup uses SWAR (SIMD Within A Register) for fast character
@@ -673,7 +673,7 @@ class ktrie_base {
           // Child pointers follow in sorted order of their characters.
           //
           // do_find_pop:
-          // 1. Tests if bit for character is set in bitmap
+          // 1. Tests if the bit for the character is set in bitmap
           // 2. If set, counts bits below it to find child pointer offset
           // 3. Returns offset = 4 (skip bitmap) + popcount of lower bits
           //

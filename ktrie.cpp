@@ -82,21 +82,19 @@ constexpr const char* type_name() {
 // Helper to create a value from an index
 template <typename V>
 V make_value(int i) {
-  if constexpr (std::is_same_v<V, int>) {
-    return i;
-  } else if constexpr (std::is_same_v<V, long double>) {
+  if constexpr (std::is_floating_point_v<V>) {
     return static_cast<long double>(i) * 1.5L + 0.123456789012345L;
   }
+ return i;
 }
 
 // Helper to check value equality
 template <typename V>
 bool values_equal(const V& a, const V& b) {
-  if constexpr (std::is_same_v<V, int>) {
-    return a == b;
-  } else if constexpr (std::is_same_v<V, long double>) {
+  if constexpr (std::is_floating_point_v<V>) {
     return std::abs(a - b) < 1e-10L;
   }
+  return a == b;
 }
 
 // ============================================================================

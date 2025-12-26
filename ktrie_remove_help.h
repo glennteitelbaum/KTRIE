@@ -958,8 +958,8 @@ class remove_helper {
    *
    *    a) Process HOP/SKIP path compression:
    *       - Check if key matches the compressed path
-   *       - If mismatch: return false (key doesn't exist)
-   *       - If match: advance key pointer and continue
+   *       - If mismatched: return false (key doesn't exist)
+   *       - If matched: advance key pointer and continue
    *
    *    b) Check for EOS:
    *       - If key is exhausted and EOS exists: FOUND IT!

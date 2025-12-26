@@ -658,8 +658,8 @@ class ktrie<std::string, T, A> {
    * @brief Merge elements from another trie
    * @param other Trie to merge from
    * 
-   * Extracts elements from other and inserts them into this.
-   * Elements with keys already in this trie remain in other.
+   * Extracts elements from 'other' and inserts them into this.
+   * Elements with keys already in this trie remain in 'other'.
    */
   void merge(ktrie& other) {
     base_.merge(other.base_);
