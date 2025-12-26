@@ -148,11 +148,35 @@ class ktrie<std::string, T, A> {
     for (const auto& p : init) insert(p);
   }
 
-  /// Copy constructor (deleted)
-  ktrie(const ktrie&) = delete;
-  
-  /// Copy assignment (deleted)
-  ktrie& operator=(const ktrie&) = delete;
+  /**
+   * @brief Copy constructor
+   * @param other Trie to copy from
+   */
+  ktrie(const ktrie& other) : base_(other.base_) {}
+
+  /**
+   * @brief Copy assignment
+   * @param other Trie to copy from
+   * @return Reference to this
+   */
+  ktrie& operator=(const ktrie& other) {
+    if (this != &other) {
+      base_ = other.base_;
+    }
+    return *this;
+  }
+
+  /**
+   * @brief Construct from iterator range
+   * @tparam InputIt Iterator type
+   * @param first Start of range
+   * @param last End of range
+   * @param alloc Allocator to use
+   */
+  template <class InputIt>
+  ktrie(InputIt first, InputIt last, const A& alloc = A()) : base_(alloc) {
+    insert(first, last);
+  }
   
   /// Move constructor
   ktrie(ktrie&&) = default;
@@ -580,6 +604,25 @@ class ktrie<std::string, T, A> {
     return const_iterator(&base_, result.key);
   }
 
+/**
+   * @brief Merge elements from another trie
+   * @param other Trie to merge from
+   * 
+   * Extracts elements from other and inserts them into this.
+   * Elements with keys already in this trie remain in other.
+   */
+  void merge(ktrie& other) {
+    base_.merge(other.base_);
+  }
+
+  /**
+   * @brief Merge elements from rvalue trie
+   * @param other Trie to merge from (will be cleared)
+   */
+  void merge(ktrie&& other) {
+    base_.merge(std::move(other.base_));
+  }
+
   //============================================================================
   // Debug
   //============================================================================
@@ -621,8 +664,10 @@ class ktrie<char*, T, A> {
  public:
   ktrie() = default;
   explicit ktrie(const A& alloc) : base_(alloc) {}
+
   ktrie(const ktrie&) = delete;
   ktrie& operator=(const ktrie&) = delete;
+
   ktrie(ktrie&&) = default;
   ktrie& operator=(ktrie&&) = default;
 
@@ -742,10 +787,40 @@ class ktrie<N, T, A> {
     for (const auto& p : init) insert(p);
   }
 
-  ktrie(const ktrie&) = delete;
-  ktrie& operator=(const ktrie&) = delete;
   ktrie(ktrie&&) = default;
   ktrie& operator=(ktrie&&) = default;
+
+/**
+   * @brief Copy constructor
+   * @param other Trie to copy from
+   */
+  ktrie(const ktrie& other) : base_(other.base_) {}
+
+  /**
+   * @brief Copy assignment
+   * @param other Trie to copy from
+   * @return Reference to this
+   */
+  ktrie& operator=(const ktrie& other) {
+    if (this != &other) {
+      base_ = other.base_;
+    }
+    return *this;
+  }
+
+/**
+   * @brief Construct from iterator range
+   * @tparam InputIt Iterator type
+   * @param first Start of range
+   * @param last End of range
+   * @param alloc Allocator to use
+   */
+  template <class InputIt>
+  ktrie(InputIt first, InputIt last, const A& alloc = A()) : base_(alloc) {
+    for (; first != last; ++first) {
+      insert(*first);
+    }
+  }
 
   allocator_type get_allocator() const { return base_.get_allocator(); }
 
@@ -902,6 +977,23 @@ class ktrie<N, T, A> {
     auto next = it; ++next;
     return {it, next};
   }
+
+/**
+   * @brief Merge elements from another trie
+   * @param other Trie to merge from
+   */
+  void merge(ktrie& other) {
+    base_.merge(other.base_);
+  }
+
+  /**
+   * @brief Merge elements from rvalue trie
+   * @param other Trie to merge from (will be cleared)
+   */
+  void merge(ktrie&& other) {
+    base_.merge(std::move(other.base_));
+  }
+
 
   void pretty_print(bool only_summary = false) const { 
     base_.pretty_print(only_summary); 
