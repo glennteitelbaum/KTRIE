@@ -14,9 +14,7 @@
 
 #include "ktrie.h"
 
-#include <cmath>
 #include <cstdlib>
-#include <cstring>
 #include <iostream>
 #include <limits>
 #include <random>
@@ -58,7 +56,7 @@ constexpr int NUM_KEYS = 1000000;
 int passed = 0;
 int failed = 0;
 
-void report(bool ok, const std::string& msg) {
+static void report(bool ok, const std::string& msg) {
   if (ok) {
     std::cout << "  OK: " << msg << std::endl;
     passed++;

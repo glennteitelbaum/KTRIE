@@ -17,16 +17,13 @@
 
 #pragma once
 
-#include <cstdio>
 #include <iomanip>
-#include <initializer_list>
 #include <memory>
 #include <stdexcept>
 #include <tuple>
 #include <utility>
 
 #include "ktrie_insert_help.h"
-#include "ktrie_iter.h"
 #include "ktrie_nav.h"
 #include "ktrie_node.h"
 #include "ktrie_pretty.h"
