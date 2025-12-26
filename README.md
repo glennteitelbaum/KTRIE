@@ -639,6 +639,13 @@ g++ -std=c++20 -O0 -g -fsanitize=address,undefined -o ktrie_test ktrie.cpp
 # MSVC
 cl /std:c++20 /O2 /EHsc ktrie.cpp
 ```
+---
+
+## AI Usage
+
+Documentation, comments, refactoring and bug detection were assisted by [Claude](https://claude.ai/).
+It was helpful in converting recursive functions to iterative versions. It also gave an unbiased view for the comparison document.
+Any incorrect or missing documentation or remaining bugs are ultimately the responsibility of the author.
 
 ---
 
