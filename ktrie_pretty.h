@@ -378,7 +378,7 @@ void ktrie_pretty<T, fixed_len, A>::pretty_print_node(
       if (has_bit(flags, hop_bit)) {
         t_hop hop = ptr->get_hop();
         flags = hop.get_new_flags();
-        std::cout << pad << "  HOP[" << (int)hop.get_hop_sz() << " ";
+        std::cout << pad << "  HOP[" << static_cast<int>(hop.get_hop_sz()) << " ";
         pretty_flags(flags);
         std::cout << "]: '";
         auto hs = hop.to_string();

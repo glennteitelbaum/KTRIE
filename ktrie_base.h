@@ -386,7 +386,7 @@ class ktrie_base {
    * @brief Get maximum possible size
    * @return Maximum number of elements
    */
-  size_type max_size() const noexcept {
+  static size_type max_size() noexcept {
     return (1ULL << (64 - num_bits)) / sizeof(node_type);
   }
 
