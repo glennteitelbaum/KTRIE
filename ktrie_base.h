@@ -206,19 +206,6 @@ class ktrie_base {
   explicit ktrie_base(const A& allocator) : alloc_(allocator) {}
 
   /**
-   * @brief Copy constructor (deleted)
-   * 
-   * Copying is disabled to prevent expensive deep copies.
-   * Use move semantics instead.
-   */
-  ktrie_base(const ktrie_base&) = delete;
-
-  /**
-   * @brief Copy assignment (deleted)
-   */
-  ktrie_base& operator=(const ktrie_base&) = delete;
-
-  /**
    * @brief Move constructor
    * @param other Trie to move from
    */
@@ -227,6 +214,89 @@ class ktrie_base {
     other.head_ = node_type{};
     other.cnt_ = 0;
   }
+
+ /**
+   * @brief Copy constructor
+   * @param other Trie to copy from
+   * 
+   * Creates a deep copy by iterating through all elements and inserting them.
+   * Complexity: O(n * k) where n is element count and k is average key length.
+   */
+  ktrie_base(const ktrie_base& other) 
+      : alloc_(std::allocator_traits<A>::select_on_container_copy_construction(other.alloc_)) {
+    for (auto item = other.first_internal(); item.exists; 
+         item = other.next_item_internal(item.key.data(), item.key.size())) {
+      insert_internal(item.key.data(), item.key.size(), *item.value);
+    }
+  }
+
+  /**
+   * @brief Copy assignment
+   * @param other Trie to copy from
+   * @return Reference to this
+   */
+  ktrie_base& operator=(const ktrie_base& other) {
+    if (this != &other) {
+      clear();
+      if constexpr (std::allocator_traits<A>::propagate_on_container_copy_assignment::value) {
+        alloc_ = other.alloc_;
+      }
+      for (auto item = other.first_internal(); item.exists; 
+           item = other.next_item_internal(item.key.data(), item.key.size())) {
+        insert_internal(item.key.data(), item.key.size(), *item.value);
+      }
+    }
+    return *this;
+  }
+
+  /**
+   * @brief Merge elements from another trie
+   * @param other Trie to merge from
+   * 
+   * Attempts to insert each element from other into this trie.
+   * Elements with keys already in this trie remain in other.
+   * This matches std::map::merge behavior.
+   */
+  void merge(ktrie_base& other) {
+    if (this == &other) return;
+    
+    // Collect keys that were successfully merged (to erase from other)
+    std::vector<std::string> merged_keys;
+    
+    for (auto item = other.first_internal(); item.exists; 
+         item = other.next_item_internal(item.key.data(), item.key.size())) {
+      auto [ptr, inserted] = insert_internal(item.key.data(), item.key.size(), *item.value);
+      if (inserted) {
+        merged_keys.push_back(item.key);
+      }
+    }
+    
+    // Remove merged keys from source
+    for (const auto& key : merged_keys) {
+      other.erase_internal(key.data(), key.size());
+    }
+  }
+
+  /**
+   * @brief Merge all elements from an rvalue trie
+   * @param other Trie to merge from (will be cleared)
+   * 
+   * For rvalue sources, we insert all elements (overwriting conflicts)
+   * and clear the source. Use insert_or_assign semantics if you want
+   * source values to win on conflicts.
+   */
+  void merge(ktrie_base&& other) {
+    if (this == &other) return;
+    
+    for (auto item = other.first_internal(); item.exists; 
+         item = other.next_item_internal(item.key.data(), item.key.size())) {
+      // Insert only if not present (standard merge behavior)
+      insert_internal(item.key.data(), item.key.size(), *item.value);
+    }
+    other.clear();
+  }
+
+
 
   /**
    * @brief Move assignment
