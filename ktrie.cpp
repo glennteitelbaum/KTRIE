@@ -12,6 +12,18 @@
 #define NDEBUG
 #endif
 
+#if 0
+#include "ktrie.h"
+
+using namespace gteitelbaum;
+
+int main(int, char**) {
+  ktrie<int, int> K{{0, 1}, {2, 4}, {6, 8}};
+
+  return K.contains(0);
+}
+#else
+
 #include "ktrie.h"
 
 #include <cstdlib>
@@ -618,3 +630,4 @@ int main() {
 
   return failed > 0 ? 1 : 0;
 }
+#endif

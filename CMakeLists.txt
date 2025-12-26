@@ -1,5 +1,5 @@
-cmake_minimum_required(VERSION 3.5)
+cmake_minimum_required(VERSION 3.15)
+project(KTRIE CXX)
 
-add_executable(ktrie ktrie.cpp)
-
-target_link_libraries(main)
+# Add an executable target, specifying all source files
+add_executable(output.s ktrie.cpp)
