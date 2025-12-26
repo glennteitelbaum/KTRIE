@@ -30,7 +30,7 @@ A header-only C++20/C++23 implementation of an ordered associative container usi
 - **Header-only**: No compilation required, just include and use
 - **std::map-compatible API**: Familiar interface with iterators, `insert`, `erase`, `find`, etc.
 - **Multiple key types**: Supports `std::string`, `char*`, and all numeric types
-- **Ordered traversal**: Keys are always iterated in sorted order
+- **Ordered traversal**: Keys are always iterated in sorted order -- forward or reverse
 - **Memory efficient**: Compact node representation (8 bytes per node)
 - **Cache-friendly**: Contiguous node arrays minimize cache misses
 - **No external dependencies**: Uses only C++20 standard library
