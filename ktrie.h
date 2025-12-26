@@ -605,6 +605,56 @@ class ktrie<std::string, T, A> {
   }
 
 /**
+   * @brief Find all keys with a given prefix
+   * @param prefix Prefix to search for
+   * @return Pair of iterators [first, last) covering all keys starting with prefix
+   * 
+   * Returns the range of all keys that start with the given prefix.
+   * If no keys match, returns {end(), end()}.
+   * The prefix itself does not need to exist as a key in the trie.
+   * 
+   * Example:
+   * @code
+   * ktrie<std::string, int> t;
+   * t["apple"] = 1;
+   * t["application"] = 2;
+   * t["banana"] = 3;
+   * 
+   * auto [first, last] = t.find_prefix("app");
+   * // Iterates: "apple", "application"
+   * for (auto it = first; it != last; ++it) {
+   *     std::cout << it->first << "\n";
+   * }
+   * @endcode
+   */
+  std::pair<iterator, iterator> find_prefix(const key_type& prefix) {
+    auto [first, last] = base_.find_prefix_internal(prefix.data(), prefix.size());
+    
+    if (!first.exists) return {end(), end()};
+    
+    iterator first_it(&base_, first.key);
+    iterator last_it = last.exists ? iterator(&base_, last.key) : end();
+    
+    return {first_it, last_it};
+  }
+
+  /**
+   * @brief Find all keys with a given prefix (const)
+   * @param prefix Prefix to search for
+   * @return Pair of const iterators [first, last) covering all keys starting with prefix
+   */
+  std::pair<const_iterator, const_iterator> find_prefix(const key_type& prefix) const {
+    auto [first, last] = base_.find_prefix_internal(prefix.data(), prefix.size());
+    
+    if (!first.exists) return {cend(), cend()};
+    
+    const_iterator first_it(&base_, first.key);
+    const_iterator last_it = last.exists ? const_iterator(&base_, last.key) : cend();
+    
+    return {first_it, last_it};
+  }
+
+/**
    * @brief Merge elements from another trie
    * @param other Trie to merge from
    * 
@@ -994,6 +1044,45 @@ class ktrie<N, T, A> {
     base_.merge(std::move(other.base_));
   }
 
+/**
+   * @brief Find all keys with a given byte prefix
+   * @param prefix_bytes Raw byte prefix to search for
+   * @param prefix_len Length of prefix in bytes (must be <= sizeof(N))
+   * @return Pair of iterators [first, last) covering all keys starting with prefix
+   * 
+   * For numeric keys, this finds all keys whose byte representation starts with
+   * the given prefix. This is useful for range queries on numeric keys.
+   * 
+   * Note: The prefix is in the internal byte representation (big-endian, with
+   * sign bit flipped for signed types), not the numeric value.
+   */
+  std::pair<iterator, iterator> find_prefix(const char* prefix_bytes, size_t prefix_len) {
+    auto [first, last] = base_.find_prefix_internal(prefix_bytes, prefix_len);
+    
+    if (!first.exists) return {end(), end()};
+    
+    iterator first_it(&base_, first.key);
+    iterator last_it = last.exists ? iterator(&base_, last.key) : end();
+    
+    return {first_it, last_it};
+  }
+
+  /**
+   * @brief Find all keys with a given byte prefix (const)
+   * @param prefix_bytes Raw byte prefix to search for
+   * @param prefix_len Length of prefix in bytes
+   * @return Pair of const iterators [first, last) covering all keys starting with prefix
+   */
+  std::pair<const_iterator, const_iterator> find_prefix(const char* prefix_bytes, size_t prefix_len) const {
+    auto [first, last] = base_.find_prefix_internal(prefix_bytes, prefix_len);
+    
+    if (!first.exists) return {cend(), cend()};
+    
+    const_iterator first_it(&base_, first.key);
+    const_iterator last_it = last.exists ? const_iterator(&base_, last.key) : cend();
+    
+    return {first_it, last_it};
+  }
 
   void pretty_print(bool only_summary = false) const { 
     base_.pretty_print(only_summary); 
