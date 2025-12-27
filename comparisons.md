@@ -82,13 +82,13 @@ struct hash_node {
 ### KTRIE - Compressed Trie
 
 ```
-Storing 'pre', 'prefix' and 'suffix' with a depth of 2
+Storing "pre", "prefix" and "suffix" with a depth of 2
 [EOS] Represents the End of String and pointer to the value
 
 Level 0: [Head]
-Level 1:  +-> [LIST 'p', 's'] [PTR: 'p'][PTR: 's']
-Level2a                       |         +-> [HOP "uffix"][EOS: suffix]                                  
-Level2b:                      +-> [HOP "pre"] [EOS:'pre'] [HOP "fix"] [EOS:'prefix']
+Level 1:  +-> [LIST "p", "s"] [PTR: "p"][PTR: "s"]
+Level2a                       |         +-> [HOP "uffix"][EOS: "suffix"]                                  
+Level2b:                      +-> [HOP "re"] [EOS:"pre"] [HOP "fix"] [EOS:"prefix"]
                                              ^                     
                                              (Note: shared prefix "pre")
 ```
