@@ -94,7 +94,7 @@ class ktrie_pretty {
   struct trie_stats {
     size_t total_uint64s = 0;    ///< Total 64-bit words allocated
     size_t total_arrays = 0;     ///< Number of node arrays
-    size_t max_depth = 0;        ///< Maximum tree depth
+    std::vector<size_t> depth{};  ///< Tree Depth counts
     
     size_t hop_count = 0;        ///< Number of HOP nodes
     size_t hop_total_len = 0;    ///< Sum of all HOP lengths
@@ -278,7 +278,6 @@ void ktrie_pretty<T, fixed_len, A>::collect_stats(
   
   stats.total_uint64s += count_node_array_size(start, flags);
   stats.total_arrays++;
-  stats.max_depth = std::max(stats.max_depth, depth + 1);
   
   const node_type* ptr = start;
 
@@ -300,11 +299,23 @@ void ktrie_pretty<T, fixed_len, A>::collect_stats(
     }
     
     if (has_bit(flags, eos_bit)) {
+      if (stats.depth.size() <= depth) {
+        stats.depth.resize(depth + 1, 0);
+        stats.depth[depth] = 1;
+      } else {
+        stats.depth[depth]++;
+      }
       ptr++;
     }
   } else {
     while (has_bit(flags, eos_bit | hop_bit | skip_bit)) {
       if (has_bit(flags, eos_bit)) {
+         if (stats.depth.size() <= depth) {
+            stats.depth.resize(depth + 1, 0);
+            stats.depth[depth] = 1;
+         } else {
+            stats.depth[depth]++;
+         }
         ptr++;
       }
       if (has_bit(flags, hop_bit | skip_bit)) {

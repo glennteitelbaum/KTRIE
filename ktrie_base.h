@@ -964,7 +964,12 @@ class ktrie_base {
                 << stats.total_uint64s * 8 << " bytes)" << std::endl;
       
       // Depth
-      std::cout << "  Depth: max=" << stats.max_depth << std::endl;
+      std::cout << "Depth:" << std::endl;
+      for (int d = 0; d < stats.depth.size(); ++d) {
+        std::cout << "  Level " << d << ": " << stats.depth[d] << "( "
+                  << std::fixed << std::setprecision(2)
+                  << (100.00 * stats.depth[d]) / cnt_ << "%)" << std::endl;
+      }
       
       // Node type counts with averages for path compression nodes
       std::cout << "  Nodes: ";
