@@ -113,7 +113,7 @@ Modern 64-bit systems don't actually use all 64 bits for memory addresses:
 64-bit pointer layout (x86-64, current):
 
 ┌─────────────────────────────────────────────────────────────────┐
-│ Unused (16 bits) │        Virtual Address (48 bits)            │
+│ Unused (16 bits) │        Virtual Address (48 bits)             │
 └─────────────────────────────────────────────────────────────────┘
   bits 63-48              bits 47-0
 
@@ -276,12 +276,11 @@ KTRIE chose dirty pointers because memory efficiency was prioritized, and the `n
 **Mitigations in KTRIE:**
 
 ```cpp
-// ktrie.h includes this check
+// ktrie.h includes these checks
 static_assert((std::endian::native == std::endian::big) ||
               (std::endian::native == std::endian::little),
               "Irregular Endian not supported");
 
-// Could add:
 static_assert(sizeof(void*) == 8, "64-bit pointers required");
 ```
 
@@ -371,30 +370,72 @@ But it cannot use the more efficient '***Determine if a word has a byte less tha
 
 The expression `~((((diff & low_bits) + low_bits) | diff) | low_bits)` finds zero bytes. Let's break it down:
 
-```
 Goal: Set high bit of each byte that is 0x00, clear for non-zero bytes
 
 For each byte B in diff:
 
-1. (B & 0x7F)         - Clear high bit
-2. + 0x7F             - Add 127
-3. | B                - OR with original
-4. | 0x7F             - OR with 0x7F
-5. ~(...)             - Invert
+1. `(B & 0x7F)`         - Clear High Bit
+2. `+ 0x7F`             - Add *0x7F* (low_bits)
+3. | `B`                - OR with original
+4. | `0x7F`             - OR with *0x7F* (low_bits)
+5. `~`(...)             - Invert
 
-Truth table:
-┌──────────┬────────────────────────────────────────┬────────────┐
-│ B value  │ Steps                                  │ Result bit │
-├──────────┼────────────────────────────────────────┼────────────┤
-│ 0x00     │ (0+127)|0|127 = 127 = 0x7F → ~0x7F=0x80│ 1 (found!) │
-│ 0x01     │ (1+127)|1|127 = 128|1|127 = 0xFF → 0x00│ 0          │
-│ 0x7F     │ (127+127)|127|127 = 0xFE|0x7F = 0xFF   │ 0          │
-│ 0x80     │ (0+127)|128|127 = 0xFF                 │ 0          │
-│ 0xFF     │ (127+127)|255|127 = 0xFF               │ 0          │
-└──────────┴────────────────────────────────────────┴────────────┘
-```
+Find Zeroes
+Example looking at one byte vs 0x00 :
 
-Only 0x00 bytes result in a high bit being set!
+#### Checking vs **0x00**
+
+- **0x00** & *0x7F* = 0x00 - Clear High Bit
+- 0x00 + *0x7F* = 0x7F -- Add *0x7F* (low_bits)
+- 0x7F | **0x00** = 0x7F -- OR with Original B(**0x00**)
+- 0x7F | *0x7F* = 0x7F -- OR with *0x7F* (low_bits)
+- ~0x7F = **0x80** <== (Hih Bit Set) **MATCHED**
+
+#### Checking vs **0x01**
+
+- **0x01** & *0x7F* = 0x01 - Clear High Bit
+- 0x01 + *0x7F* = 0x80 -- Add *0x7F* (low_bits)
+- 0x80 | **0x01** = 0x81 -- OR with Original B(**0x01**)
+- 0x81 | *0x7F* = 0xFF -- OR with *0x7F* (low_bits)
+- ~0xFF = **0x00** <== (Less than 0x80 - High Bit Unset ) **NOT MATCHED**
+
+#### Checking vs **0x7F**
+
+- **0x7F** & *0x7F* = 0x7F - Clear High Bit
+- 0x7F + *0x7F* = 0xFE -- Add *0x7F* (low_bits)
+- 0xFE | **0x7F** = 0xFF -- OR with Original B(**0x7F**)
+- 0xFF | *0x7F* = 0xFF -- OR with *0x7F* (low_bits)
+- ~0xFF = **0x00** <== (Less than 0x80 - High Bit Unset ) **NOT MATCHED**
+
+#### Checking vs **0x80**
+
+- **0x80** & *0x7F* = 0x00 - Clear High Bit
+- 0x00 + *0x7F* = 0x7F -- Add *0x7F* (low_bits)
+- 0x7F | **0x80** = 0xFF -- OR with Original B(**0x80**)
+- 0xFF | *0x7F* = 0xFF -- OR with *0x7F* (low_bits)
+- ~0xFF = **0x00** <== (Less than 0x80 - High Bit Unset ) **NOT MATCHED**
+
+#### Checking vs **0x84**
+
+- **0x84** & *0x7F* = 0x04 - Clear High Bit
+- 0x04 + *0x7F* = 0x83 -- Add *0x7F* (low_bits)
+- 0x83 | **0x84** = 0x87 -- OR with Original B(**0x84**)
+- 0x87 | *0x7F* = 0xFF -- OR with *0x7F* (low_bits)
+- ~0xFF = **0x00** <== (Less than 0x80 - High Bit Unset ) **NOT MATCHED**
+
+#### Checking vs **0xFF**
+
+- **0xFF** & *0x7F* = 0x7F - Clear High Bit
+- 0x7F + *0x7F* = 0xFE -- Add *0x7F* (low_bits)
+- 0xFE | **0xFF** = 0xFF -- OR with Original B(**0xFF**)
+- 0xFF | *0x7F* = 0xFF -- OR with *0x7F* (low_bits)
+- ~0xFF = **0x00** <== (Less than 0x80 - High Bit Unset ) **NOT MATCHED**
+
+Only the **0x00** byte result in a High Bit being set
+
+Notice that this will be done simultaneously across all eight bytes
+
+This works because there is never any overflow
 
 ### SWAR in insert()
 
@@ -453,15 +494,20 @@ int pos = std::countl_zero(zeros) / 8;
 // ~5-10 cycles total
 ```
 
-**Benchmark comparison:**
+### SWAR vs Naive Benchmark comparison (theoretical):**
 
-| List Size | Naive Loop | SWAR |
-|-----------|------------|------|
-| 1 char | ~3 cycles | ~6 cycles |
-| 4 chars | ~12 cycles | ~6 cycles |
-| 7 chars | ~21 cycles | ~6 cycles |
+| List Size | Naive Loop | SWAR | DIFF | |
+|-----------|------------|------|------|-|
+| 1 char | ~3 cycles | ~6 cycles | -3 | Naive better |
+| 2 char | ~6 cycles | ~6 cycles | 0  | Break Even |
+| 3 char | ~9 cycles | ~6 cycles | 3 | SWAR Better |
+| 4 chars | ~12 cycles | ~6 cycles | 6 | SWAR Better |
+| 5 chars | ~15 cycles | ~6 cycles | 9 | SWAR Better |
+| 6 chars | ~16 cycles | ~6 cycles | 12 | SWAR Better |
+| 7 chars | ~21 cycles | ~6 cycles | 15 | SWAR Better |
 
 SWAR is **constant time** regardless of list size, and eliminates branch mispredictions.
+Naive is only cheaper if there is one char, but optimizing for one would cost more for the branch
 
 ---
 
@@ -532,25 +578,26 @@ T do_byteswap(T inp) {
 
 For **signed integers**, there's another issue. Two's complement representation puts negative numbers at the "top" of the bit range:
 
-```
+
 Signed int8_t values and their bit patterns:
 
-Value    Bits      Unsigned equivalent
------    ----      -------------------
- -128    10000000  128
- -1      11111111  255
-  0      00000000  0
-  1      00000001  1
-  127    01111111  127
-```
+|Value|Bits|Unsigned equivalent|
+|-----|----|-------------------|
+| -128 | 10000000 | 128 |
+| -1 | 11111111  | 255 |
+|  0 | 00000000  | 0 |
+|  1 | 00000001  | 1 |
+| 127 | 01111111 | 127 |
+
 
 If we compare bytes directly:
-```
+
+```cpp
 -1 = 0xFF = 255
  1 = 0x01 = 1
+```
 
 Byte comparison: 255 > 1 → -1 > 1  ← WRONG!
-```
 
 ### Solution: Flip the Sign Bit
 
@@ -630,12 +677,11 @@ Storing values through pointers has overhead:
 struct Node {
     Value* value_ptr;  // Always a pointer, even for small values
 };
-
-// For Value = int:
-// - Node stores 8-byte pointer
-// - Pointer points to 4-byte int (plus allocation overhead)
-// - Total: ~24 bytes for a 4-byte value!
 ```
+For Value = int:
+ - Node stores 8-byte pointer
+ - Pointer points to 4-byte int (plus allocation overhead)
+ - Total: ~24 bytes for a 4-byte value!
 
 ### The Solution: Inline Small Values
 
