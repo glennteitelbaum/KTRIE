@@ -610,8 +610,8 @@ class ktrie_base {
             // nodes
             //
             // SKIP is unlikely for fixed lengths keys since they are short
-            // but it is required for edge cases instead of allowing two HOPs or
-            // later Numerics of longer lengths
+            // but it is required for edge cases instead of allowing two HOPs
+            // Or allowing for later Numerics of longer lengths
             //
             // SKIP Memory Layout:
             // Node 0: [flags (5 bits) | length (59 bits)]  <- header
@@ -747,7 +747,7 @@ class ktrie_base {
               flags = hop.get_new_flags();
               run++;
               
-            } else {  // has_bit(flags, hop_bit)) [[ unlikely ]]
+            } else {  // has_bit(flags, skip_bit)) [[ unlikely ]]
               // SKIP node processing (same as fixed_len path)
               t_skip sk = run->get_skip();
               size_t slen = sk.get_skip_len();

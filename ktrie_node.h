@@ -304,7 +304,7 @@ KTRIE_FORCE_INLINE bool do_find_skip(const char* search, const char* in,
  * OPTIMIZATION: CUMULATIVE COUNTING
  *   Instead of conditionally summing, we compute cumulative counts:
  *   
- *   w0 = 4 + popcount(search[word] & (mask-1))  // base for word 0
+ *   w0 =  4 + popcount(search[word] & (mask-1)) // base for word 0
  *   w1 = w0 + popcount(search[0])               // base for word 1
  *   w2 = w1 + popcount(search[1])               // base for word 2
  *   w3 = w2 + popcount(search[2])               // base for word 3
@@ -315,11 +315,15 @@ KTRIE_FORCE_INLINE bool do_find_skip(const char* search, const char* in,
  */
 KTRIE_FORCE_INLINE bool do_find_pop(const t_val* search, char c, int* run_add) {
   uint8_t v = static_cast<uint8_t>(c);
-  int word = v >> 6;      // Which 64-bit word (0-3)
-  int bit = v & 63;       // Which bit within word
-  t_val mask = 1ULL << bit;
+  const int word = v >> 6;      // v / 64 -- Which 64-bit word (0-3)
+  const int bit = v & 63;       // v % 64 -- Which bit within word
+  const t_val mask = 1ULL << bit;
   
-  // Check if character exists in bitmap
+  // Check if character doesn't exist in bitmap
+  // Use early termination for efficiency
+  // Since most code will branch on the return value
+  // So it will be more efficient not to do the rest
+  // of the work without a branch overhead
   if (!(search[word] & mask)) return false;
 
   //----------------------------------------------------------------------------
@@ -329,22 +333,22 @@ KTRIE_FORCE_INLINE bool do_find_pop(const t_val* search, char c, int* run_add) {
   // We compute the offset for each word cumulatively, then select
   // the appropriate one based on which word our character is in.
   //
-  // For word 0: offset = 4 + count of bits below 'bit' in word 0
-  // For word 1: offset = (word 0 offset) + all bits in word 0
-  // For word 2: offset = (word 1 offset) + all bits in word 1
-  // For word 3: offset = (word 2 offset) + all bits in word 2
+  // If word = 0 : 4 + (word 1 offset) -- No prior words to add
+  // If word is 1: offset = 4 + (word 1 offset) + all bits in word 0
+  // If word is 2: offset = 4 + (word 2 offset) + all bits in word 0,1
+  // If word is3: offset =  4 + (word 3 offset) + all bits in word 0,1,2
   //
   
-  // Base offset for word 0: 4 (skip bitmap) + bits below target in this word
-  int w0 = 4 + std::popcount(search[word] & (mask - 1));
+  // Base offset: 4 (skip bitmap) + bits in this word
+  const int w0 = 4 + std::popcount(search[word] & (mask - 1));
   
   // Cumulative offsets for each word
-  int w1 = w0 + std::popcount(search[0]);
-  int w2 = w1 + std::popcount(search[1]);
-  int w3 = w2 + std::popcount(search[2]);
+  const int w1 = w0 + std::popcount(search[0]); // add bits in word 0
+  const int w2 = w1 + std::popcount(search[1]); // add bits in word 1
+  const int w3 = w2 + std::popcount(search[2]); // add bits in word 2
 
   // Select correct offset based on word index
-  std::array<int, 4> before{w0, w1, w2, w3};
+  const std::array<int, 4> before{w0, w1, w2, w3};
   *run_add = before[word];
   return true;
 }

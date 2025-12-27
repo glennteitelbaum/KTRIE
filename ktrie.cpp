@@ -61,7 +61,11 @@ std::vector<std::string> tests = {
     "fan",      "far",         "farm",     "fast",
     "father",   "favorite",    "fear",     "feature",
     "federal",  "fee",         "feed",     "feel",
-    "feeling",  "feet",        "fellow",   "female"};
+    "feeling",  "feet",        "fellow",   "female",
+    "aReallyLongStringAddedToTestSKIPs",
+    "aReallyLongStringAddedToTestSKIPsAlso",
+   "DONE"
+};
 
 constexpr int NUM_KEYS = 1000000;
 
@@ -231,7 +235,8 @@ void test_int_key() {
 
   std::vector<int> keys;
   keys.reserve(NUM_KEYS);
-  for (int i = 0; i < NUM_KEYS; ++i) {
+  for (int i = 0; i < NUM_KEYS/2; ++i) {
+    keys.push_back(i - NUM_KEYS / 4);
     keys.push_back(dist(rng));
   }
 
@@ -301,7 +306,8 @@ void test_unsigned_int_key() {
 
   std::vector<unsigned int> keys;
   keys.reserve(NUM_KEYS);
-  for (int i = 0; i < NUM_KEYS; ++i) {
+  for (int i = 0; i < NUM_KEYS / 2; ++i) {
+    keys.push_back(i);
     keys.push_back(dist(rng));
   }
 
@@ -370,7 +376,8 @@ void test_int64_key() {
 
   std::vector<int64_t> keys;
   keys.reserve(NUM_KEYS);
-  for (int i = 0; i < NUM_KEYS; ++i) {
+  for (int i = 0; i < NUM_KEYS / 2; ++i) {
+    keys.push_back(i - NUM_KEYS / 4);
     keys.push_back(dist(rng));
   }
 
@@ -442,7 +449,8 @@ void test_uint64_key() {
 
   std::vector<uint64_t> keys;
   keys.reserve(NUM_KEYS);
-  for (int i = 0; i < NUM_KEYS; ++i) {
+  for (int i = 0; i < NUM_KEYS / 2; ++i) {
+    keys.push_back(i);
     keys.push_back(dist(rng));
   }
 
