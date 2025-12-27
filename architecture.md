@@ -49,6 +49,7 @@ Bit:  63    59 58                                              0
       │flags │              pointer address                       │
       ├──────┼────────────────────────────────────────────────────┤
       │5 bits│                   59 bits                          │
+      ├──────┼────────────────────────────────────────────────────┤
 
 Flags (5 bits):
   bit 0: EOS   - End of string, next node is value
@@ -62,10 +63,10 @@ Flags (5 bits):
 
 ```
 Byte: [0]   [1]   [2]   [3]   [4]   [5]   [6]      [7]
-      ├─────┼─────┼─────┼─────┼─────┼─────┼────────┼───────┤
+      ├─────┼─────┼─────┼─────┼─────┼─────┼─────────┼───────┤
       │char │char │char │char │char │char │new_flags│length │
       │  0  │  1  │  2  │  3  │  4  │  5  │ (5 used)│ (1-6) │
-      ├─────┴─────┴─────┴─────┴─────┴─────┴────────┴───────┤
+      ├─────┴─────┴─────┴─────┴─────┴─────┴─────────┴───────┤
 
 Example: HOP for "cat" with LIST following
       ['c'] ['a'] ['t'] [0]  [0]  [0]  [LIST] [3]
@@ -85,10 +86,11 @@ If we used 7 characters, we'd need 9 bytes (7 chars + flags + length), exceeding
 ```
 SKIP Header (1 node):
 Bit:  63        59 58                                          0
-      ├──────────┼──────────────────────────────────────────────┤
+      ├──────────┼───────────────────────────────────────────────┤
       │new_flags │                  length                       │
-      ├──────────┼──────────────────────────────────────────────┤
+      ├──────────┼───────────────────────────────────────────────┤
       │  5 bits  │                 59 bits                       │
+      ├──────────┼───────────────────────────────────────────────┤
 
 Following Data Nodes (⌈length/8⌉ nodes):
       [char0-7] [char8-15] [char16-23] ...
@@ -196,30 +198,33 @@ enum flags : uint8_t {
 
 ### Flag Interaction Rules
 
-```
+
 Valid flag combinations and their meanings:
 
-┌─────────────────┬────────────────────────────────────────────────┐
-│ Flags           │ Meaning                                        │
-├─────────────────┼────────────────────────────────────────────────┤
-│ EOS             │ Just a value, no continuation                  │
-│ EOS | HOP       │ Value here, then more chars (HOP), then more   │
-│ EOS | SKIP      │ Value here, then more chars (SKIP), then more  │
-│ EOS | LIST      │ Value here, then branch point                  │
-│ EOS | POP       │ Value here, then branch point                  │
-│ HOP             │ Chars inline, then interpret new_flags         │
-│ HOP | LIST      │ (Invalid: HOP's new_flags would have LIST)     │
-│ SKIP            │ Long chars, then interpret new_flags           │
-│ LIST            │ Branch point, ≤7 children                      │
-│ POP             │ Branch point, 8+ children                      │
-│ EOS | HOP | LIST│ Value, then chars, then branch                 │
-└─────────────────┴────────────────────────────────────────────────┘
+| Flags | Meaning  |
+|-------|----------|
+| EOS | Just a value, no continuation |
+│ EOS then HOP[1-6] | Value here, then more chars (HOP), then more  |
+│ EOS then SKIP[7+] | Value here, then more chars (SKIP), then more |
+│ EOS then LIST[2-7] | Value here, then branch point |
+│ EOS then POP[8-64] | Value here, then branch point |
+│ HOP[1-6] | Chars inline, then interpret new_flags |
+│ SKIP[7+] | Long chars, then interpret new_flags |
+│ LIST[2-7] | Branch point |
+│ POP[8-64] | Branch point |
 
-Invalid combinations:
-- HOP | SKIP       (mutually exclusive: use one or the other)
-- LIST | POP       (mutually exclusive: one branch type)
-- HOP | LIST       (LIST would be in HOP's new_flags, not initial flags)
-```
+Invalid combinations or lengths:
+
+| Flags | Reason |
+|-------|--------|
+| Both HOP and SKIP | Mutually exclusive: use one or the other |
+| Both LIST and POP  | Mutually exclusive: one branch type |
+| HOP[7+] | Would be a SKIP |
+| SKIP[<7] | Would be a HOP |
+| LIST[1]  | Character would be a HOP or at end of prior HOP or LIST |
+| LIST[8+] | Would be a POP |
+| POP[<8] | Would be a LIST |
+| >1 HOP/SKIP in Numerics | Numerics are Fixed Length |
 
 ### State Machine for Node Interpretation
 
@@ -233,20 +238,20 @@ Invalid combinations:
                     ┌─────────────────────────────────────┐
         ┌───────────│           Has EOS bit?              │───────────┐
         │ Yes       └─────────────────────────────────────┘    No     │
-        ▼                                                              │
-┌───────────────┐                                                      │
-│ Read value    │                                                      │
-│ from node     │                                                      │
-│ Advance ptr   │                                                      │
-│ Clear EOS bit │                                                      │
-└───────┬───────┘                                                      │
-        │                                                              │
-        └──────────────────────────┬───────────────────────────────────┘
+        ▼                                                             │
+┌───────────────┐                                                     │
+│ Read value    │                                                     │
+│ from node     │                                                     │
+│ Advance ptr   │                                                     │
+│ Clear EOS bit │                                                     │
+└───────┬───────┘                                                     │
+        │                                                             │
+        └──────────────────────────┬──────────────────────────────────┘
                                    ▼
                     ┌─────────────────────────────────────┐
         ┌───────────│        Has HOP or SKIP bit?         │───────────┐
         │ HOP       └─────────────────────────────────────┘    SKIP   │
-        ▼                             │ Neither                        ▼
+        ▼                             │ Neither                       ▼
 ┌───────────────┐                     │                    ┌───────────────┐
 │ Read HOP node │                     │                    │ Read SKIP hdr │
 │ Extract chars │                     │                    │ Read data nds │
@@ -255,12 +260,12 @@ Invalid combinations:
 │ Use new_flags │                     │                    │ Use new_flags │
 └───────┬───────┘                     │                    └───────┬───────┘
         │                             │                            │
-        └──────────────────┬──────────┴────────────────────────────┘
-                           ▼
+        └─────────────────────────────┼────────────────────────────┘
+                                      ▼
                     ┌─────────────────────────────────────┐
         ┌───────────│       Has LIST or POP bit?          │───────────┐
         │ LIST      └─────────────────────────────────────┘    POP    │
-        ▼                             │ Neither                        ▼
+        ▼                             │ Neither                       ▼
 ┌───────────────┐                     │                    ┌───────────────┐
 │ Read LIST hdr │                     │                    │ Read 4 POP    │
 │ Find char idx │                     │                    │ bitmap nodes  │
@@ -382,8 +387,8 @@ int offset(char c) {
 **Structure:**
 ```
 [POP flag] → [Bitmap0][Bitmap1][Bitmap2][Bitmap3] → [Ptr0][Ptr1]...
-                │                                       │
-                └─ 256 bits total (4 × 64)              └─ popcount(bitmap) ptrs
+                │                                   │
+                └─ 256 bits total (4 × 64)          └─ popcount(bitmap) ptrs
 ```
 
 **Why 8+ threshold:**
@@ -424,26 +429,24 @@ Path compression collapses chains of single-child nodes into a single node:
 
 ```
 Without compression:          With compression:
-      [h]                          [HOP:"hello"]
-       │                                 │
-      [e]                              [EOS]
-       │                                 │
-      [l]                             value
+      [h]                          [HOP:"hello"][EOS: value]
+       │ 
+      [e]
+       │
+      [l]
        │
       [l]
        │
       [o]
        │
-     [EOS]
-       │
-     value
+     [EOS: value]
 
-5 nodes + value               1 node + value
+6 nodes                       1 node
 ```
 
 ### Compression Rules
 
-```
+
 1. Single-child chains become HOP (≤6 chars) or SKIP (>6 chars)
 
 2. HOP/SKIP store "new_flags" to indicate what follows:
@@ -453,9 +456,9 @@ Without compression:          With compression:
 
 3. For fixed-length (numeric) keys:
    - At most ONE HOP or SKIP per node array
-   - No chaining of HOP→HOP or SKIP→SKIP
+   - No chaining of HOP or SKIP→HOP or SKIP
+   - EOS only at end (FIXED LENGTH)
    - Simplifies processing
-```
 
 ### Compression During Insert
 
@@ -467,10 +470,10 @@ Before inserting "help" into trie with "hello":
 After:
 
   [HOP:"hel"] → [LIST:'l','p']
-                     │      │
-                     │      └→ [HOP:"p"] → [EOS:value2]
-                     │
-                     └→ [HOP:"lo"] → [EOS:value1]
+                       │   │
+                       │   └→ [HOP:"p"] → [EOS:"help"]
+                       │
+                       └→ [HOP:"lo"] → [EOS:"hello"]
                      
 The shared prefix "hel" is compressed, branch at 'l' vs 'p'.
 ```
@@ -569,14 +572,9 @@ Final state:
        │         │
        ▼         ▼
     ┌──────┐  ┌──────┐
-    │"lo"  │  │ EOS  │
-    │ EOS  │  └──┬───┘
-    └──┬───┘     │
-       │         ▼
-       ▼       [99]
-    ┌──────┐
-    │  42  │
-    └──────┘
+    │"lo"  │  │EOS:99│
+    │EOS:42│  └──┬───┘
+    └──┬───┘   
 ```
 
 ---
@@ -648,47 +646,47 @@ function INSERT(key, value):
 ### State Transitions on Insert
 
 ```
-┌─────────────────────────────────────────────────────────────────────┐
+┌──────────────────────────────────────────────────────────────────────┐
 │                     INSERT STATE TRANSITIONS                         │
-├─────────────────────────────────────────────────────────────────────┤
+├──────────────────────────────────────────────────────────────────────┤
 │                                                                      │
 │  EMPTY TRIE                                                          │
 │      │                                                               │
-│      ├── key.len == 0 ──────────────→ [EOS:value]                   │
-│      ├── key.len ≤ 6 ───────────────→ [HOP:key|EOS] → [value]       │
-│      └── key.len > 6 ───────────────→ [SKIP:key|EOS] → [value]      │
+│      ├── key.len == 0 ──────────────→ [EOS:value]                    │
+│      ├── key.len ≤ 6 ───────────────→ [HOP:key|EOS] → [value]        │
+│      └── key.len > 6 ───────────────→ [SKIP:key|EOS] → [value]       │
 │                                                                      │
 │  EXISTING HOP "abcdef"                                               │
 │      │                                                               │
 │      ├── insert "abc" (prefix)                                       │
-│      │       → [HOP:"abc"|EOS|LIST] → [value] → [LIST:'d'] → [ptr]  │
-│      │                                              └→ [HOP:"ef"...]│
+│      │       → [HOP:"abc"|EOS|LIST] → [value] → [LIST:'d'] → [ptr]   │
+│      │                                              └→ [HOP:"ef"...] │
 │      │                                                               │
-│      ├── insert "abcxyz" (mismatch at 'd' vs 'x')                   │
-│      │       → [HOP:"abc"|LIST] → [LIST:'d','x']                    │
-│      │              ├─ 'd' → [HOP:"ef"...] (old suffix)             │
-│      │              └─ 'x' → [HOP:"yz"|EOS] → [value] (new)         │
+│      ├── insert "abcxyz" (mismatch at 'd' vs 'x')                    │
+│      │       → [HOP:"abc"|LIST] → [LIST:'d','x']                     │
+│      │              ├─ 'd' → [HOP:"ef"...] (old suffix)              │
+│      │              └─ 'x' → [HOP:"yz"|EOS] → [value] (new)          │
 │      │                                                               │
-│      └── insert "abcdefghi" (extends)                               │
-│              → [HOP:"abcdef"|HOP] → [HOP:"ghi"|EOS] → [value]       │
+│      └── insert "abcdefghi" (extends)                                │
+│              → [HOP:"abcdef"|HOP] → [HOP:"ghi"|EOS] → [value]        │
 │              (for variable-length keys only)                         │
 │                                                                      │
 │  EXISTING LIST ['a','m','z']                                         │
 │      │                                                               │
-│      ├── insert new char 'f' (fits)                                 │
-│      │       → [LIST:'a','f','m','z'] (sorted insert)               │
+│      ├── insert new char 'f' (fits)                                  │
+│      │       → [LIST:'a','f','m','z'] (sorted insert)                │
 │      │                                                               │
-│      └── insert when count=7 (full)                                 │
+│      └── insert when count=7 (full)                                  │
 │              → LIST_TO_POP conversion                                │
-│              → [POP:bitmap] → [pointers...]                         │
+│              → [POP:bitmap] → [pointers...]                          │
 │                                                                      │
 │  EXISTING POP (8+ children)                                          │
 │      │                                                               │
-│      └── insert new char                                            │
+│      └── insert new char                                             │
 │              → Set bit in bitmap                                     │
 │              → Insert pointer in sorted position                     │
 │                                                                      │
-└─────────────────────────────────────────────────────────────────────┘
+└──────────────────────────────────────────────────────────────────────┘
 ```
 
 ### Breaking a HOP
@@ -718,7 +716,7 @@ STEP 3: Build new structure
                                              │      │
                   ┌──────────────────────────┘      │
                   ▼                                 │
-           [HOP:"lo"|EOS|2] → [value1]             │
+           [HOP:"lo"|EOS|2] → [value1]              │
                   │                                 │
                   └─ old suffix                     │
                                                     │
@@ -911,44 +909,44 @@ function DELETE(key):
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
-│                     DELETE STATE TRANSITIONS                         │
+│                     DELETE STATE TRANSITIONS                        │
 ├─────────────────────────────────────────────────────────────────────┤
-│                                                                      │
-│  DELETE EOS (value node)                                             │
-│      │                                                               │
+│                                                                     │
+│  DELETE EOS (value node)                                            │
+│      │                                                              │
 │      ├── Only EOS in array, no other content                        │
 │      │       → Delete entire array                                  │
 │      │       → Parent's child pointer becomes null                  │
 │      │       → May trigger parent cleanup                           │
-│      │                                                               │
+│      │                                                              │
 │      ├── EOS followed by HOP/SKIP (key is prefix)                   │
 │      │       → Remove EOS node, shift remaining left                │
 │      │       → Update flags to remove EOS bit                       │
-│      │                                                               │
+│      │                                                              │
 │      └── EOS followed by LIST/POP (key is prefix)                   │
 │              → Remove EOS node, shift remaining left                │
 │              → Update flags to remove EOS bit                       │
-│                                                                      │
-│  PARENT CLEANUP (after child deletion)                               │
-│      │                                                               │
+│                                                                     │
+│  PARENT CLEANUP (after child deletion)                              │
+│      │                                                              │
 │      ├── LIST with 2+ children remaining                            │
 │      │       → Remove char and pointer from LIST                    │
 │      │       → Shift remaining chars/pointers                       │
 │      │       → Decrement count                                      │
-│      │                                                               │
+│      │                                                              │
 │      ├── LIST with 1 child remaining                                │
 │      │       → Remove LIST entirely                                 │
-│      │       → If only HOP/SKIP before: may need to remove those   │
+│      │       → If only HOP/SKIP before: may need to remove those    │
 │      │       → Recurse to grandparent if empty                      │
-│      │                                                               │
+│      │                                                              │
 │      ├── POP with 8+ children remaining                             │
 │      │       → Clear bit in bitmap                                  │
 │      │       → Remove pointer, shift remaining                      │
-│      │                                                               │
+│      │                                                              │
 │      └── POP with 7 children remaining                              │
-│              → POP_TO_LIST conversion                                │
-│              → Rebuild as LIST structure                             │
-│                                                                      │
+│              → POP_TO_LIST conversion                               │
+│              → Rebuild as LIST structure                            │
+│                                                                     │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -1115,65 +1113,65 @@ function FIND(key):
             │ key_pos = 0                  │
             └──────────────┬───────────────┘
                            │
-         ┌─────────────────┴─────────────────┐
-         │                                   │
-         ▼                                   │
-    ┌─────────┐                              │
-    │Has EOS? │──Yes──→ key_pos==len? ──Yes──┼──→ return VALUE
-    └────┬────┘              │               │
-         │ No                │ No            │
-         │                   ▼               │
-         │            advance, clear EOS     │
-         │                   │               │
-         └────────┬──────────┘               │
-                  │                          │
-                  ▼                          │
-    ┌─────────────────────┐                  │
-    │ Has HOP or SKIP?    │                  │
-    └──────────┬──────────┘                  │
-               │                             │
-         ┌─────┴─────┐                       │
-         │ HOP/SKIP  │                       │
-         ▼           ▼                       │
-    ┌─────────┐ ┌─────────┐                  │
-    │ Match?  │ │ Match?  │                  │
-    └────┬────┘ └────┬────┘                  │
-         │           │                       │
-    No ──┼── Yes     │                       │
-         │    │      │                       │
-         ▼    │      │                       │
-      NULL    │      │                       │
-              ▼      ▼                       │
-         advance key_pos                     │
-         update flags                        │
-              │                              │
-              ▼                              │
-    ┌─────────────────────┐                  │
-    │ Has LIST or POP?    │──No──→ return NULL
-    └──────────┬──────────┘                  │
-               │ Yes                         │
-               ▼                             │
-    ┌─────────────────────┐                  │
-    │ key_pos >= key.len? │──Yes──→ return NULL
-    └──────────┬──────────┘                  │
-               │ No                          │
-               ▼                             │
-    ┌─────────────────────┐                  │
-    │ Find char in branch │                  │
-    └──────────┬──────────┘                  │
-               │                             │
-         ┌─────┴─────┐                       │
-         │           │                       │
-      Found      Not Found                   │
-         │           │                       │
-         │           ▼                       │
-         │       return NULL                 │
-         │                                   │
-         ▼                                   │
-    Follow pointer                           │
-    key_pos++                                │
-         │                                   │
-         └───────────────────────────────────┘
+         ┌─────────────────┴────────────────────────────────────┐
+         │                                                      │
+         ▼                                                      │
+    ┌─────────┐                                                 │
+    │Has EOS? │──Yes──→ key_pos==len? ──Yes────→ return VALUE   │
+    └────┬────┘              │                                  │
+         │ No                │ No                               │
+         │                   ▼                                  │
+         │            advance, clear EOS                        │
+         │                   │                                  │
+         └────────┬──────────┘                                  │
+                  │                                             │
+                  ▼                                             │
+    ┌─────────────────────┐                                     │
+    │ Has HOP or SKIP?    │                                     │
+    └──────────┬──────────┘                                     │
+               │                                                │
+         ┌─────┴─────┐                                          │
+         │ HOP/SKIP  │                                          │
+         ▼           ▼                                          │
+          ┌─────────┐                                           │
+          │ Match?  │                                           │
+          └────┬────┘                                           │
+               │                                                │
+          No ──┴── Yes                                          │
+          │         │                                           │
+          ▼         │                                           │
+         NULL       │                                           │
+                    ▼                                           │
+         advance key_pos                                        │
+         update flags                                           │
+              │                                                 │
+              ▼                                                 │
+    ┌─────────────────────┐                                     │
+    │ Has LIST or POP?    │──No──→ return NULL                  │
+    └──────────┬──────────┘                                     │
+               │ Yes                                            │
+               ▼                                                │
+    ┌─────────────────────┐                                     │
+    │ key_pos >= key.len? │──Yes──→ return NULL                 │
+    └──────────┬──────────┘                                     │
+               │ No                                             │
+               ▼                                                │
+    ┌─────────────────────┐                                     │
+    │ Find char in branch │                                     │
+    └──────────┬──────────┘                                     │
+               │                                                │
+         ┌─────┴─────┐                                          │
+         │           │                                          │
+      Found      Not Found                                      │
+         │           │                                          │
+         │           ▼                                          │
+         │       return NULL                                    │
+         │                                                      │
+         ▼                                                      │
+    Follow pointer                                              │
+    key_pos++                                                   │
+         │                                                      │
+         └──────────────────────────────────────────────────────┘
 ```
 
 ---
@@ -1347,30 +1345,30 @@ function FIND_PREVIOUS(current_key):
 ```
 Iterator states:
 
-┌─────────────────────────────────────────────────────────────────────┐
-│                                                                      │
-│   ┌─────────┐                                                        │
-│   │  BEGIN  │                                                        │
-│   └────┬────┘                                                        │
-│        │                                                             │
-│        ▼ find_first()                                                │
-│   ┌─────────┐     ┌─────────┐                                        │
-│   │ AT_KEY  │────▶│   END   │  (no more keys)                       │
-│   └────┬────┘     └─────────┘                                        │
-│        │                 ▲                                           │
-│        │ ++              │                                           │
-│        ▼                 │                                           │
-│   ┌─────────┐            │                                           │
-│   │FIND_NEXT│────────────┘  (no successor)                          │
-│   └────┬────┘                                                        │
-│        │                                                             │
-│        │ found successor                                             │
-│        ▼                                                             │
-│   ┌─────────┐                                                        │
-│   │ AT_KEY  │  (loop back for next ++)                              │
-│   └─────────┘                                                        │
-│                                                                      │
-└─────────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────┐
+│                                                  │
+│   ┌─────────┐                                    │
+│   │  BEGIN  │                                    │
+│   └────┬────┘                                    │
+│        │                                         │
+│        ▼ find_first()                            │
+│   ┌─────────┐     ┌─────────┐                    │
+│   │ AT_KEY  │───> │   END   │  (no more keys)    │
+│   └────┬────┘     └─────────┘                    │
+│        │                 ▲                       │
+│        │ ++              │                       │
+│        ▼                 │                       │
+│   ┌─────────┐            │                       │
+│   │FIND_NEXT│────────────┘  (no successor)       │
+│   └────┬────┘                                    │
+│        │                                         │
+│        │ found successor                         │
+│        ▼                                         │
+│   ┌─────────┐                                    │
+│   │ AT_KEY  │  (loop back for next ++)           │
+│   └─────────┘                                    │
+│                                                  │
+└──────────────────────────────────────────────────┘
 ```
 
 ---
@@ -1395,7 +1393,7 @@ SIMPLE CASE (no shared prefix with others):
   
 WITH BRANCH (shared prefix):
   [HOP:2_bytes|LIST|2] → [LIST:'a','b'] → [ptr][ptr]
-                              │               │     │
+                              │             │     │
                               └─ After 2 bytes, branch on byte 3
                               
                               Each child has remaining 1 byte:
@@ -1412,18 +1410,18 @@ NUMERIC KEY PROCESSING (simplified):
                     │ from parent     │
                     └────────┬────────┘
                              │
-            ┌────────────────┼────────────────┐
-            │                │                │
-            ▼                ▼                ▼
+            ┌────────────────┼──────────────┐
+            │                │              │
+            ▼                ▼              ▼
        ┌─────────┐     ┌─────────┐     ┌─────────┐
        │   HOP   │     │  SKIP   │     │  (none) │
        └────┬────┘     └────┬────┘     └────┬────┘
-            │                │                │
-            ▼                ▼                │
-       Match chars      Match chars          │
-       Get new_flags    Get new_flags        │
-            │                │                │
-            └────────────────┼────────────────┘
+            │               │               │
+            ▼               ▼               │
+       Match chars      Match chars         │
+       Get new_flags    Get new_flags       │
+            │                │              │
+            └────────────────┼──────────────┘
                              │
                              ▼
                     ┌─────────────────┐
