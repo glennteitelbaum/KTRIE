@@ -82,28 +82,33 @@ struct hash_node {
 ### KTRIE - Compressed Trie
 
 ```
-[Head] -> [HOP "pre"] -> [LIST 'a','b'] -> [ptr][ptr]
-                              |               |     |
-                              |               |     +-> [HOP "fix"] -> [EOS][value]
-                              |               +-> [EOS][value]
-                              |
-                              (shared prefix "pre")
+Storing 'pre', 'prefix' and 'suffix' with a depth of 2
+[EOS] Represents the End of String and pointer to the value
+
+Level 0: [Head]
+Level 1:  +-> [LIST 'p', 's'] [PTR: 'p'][PTR: 's']
+Level2a                       |         +-> [HOP "uffix"][EOS: suffix]                                  
+Level2b:                      +-> [HOP "pre"] [EOS:'pre'] [HOP "fix"] [EOS:'prefix']
+                                             ^                     
+                                             (Note: shared prefix "pre")
 ```
 
 **Node Structure:**
 ```cpp
 // Every node is exactly 8 bytes
-union node {
-    uint64_t raw;               // Raw 64-bit value
-    // Interpreted as one of:
-    struct { uint64_t flags:5, ptr:59; };     // Dirty pointer
-    struct { char chars[6], flags, len; };    // HOP (1-6 chars inline)
-    struct { uint64_t flags:5, length:59; };  // SKIP header
-    struct { char chars[7], count; };         // LIST (≤7 sorted chars)
-    uint64_t pop_bitmap;                      // POP (part of 256-bit bitmap)
-    T value;                                  // Inline value (if sizeof(T) ≤ 8)
-};
-// Fixed 8 bytes per node, regardless of interpretation
+It acts like a union but each type is stored in a uint64_t regardless of interpretation
+It is taken out and put back using std::bit_cast
+
+uint64_t raw;                             // Raw 64-bit value
+// Interpreted as one of:
+struct { uint64_t flags:5, ptr:59; };     // Dirty pointer
+struct { char chars[6], flags, len; };    // HOP (1-6 chars inline)
+struct { uint64_t flags:5, length:59; };  // SKIP header
+struct { char chars[7], count; };         // LIST (≤7 sorted chars)
+uint64_t pop_bitmap;                      // POP (first part of 256-bit bitmap)
+T value;                                  // EOS Inline value (sizeof(T) ≤ 8) otherwise a pointer
+
+// Stored in the uint64_t regardless of interpretation
 ```
 
 **Characteristics:**
