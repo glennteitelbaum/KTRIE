@@ -39,7 +39,7 @@
 
 #pragma once
 
-
+#include <climits>
 #include <initializer_list>
 #include <string>
 #include <type_traits>
@@ -55,6 +55,8 @@ namespace gteitelbaum {
 // Static Assertions
 //==============================================================================
 
+static_assert(sizeof(void*) == 8, "64-bit pointers required");
+static_assert(CHAR_BIT == 8, "A char must be 8 bits");
 static_assert(sizeof(node<int, 0>) == 8, "Node must be 8 bytes");
 static_assert((std::endian::native == std::endian::big) ||
                   (std::endian::native == std::endian::little),
