@@ -585,47 +585,54 @@ class ktrie_base {
         // These nodes compress multiple characters into fewer nodes.
         // We must match all characters exactly or the key doesn't exist.
         //
-        if (has_bit(flags, hop_bit)) {
-          // HOP: 1-6 characters stored inline in a single 64-bit node
-          // 
-          // HOP Memory Layout:
-          // ┌──────────────────────────────────────────┬─────────┬─────┐
-          // │ chars[0..5] (up to 6 bytes)              │new_flags│ len │
-          // └──────────────────────────────────────────┴─────────┴─────┘
-          // 
-          const auto& hop = run->get_hop();
-          
-          // matches() performs SWAR comparison:
-          // - Broadcasts comparison across all byte positions simultaneously
-          // - Returns false if any character differs or if not enough input
-          if (!hop.matches(in, last - in)) return nullptr;
-          
-          in += hop.get_hop_sz();  // Advance input past matched chars
-          flags = hop.get_new_flags();  // Get flags for next part of array
-          run++;  // Move past HOP node
-          
-        } else if (has_bit(flags, skip_bit)) {
-          // SKIP: Longer strings (7+ characters) stored as header + data nodes
-          //
-          // SKIP Memory Layout:
-          // Node 0: [flags (5 bits) | length (59 bits)]  <- header
-          // Node 1+: packed character data (8 chars per node)
-          //
-          t_skip sk = run->get_skip();
-          size_t slen = sk.get_skip_len();
-          flags = sk.get_new_flags();
-          
-          // Check if enough input remains
-          if (static_cast<size_t>(last - in) < slen) return nullptr;
-          
-          run++;  // Move past SKIP header
-          
-          // do_find_skip performs memcmp on the packed character data
-          if (!do_find_skip(reinterpret_cast<const char*>(run), in, slen))
-            return nullptr;
-          
-          run += t_skip::num_skip_nodes(slen);  // Skip past data nodes
-          in += slen;  // Advance input
+        if (has_bit(flags, hop_bit | skip_bit)) { // one less branch
+          if (has_bit(flags, hop_bit)) [[ likely ]] {
+            // HOP: 1-6 characters stored inline in a single 64-bit node
+            //
+            // HOP Memory Layout:
+            // ┌──────────────────────────────────────────┬─────────┬─────┐
+            // │ chars[0..5] (up to 6 bytes)              │new_flags│ len │
+            // └──────────────────────────────────────────┴─────────┴─────┘
+            //
+            const auto& hop = run->get_hop();
+
+            // matches() performs SWAR comparison:
+            // - Broadcasts comparison across all byte positions simultaneously
+            // - Returns false if any character differs or if not enough input
+            if (!hop.matches(in, last - in)) return nullptr;
+
+            in += hop.get_hop_sz();       // Advance input past matched chars
+            flags = hop.get_new_flags();  // Get flags for next part of array
+            run++;                        // Move past HOP node
+
+          } else { // (has_bit(flags, skip_bit)) [[unlikely]] {
+            // SKIP: Longer strings (7+ characters) stored as header + data
+            // nodes
+            //
+            // SKIP is unlikely for fixed lengths keys since they are short
+            // but it is required for edge cases instead of allowing two HOPs or
+            // later Numerics of longer lengths
+            //
+            // SKIP Memory Layout:
+            // Node 0: [flags (5 bits) | length (59 bits)]  <- header
+            // Node 1+: packed character data (8 chars per node)
+            //
+            t_skip sk = run->get_skip();
+            size_t slen = sk.get_skip_len();
+            flags = sk.get_new_flags();
+
+            // Check if enough input remains
+            if (static_cast<size_t>(last - in) < slen) return nullptr;
+
+            run++;  // Move past SKIP header
+
+            // do_find_skip performs memcmp on the packed character data
+            if (!do_find_skip(reinterpret_cast<const char*>(run), in, slen))
+              return nullptr;
+
+            run += t_skip::num_skip_nodes(slen);  // Skip past data nodes
+            in += slen;                           // Advance input
+          }
         }
         
         //----------------------------------------------------------------------
@@ -731,15 +738,16 @@ class ktrie_base {
           }
           
           if (has_bit(flags, hop_bit | skip_bit)) {
-            if (has_bit(flags, hop_bit)) {
+            if (has_bit(flags, hop_bit)) [[ likely ]] {
               // HOP node processing (same as fixed_len path)
+              // More hops than skips
               const auto& hop = run->get_hop();
               if (!hop.matches(in, last - in)) return nullptr;
               in += hop.get_hop_sz();
               flags = hop.get_new_flags();
               run++;
               
-            } else {
+            } else {  // has_bit(flags, hop_bit)) [[ unlikely ]]
               // SKIP node processing (same as fixed_len path)
               t_skip sk = run->get_skip();
               size_t slen = sk.get_skip_len();
@@ -764,11 +772,11 @@ class ktrie_base {
         if (!has_bit(flags, list_bit | pop_bit)) return nullptr;
         if (in >= last) return nullptr;
         
-        if (has_bit(flags, list_bit)) {
+        if (has_bit(flags, list_bit)) [[ likely ]] {
           int off = run->get_list().offset(*in);
           if (off == 0) return nullptr;
           run += off;
-        } else {
+        } else {  // has_bit(flags, pop_bit)) [[ unlikely ]] 
           int off;
           if (!do_find_pop(reinterpret_cast<const t_val*>(run), *in, &off))
             return nullptr;
@@ -935,8 +943,15 @@ class ktrie_base {
       std::cout << "  (empty)" << std::endl;
       return;
     }
-    
-    if (only_summary) {
+
+     if (!only_summary) {
+      //----------------------------------------------------------------------
+      // Full mode: print entire tree structure
+      //----------------------------------------------------------------------
+      pretty::pretty_print_node(0, ptr, flags, "");
+      std::cout << std::endl;
+    }
+
       //----------------------------------------------------------------------
       // Summary mode: collect and display statistics
       //----------------------------------------------------------------------
@@ -985,13 +1000,6 @@ class ktrie_base {
                 << std::endl;
 
       std::cout << std::endl;
-      
-    } else {
-      //----------------------------------------------------------------------
-      // Full mode: print entire tree structure
-      //----------------------------------------------------------------------
-      pretty::pretty_print_node(0, ptr, flags, "");
-    }
   }
 
   /**

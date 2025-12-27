@@ -205,7 +205,7 @@ void test_string() {
   }
   report(count == static_cast<int>(K.size()), "Iterator count matches size");
 
-  K.pretty_print(true);
+  K.pretty_print(false);
 
   // Erase
   size_t erased = 0;
