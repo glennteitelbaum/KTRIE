@@ -14,7 +14,6 @@ A **sorted**, **compressed** associative container for integer keys (`uint8\_t` 
 
 
 
-* [Abstract](./ktrie_abstract.md)
 * [Concepts](./concepts.md)
 
 
@@ -23,16 +22,16 @@ Performance charts:
 
 
 
-* [u16 vs map/umap](https://glennteitelbaum.github.io/KNTRIE/chart16.html)
+* [u16 vs map/umap](https://glennteitelbaum.github.io/KTRIE/KNTRIE/chart16.html)
 
 
-* [u32 vs map/umap](https://glennteitelbaum.github.io/KNTRIE/chart32.html)
+* [u32 vs map/umap](https://glennteitelbaum.github.io/KTRIE/KNTRIE/chart32.html)
 
 
-* [u64 vs map/umap](https://glennteitelbaum.github.io/KNTRIE/chart64.html)
+* [u64 vs map/umap](https://glennteitelbaum.github.io/KTRIE/KNTRIE/chart64.html)
 
 
-* [u16 vs u32 vs u64](https://glennteitelbaum.github.io/KNTRIE/chartX.html)
+* [u16 vs u32 vs u64](https://glennteitelbaum.github.io/KTRIE/KNTRIE/chartX.html)
 
 
 
