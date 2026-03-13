@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>kntrie Benchmark</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+<style>
+  body { margin:0; background:#0f0f1a; color:#ddd; font-family:system-ui,sans-serif; }
+  .wrap { max-width:700px; margin:0 auto; padding:16px 12px; }
+  h2 { margin:0 0 4px; font-size:18px; font-weight:700; text-align:center; }
+  .sub { text-align:center; color:#777; font-size:12px; margin:0 0 12px; }
+  .btns { display:flex; justify-content:center; gap:8px; margin-bottom:16px; }
+  .btns button { padding:6px 16px; border-radius:6px; border:1px solid #444;
+    background:#1a1a2e; color:#aaa; cursor:pointer; font-size:13px; font-weight:600; }
+  .btns button.active { background:#3b82f6; color:#fff; }
+  .chart-box { margin-bottom:24px; }
+  .chart-box h3 { margin:0 0 6px; font-size:14px; font-weight:600; text-align:center; }
+  canvas { background:#12122a; border-radius:8px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h2>kntrie Benchmark (u32 &rarr; i32)</h2>
+  <p class="sub">Log-log &middot; Per-entry &middot; Lower is better &middot; FND=100% hit, NF=100% miss</p>
+  <div class="btns">
+    <button class="active" onclick="show('random')">random</button>
+    <button onclick="show('sequential')">sequential</button>
+  </div>
+  <div class="chart-box"><h3>Find (ns/entry)</h3><canvas id="c_find"></canvas></div>
+  <div class="chart-box"><h3>Iteration (ns/entry)</h3><canvas id="c_iter"></canvas></div>
+  <div class="chart-box"><h3>Insert (ns/entry)</h3><canvas id="c_insert"></canvas></div>
+  <div class="chart-box"><h3>Erase N/2 (ns/entry)</h3><canvas id="c_erase"></canvas></div>
+  <div class="chart-box"><h3>Memory (B/entry)</h3><canvas id="c_mem"></canvas></div>
+</div>
+<script>
+const RAW_DATA = [
+  {pattern:"random",N:100,kntrie_fnd:0.0006,kntrie_nf:0.0006,kntrie_insert:0.0147,kntrie_erase:0.0080,kntrie_iter:0.0072,kntrie_mem:1080,map_fnd:0.0028,map_nf:0.0022,map_insert:0.0132,map_erase:0.0096,map_iter:0.0046,map_mem:4000,umap_fnd:0.0008,umap_nf:0.0012,umap_insert:0.0076,umap_erase:0.0061,umap_iter:0.0044,umap_mem:2424},
+  {pattern:"random",N:150,kntrie_fnd:0.0013,kntrie_nf:0.0012,kntrie_insert:0.0181,kntrie_erase:0.0106,kntrie_iter:0.0080,kntrie_mem:2104,map_fnd:0.0055,map_nf:0.0046,map_insert:0.0202,map_erase:0.0132,map_iter:0.0058,map_mem:6000,umap_fnd:0.0017,umap_nf:0.0024,umap_insert:0.0093,umap_erase:0.0070,umap_iter:0.0040,umap_mem:3656},
+  {pattern:"random",N:225,kntrie_fnd:0.0020,kntrie_nf:0.0018,kntrie_insert:0.0257,kntrie_erase:0.0110,kntrie_iter:0.0115,kntrie_mem:2104,map_fnd:0.0090,map_nf:0.0078,map_insert:0.0376,map_erase:0.0160,map_iter:0.0063,map_mem:9000,umap_fnd:0.0027,umap_nf:0.0039,umap_insert:0.0114,umap_erase:0.0076,umap_iter:0.0041,umap_mem:5416},
+  {pattern:"random",N:337,kntrie_fnd:0.0034,kntrie_nf:0.0030,kntrie_insert:0.0406,kntrie_erase:0.0138,kntrie_iter:0.0157,kntrie_mem:4152,map_fnd:0.0144,map_nf:0.0134,map_insert:0.0438,map_erase:0.0207,map_iter:0.0072,map_mem:13480,umap_fnd:0.0039,umap_nf:0.0059,umap_insert:0.0152,umap_erase:0.0096,umap_iter:0.0041,umap_mem:8088},
+  {pattern:"random",N:506,kntrie_fnd:0.0050,kntrie_nf:0.0045,kntrie_insert:0.0508,kntrie_erase:0.0171,kntrie_iter:0.0225,kntrie_mem:4152,map_fnd:0.0235,map_nf:0.0221,map_insert:0.0751,map_erase:0.0523,map_iter:0.0090,map_mem:20240,umap_fnd:0.0056,umap_nf:0.0084,umap_insert:0.0194,umap_erase:0.0069,umap_iter:0.0047,umap_mem:12424},
+  {pattern:"random",N:759,kntrie_fnd:0.0082,kntrie_nf:0.0077,kntrie_insert:0.0555,kntrie_erase:0.0208,kntrie_iter:0.0281,kntrie_mem:8248,map_fnd:0.0378,map_nf:0.0364,map_insert:0.0780,map_erase:0.0372,map_iter:0.0068,map_mem:30360,umap_fnd:0.0085,umap_nf:0.0129,umap_insert:0.0215,umap_erase:0.0101,umap_iter:0.0012,umap_mem:18232},
+  {pattern:"random",N:1139,kntrie_fnd:0.0131,kntrie_nf:0.0128,kntrie_insert:0.0823,kntrie_erase:0.0229,kntrie_iter:0.0454,kntrie_mem:16440,map_fnd:0.0626,map_nf:0.0605,map_insert:0.1143,map_erase:0.0580,map_iter:0.0102,map_mem:45560,umap_fnd:0.0127,umap_nf:0.0198,umap_insert:0.0302,umap_erase:0.0138,umap_iter:0.0021,umap_mem:27768},
+  {pattern:"random",N:1708,kntrie_fnd:0.0203,kntrie_nf:0.0184,kntrie_insert:0.1124,kntrie_erase:0.0431,kntrie_iter:0.0669,kntrie_mem:16440,map_fnd:0.1020,map_nf:0.1004,map_insert:0.1853,map_erase:0.0893,map_iter:0.0168,map_mem:68320,umap_fnd:0.0218,umap_nf:0.0307,umap_insert:0.0456,umap_erase:0.0229,umap_iter:0.0042,umap_mem:41256},
+  {pattern:"random",N:2562,kntrie_fnd:0.0336,kntrie_nf:0.0311,kntrie_insert:0.1826,kntrie_erase:0.0623,kntrie_iter:0.1087,kntrie_mem:32824,map_fnd:0.1723,map_nf:0.1660,map_insert:0.2858,map_erase:0.1434,map_iter:0.0265,map_mem:102480,umap_fnd:0.0323,umap_nf:0.0453,umap_insert:0.0660,umap_erase:0.0334,umap_iter:0.0071,umap_mem:63016},
+  {pattern:"random",N:3844,kntrie_fnd:0.0501,kntrie_nf:0.0463,kntrie_insert:0.2773,kntrie_erase:0.0957,kntrie_iter:0.1648,kntrie_mem:32824,map_fnd:0.2767,map_nf:0.2734,map_insert:0.4287,map_erase:0.2253,map_iter:0.0396,map_mem:153760,umap_fnd:0.0520,umap_nf:0.0751,umap_insert:0.1018,umap_erase:0.0536,umap_iter:0.0124,umap_mem:93720},
+  {pattern:"random",N:5766,kntrie_fnd:0.0713,kntrie_nf:0.0655,kntrie_insert:0.4904,kntrie_erase:0.1631,kntrie_iter:0.1953,kntrie_mem:81040,map_fnd:0.4405,map_nf:0.4383,map_insert:0.6649,map_erase:0.3487,map_iter:0.0593,map_mem:230640,umap_fnd:0.0776,umap_nf:0.1102,umap_insert:0.1509,umap_erase:0.0805,umap_iter:0.0196,umap_mem:139880},
+  {pattern:"random",N:8649,kntrie_fnd:0.1404,kntrie_nf:0.1386,kntrie_insert:0.6854,kntrie_erase:0.2217,kntrie_iter:0.3164,kntrie_mem:119312,map_fnd:0.7548,map_nf:0.7198,map_insert:1.0866,map_erase:0.5643,map_iter:0.0961,map_mem:345960,umap_fnd:0.1249,umap_nf:0.1775,umap_insert:0.2397,umap_erase:0.1242,umap_iter:0.0316,umap_mem:208648},
+  {pattern:"random",N:12974,kntrie_fnd:0.1810,kntrie_nf:0.1586,kntrie_insert:0.9961,kntrie_erase:0.3383,kntrie_iter:0.4876,kntrie_mem:152592,map_fnd:1.2641,map_nf:1.2451,map_insert:1.7170,map_erase:0.9384,map_iter:0.1510,map_mem:518960,umap_fnd:0.1939,umap_nf:0.2794,umap_insert:0.3656,umap_erase:0.1956,umap_iter:0.0497,umap_mem:311448},
+  {pattern:"random",N:19461,kntrie_fnd:0.3112,kntrie_nf:0.2799,kntrie_insert:1.4155,kntrie_erase:0.5009,kntrie_iter:0.7798,kntrie_mem:267792,map_fnd:2.0906,map_nf:2.0132,map_insert:2.7324,map_erase:1.4895,map_iter:0.2311,map_mem:778440,umap_fnd:0.2879,umap_nf:0.4047,umap_insert:0.5226,umap_erase:0.2892,umap_iter:0.0775,umap_mem:477400},
+  {pattern:"random",N:29192,kntrie_fnd:0.4777,kntrie_nf:0.4253,kntrie_insert:2.0395,kntrie_erase:0.7674,kntrie_iter:1.1512,kntrie_mem:310288,map_fnd:3.4453,map_nf:3.2717,map_insert:4.2224,map_erase:2.3952,map_iter:0.3841,map_mem:1167680,umap_fnd:0.4428,umap_nf:0.6077,umap_insert:0.7701,umap_erase:0.4400,umap_iter:0.1290,umap_mem:712888},
+  {pattern:"random",N:43789,kntrie_fnd:0.8445,kntrie_nf:0.7153,kntrie_insert:3.1804,kntrie_erase:1.2433,kntrie_iter:1.8801,kntrie_mem:541712,map_fnd:7.1914,map_nf:6.5032,map_insert:7.0858,map_erase:4.3264,map_iter:0.9986,map_mem:1751560,umap_fnd:0.7564,umap_nf:1.0311,umap_insert:1.3945,umap_erase:0.8076,umap_iter:0.2295,umap_mem:1064472},
+  {pattern:"random",N:65684,kntrie_fnd:1.2549,kntrie_nf:1.1462,kntrie_insert:4.2925,kntrie_erase:1.5210,kntrie_iter:2.3317,kntrie_mem:789520,map_fnd:12.2204,map_nf:11.6660,map_insert:10.4651,map_erase:7.2729,map_iter:2.4962,map_mem:2627360,umap_fnd:1.2300,umap_nf:1.5846,umap_insert:2.2754,umap_erase:1.6014,umap_iter:0.4398,umap_mem:1589400},
+  {pattern:"random",N:98523,kntrie_fnd:1.9473,kntrie_nf:1.6172,kntrie_insert:6.2019,kntrie_erase:2.7170,kntrie_iter:3.6253,kntrie_mem:1066000,map_fnd:26.0961,map_nf:23.6951,map_insert:19.7206,map_erase:13.8216,map_iter:4.5418,map_mem:3940920,umap_fnd:2.1784,umap_nf:2.6187,umap_insert:4.5130,umap_erase:3.0008,umap_iter:1.0608,umap_mem:2374232},
+  {pattern:"random",N:147785,kntrie_fnd:5.2641,kntrie_nf:3.0735,kntrie_insert:11.5370,kntrie_erase:4.2625,kntrie_iter:5.7963,kntrie_mem:2114576,map_fnd:51.4001,map_nf:49.6649,map_insert:37.5434,map_erase:26.8577,map_iter:8.4816,map_mem:5911400,umap_fnd:3.5780,umap_nf:4.6782,umap_insert:8.0693,umap_erase:5.3275,umap_iter:2.1653,umap_mem:3546904},
+  {pattern:"random",N:221675,kntrie_fnd:8.6762,kntrie_nf:4.7698,kntrie_insert:17.5225,kntrie_erase:8.2467,kntrie_iter:8.9546,kntrie_mem:2114576,map_fnd:92.0521,map_nf:95.7628,map_insert:74.1847,map_erase:48.5094,map_iter:15.0029,map_mem:8867000,umap_fnd:5.7924,umap_nf:7.1574,umap_insert:13.8766,umap_erase:8.7677,umap_iter:3.8320,umap_mem:5441976},
+  {pattern:"random",N:332509,kntrie_fnd:20.7220,kntrie_nf:11.7085,kntrie_insert:30.0363,kntrie_erase:15.2565,kntrie_iter:13.7265,kntrie_mem:4211728,umap_fnd:9.5264,umap_nf:11.2194,umap_insert:21.0935,umap_erase:14.1224,umap_iter:7.0067,umap_mem:8128632},
+  {pattern:"random",N:498753,kntrie_fnd:33.2202,kntrie_nf:20.7681,kntrie_insert:60.7828,kntrie_erase:31.7887,kntrie_iter:20.8749,kntrie_mem:4310032,umap_fnd:15.5806,umap_nf:18.2834,umap_insert:34.9266,umap_erase:23.0384,umap_iter:12.7110,umap_mem:12141976},
+  {pattern:"random",N:748117,kntrie_fnd:78.4951,kntrie_nf:58.5546,kntrie_insert:113.8079,kntrie_erase:63.2597,kntrie_iter:33.4529,kntrie_mem:8406032,umap_fnd:24.9780,umap_nf:28.4207,umap_insert:64.7782,umap_erase:36.5025,umap_iter:19.5056,umap_mem:18138264},
+  {pattern:"random",N:1122145,kntrie_fnd:82.1939,kntrie_nf:86.6962,kntrie_insert:258.9040,kntrie_erase:114.1648,kntrie_iter:43.3252,kntrie_mem:14140624,umap_fnd:38.5552,umap_nf:50.2462,umap_insert:105.4023,umap_erase:65.0670,umap_iter:30.7474,umap_mem:27096888},
+  {pattern:"random",N:1683111,kntrie_fnd:126.4711,kntrie_nf:116.1777,kntrie_insert:354.0463,kntrie_erase:167.0647,kntrie_iter:60.5090,kntrie_mem:18038560,umap_fnd:65.7497,umap_nf:71.2593,umap_insert:154.4473,umap_erase:94.1374,umap_iter:50.3194,umap_mem:40480648},
+  {pattern:"random",N:2524384,kntrie_fnd:233.4460,kntrie_nf:189.7116,kntrie_insert:575.7510,kntrie_erase:244.0276,kntrie_iter:105.3617,kntrie_mem:27548752,umap_fnd:101.8441,umap_nf:116.5684,umap_insert:279.4349,umap_erase:153.4980,umap_iter:80.8904,umap_mem:62120136},
+  {pattern:"random",N:3786033,kntrie_fnd:371.2501,kntrie_nf:330.8478,kntrie_insert:813.9786,kntrie_erase:383.7667,kntrie_iter:149.4195,kntrie_mem:34328080,umap_fnd:158.5375,umap_nf:174.1604,umap_insert:442.7574,umap_erase:239.3137,umap_iter:133.9397,umap_mem:92784776},
+  {pattern:"random",N:5677748,kntrie_fnd:629.6046,kntrie_nf:523.8269,kntrie_insert:1311.8091,kntrie_erase:660.3294,kntrie_iter:240.2941,kntrie_mem:54608656,umap_fnd:269.9144,umap_nf:276.2774,umap_insert:665.3246,umap_erase:426.8699,umap_iter:217.4949,umap_mem:138582744},
+  {pattern:"sequential",N:100,kntrie_fnd:0.0007,kntrie_nf:0.0007,kntrie_insert:0.0135,kntrie_erase:0.0043,kntrie_iter:0.0032,kntrie_mem:1080,map_fnd:0.0032,map_nf:0.0033,map_insert:0.0104,map_erase:0.0060,map_iter:0.0011,map_mem:4000,umap_fnd:0.0003,umap_nf:0.0006,umap_insert:0.0023,umap_erase:0.0017,umap_iter:0.0002,umap_mem:2424},
+  {pattern:"sequential",N:150,kntrie_fnd:0.0013,kntrie_nf:0.0011,kntrie_insert:0.0121,kntrie_erase:0.0051,kntrie_iter:0.0049,kntrie_mem:2104,map_fnd:0.0052,map_nf:0.0054,map_insert:0.0159,map_erase:0.0080,map_iter:0.0015,map_mem:6000,umap_fnd:0.0004,umap_nf:0.0009,umap_insert:0.0042,umap_erase:0.0022,umap_iter:0.0003,umap_mem:3656},
+  {pattern:"sequential",N:225,kntrie_fnd:0.0018,kntrie_nf:0.0016,kntrie_insert:0.0153,kntrie_erase:0.0067,kntrie_iter:0.0069,kntrie_mem:2104,map_fnd:0.0083,map_nf:0.0087,map_insert:0.0219,map_erase:0.0101,map_iter:0.0020,map_mem:9000,umap_fnd:0.0006,umap_nf:0.0013,umap_insert:0.0053,umap_erase:0.0019,umap_iter:0.0004,umap_mem:5416},
+  {pattern:"sequential",N:337,kntrie_fnd:0.0032,kntrie_nf:0.0027,kntrie_insert:0.0221,kntrie_erase:0.0090,kntrie_iter:0.0111,kntrie_mem:4152,map_fnd:0.0140,map_nf:0.0144,map_insert:0.0323,map_erase:0.0158,map_iter:0.0030,map_mem:13480,umap_fnd:0.0010,umap_nf:0.0020,umap_insert:0.0077,umap_erase:0.0031,umap_iter:0.0005,umap_mem:8088},
+  {pattern:"sequential",N:506,kntrie_fnd:0.0049,kntrie_nf:0.0042,kntrie_insert:0.0378,kntrie_erase:0.0136,kntrie_iter:0.0172,kntrie_mem:4152,map_fnd:0.0225,map_nf:0.0229,map_insert:0.0500,map_erase:0.0237,map_iter:0.0047,map_mem:20240,umap_fnd:0.0015,umap_nf:0.0032,umap_insert:0.0105,umap_erase:0.0041,umap_iter:0.0008,umap_mem:12424},
+  {pattern:"sequential",N:759,kntrie_fnd:0.0079,kntrie_nf:0.0075,kntrie_insert:0.0500,kntrie_erase:0.0212,kntrie_iter:0.0275,kntrie_mem:8248,map_fnd:0.0368,map_nf:0.0368,map_insert:0.0760,map_erase:0.0377,map_iter:0.0065,map_mem:30360,umap_fnd:0.0023,umap_nf:0.0045,umap_insert:0.0148,umap_erase:0.0046,umap_iter:0.0012,umap_mem:18232},
+  {pattern:"sequential",N:1139,kntrie_fnd:0.0128,kntrie_nf:0.0123,kntrie_insert:0.0814,kntrie_erase:0.0228,kntrie_iter:0.0440,kntrie_mem:16440,map_fnd:0.0602,map_nf:0.0606,map_insert:0.1141,map_erase:0.0541,map_iter:0.0101,map_mem:45560,umap_fnd:0.0033,umap_nf:0.0071,umap_insert:0.0203,umap_erase:0.0061,umap_iter:0.0019,umap_mem:27768},
+  {pattern:"sequential",N:1708,kntrie_fnd:0.0195,kntrie_nf:0.0181,kntrie_insert:0.1130,kntrie_erase:0.0413,kntrie_iter:0.0660,kntrie_mem:16440,map_fnd:0.1023,map_nf:0.1010,map_insert:0.1884,map_erase:0.0892,map_iter:0.0166,map_mem:68320,umap_fnd:0.0049,umap_nf:0.0107,umap_insert:0.0287,umap_erase:0.0099,umap_iter:0.0027,umap_mem:41256},
+  {pattern:"sequential",N:2562,kntrie_fnd:0.0322,kntrie_nf:0.0300,kntrie_insert:0.1837,kntrie_erase:0.0646,kntrie_iter:0.1054,kntrie_mem:32824,map_fnd:0.1658,map_nf:0.1653,map_insert:0.2742,map_erase:0.1435,map_iter:0.0262,map_mem:102480,umap_fnd:0.0075,umap_nf:0.0175,umap_insert:0.0411,umap_erase:0.0166,umap_iter:0.0040,umap_mem:63016},
+  {pattern:"sequential",N:3844,kntrie_fnd:0.0486,kntrie_nf:0.0447,kntrie_insert:0.2709,kntrie_erase:0.0946,kntrie_iter:0.1630,kntrie_mem:32824,map_fnd:0.2793,map_nf:0.2776,map_insert:0.4439,map_erase:0.2242,map_iter:0.0414,map_mem:153760,umap_fnd:0.0114,umap_nf:0.0254,umap_insert:0.0591,umap_erase:0.0247,umap_iter:0.0059,umap_mem:93720},
+  {pattern:"sequential",N:5766,kntrie_fnd:0.0349,kntrie_nf:0.0223,kntrie_insert:0.3786,kntrie_erase:0.0929,kntrie_iter:0.2220,kntrie_mem:35944,map_fnd:0.3875,map_nf:0.3825,map_insert:0.5795,map_erase:0.2935,map_iter:0.0518,map_mem:230640,umap_fnd:0.0149,umap_nf:0.0318,umap_insert:0.0730,umap_erase:0.0309,umap_iter:0.0073,umap_mem:139880},
+  {pattern:"sequential",N:8649,kntrie_fnd:0.0538,kntrie_nf:0.0332,kntrie_insert:0.5025,kntrie_erase:0.1194,kntrie_iter:0.2847,kntrie_mem:53696,map_fnd:0.6352,map_nf:0.6266,map_insert:0.9225,map_erase:0.4801,map_iter:0.0806,map_mem:345960,umap_fnd:0.0218,umap_nf:0.0467,umap_insert:0.1069,umap_erase:0.0473,umap_iter:0.0108,umap_mem:208648},
+  {pattern:"sequential",N:12974,kntrie_fnd:0.0808,kntrie_nf:0.0468,kntrie_insert:0.5900,kntrie_erase:0.1825,kntrie_iter:0.4393,kntrie_mem:80480,map_fnd:1.0437,map_nf:1.0313,map_insert:1.4150,map_erase:0.7446,map_iter:0.1264,map_mem:518960,umap_fnd:0.0314,umap_nf:0.0676,umap_insert:0.1662,umap_erase:0.0733,umap_iter:0.0161,umap_mem:311448},
+  {pattern:"sequential",N:19461,kntrie_fnd:0.1241,kntrie_nf:0.0711,kntrie_insert:0.8203,kntrie_erase:0.2682,kntrie_iter:0.6562,kntrie_mem:120832,map_fnd:1.7406,map_nf:1.6908,map_insert:2.2769,map_erase:1.2163,map_iter:0.1889,map_mem:778440,umap_fnd:0.0475,umap_nf:0.1129,umap_insert:0.2405,umap_erase:0.1100,umap_iter:0.0239,umap_mem:477400},
+  {pattern:"sequential",N:29192,kntrie_fnd:0.1978,kntrie_nf:0.1125,kntrie_insert:1.1734,kntrie_erase:0.4285,kntrie_iter:0.9764,kntrie_mem:180944,map_fnd:2.9241,map_nf:2.8517,map_insert:3.6178,map_erase:2.0698,map_iter:0.3288,map_mem:1167680,umap_fnd:0.0953,umap_nf:0.1841,umap_insert:0.3568,umap_erase:0.1897,umap_iter:0.0416,umap_mem:712888},
+  {pattern:"sequential",N:43789,kntrie_fnd:0.4380,kntrie_nf:0.3028,kntrie_insert:2.2218,kntrie_erase:0.7977,kntrie_iter:1.6858,kntrie_mem:272224,map_fnd:6.0632,map_nf:5.6615,map_insert:6.0110,map_erase:3.8898,map_iter:1.0244,map_mem:1751560,umap_fnd:0.2325,umap_nf:0.3492,umap_insert:0.5458,umap_erase:0.4754,umap_iter:0.0703,umap_mem:1064472},
+  {pattern:"sequential",N:65684,kntrie_fnd:0.6784,kntrie_nf:0.4908,kntrie_insert:3.3995,kntrie_erase:1.2295,kntrie_iter:2.5865,kntrie_mem:409256,map_fnd:13.8413,map_nf:11.9697,map_insert:10.7356,map_erase:7.2612,map_iter:2.3791,map_mem:2627360,umap_fnd:0.6047,umap_nf:0.8348,umap_insert:0.9399,umap_erase:1.1311,umap_iter:0.1167,umap_mem:1589400},
+  {pattern:"sequential",N:98526,kntrie_fnd:1.0537,kntrie_nf:0.7778,kntrie_insert:4.9368,kntrie_erase:1.8714,kntrie_iter:3.7842,kntrie_mem:613080,map_fnd:26.5709,map_nf:25.7098,map_insert:19.0144,map_erase:13.6955,map_iter:4.4422,map_mem:3941040,umap_fnd:1.2176,umap_nf:1.5322,umap_insert:1.9601,umap_erase:1.8129,umap_iter:0.1940,umap_mem:2374280},
+  {pattern:"sequential",N:147789,kntrie_fnd:1.9669,kntrie_nf:1.4110,kntrie_insert:8.7896,kntrie_erase:3.3721,kntrie_iter:6.6662,kntrie_mem:919304,map_fnd:43.7723,map_nf:42.7947,map_insert:37.7040,map_erase:25.8049,map_iter:7.1131,map_mem:5911560,umap_fnd:1.6609,umap_nf:2.2681,umap_insert:3.2657,umap_erase:3.3065,umap_iter:0.2733,umap_mem:3546968},
+  {pattern:"sequential",N:221683,kntrie_fnd:3.4303,kntrie_nf:2.2565,kntrie_insert:14.4825,kntrie_erase:5.4736,kntrie_iter:10.1678,kntrie_mem:1378344,map_fnd:90.7352,map_nf:88.7027,map_insert:76.1566,map_erase:51.1822,map_iter:13.2049,map_mem:8867320,umap_fnd:2.8598,umap_nf:3.7414,umap_insert:6.3969,umap_erase:5.7491,umap_iter:0.4272,umap_mem:5442104},
+  {pattern:"sequential",N:332525,kntrie_fnd:7.0069,kntrie_nf:3.4915,kntrie_insert:22.1382,kntrie_erase:9.0518,kntrie_iter:15.1464,kntrie_mem:2068008,umap_fnd:4.7752,umap_nf:5.8256,umap_insert:10.3119,umap_erase:9.6110,umap_iter:0.6542,umap_mem:8128888},
+  {pattern:"sequential",N:498788,kntrie_fnd:12.9622,kntrie_nf:5.7172,kntrie_insert:46.1958,kntrie_erase:16.5778,kntrie_iter:23.3383,kntrie_mem:3102096,umap_fnd:7.9549,umap_nf:10.2054,umap_insert:16.3343,umap_erase:16.1296,umap_iter:1.0004,umap_mem:12142536},
+  {pattern:"sequential",N:748182,kntrie_fnd:22.2549,kntrie_nf:7.4653,kntrie_insert:64.4052,kntrie_erase:30.7591,kntrie_iter:29.2379,kntrie_mem:4652944,umap_fnd:13.5665,umap_nf:16.0182,umap_insert:25.0928,umap_erase:28.6261,umap_iter:1.5568,umap_mem:18139304},
+  {pattern:"sequential",N:1122274,kntrie_fnd:48.3117,kntrie_nf:15.9378,kntrie_insert:111.4797,kntrie_erase:53.7868,kntrie_iter:50.7080,kntrie_mem:6980040,umap_fnd:18.6417,umap_nf:27.4371,umap_insert:40.0871,umap_erase:38.3922,umap_iter:2.5613,umap_mem:27098952},
+  {pattern:"sequential",N:1683411,kntrie_fnd:80.0675,kntrie_nf:39.3018,kntrie_insert:185.1905,kntrie_erase:95.9828,kntrie_iter:70.1277,kntrie_mem:10470000,umap_fnd:42.3278,umap_nf:41.2079,umap_insert:80.4179,umap_erase:71.4150,umap_iter:5.9884,umap_mem:40485448},
+  {pattern:"sequential",N:2525116,kntrie_fnd:133.7663,kntrie_nf:84.4101,kntrie_insert:334.9451,kntrie_erase:160.9137,kntrie_iter:104.8886,kntrie_mem:15705112,umap_fnd:55.4565,umap_nf:68.1346,umap_insert:144.1916,umap_erase:103.1127,umap_iter:9.5350,umap_mem:62131848},
+  {pattern:"sequential",N:3787675,kntrie_fnd:230.7934,kntrie_nf:149.8523,kntrie_insert:555.8774,kntrie_erase:259.3018,kntrie_iter:165.7853,kntrie_mem:23557248,umap_fnd:106.8257,umap_nf:108.2108,umap_insert:195.5445,umap_erase:162.9863,umap_iter:16.7628,umap_mem:92811048},
+  {pattern:"sequential",N:5681512,kntrie_fnd:390.1475,kntrie_nf:265.2606,kntrie_insert:934.2017,kntrie_erase:490.5113,kntrie_iter:268.1529,kntrie_mem:35335976,umap_fnd:185.7035,umap_nf:188.2420,umap_insert:356.0209,umap_erase:329.8503,umap_iter:28.6446,umap_mem:138642968},
+];
+
+
+const LINES_FIND = [
+  { key: "kntrie", suffix: "fnd", color: "#3b82f6", dash: [],    width: 2.5, label: "kntrie FND" },
+  { key: "kntrie", suffix: "nf", color: "#93c5fd", dash: [6,3], width: 1.5, label: "kntrie NF" },
+  { key: "map",    suffix: "fnd", color: "#ef4444", dash: [],    width: 2.5, label: "map FND" },
+  { key: "map",    suffix: "nf", color: "#fca5a5", dash: [6,3], width: 1.5, label: "map NF" },
+  { key: "umap",   suffix: "fnd", color: "#22c55e", dash: [],    width: 2.5, label: "umap FND" },
+  { key: "umap",   suffix: "nf", color: "#86efac", dash: [6,3], width: 1.5, label: "umap NF" },
+];
+
+const LINES_OP = [
+  { key: "kntrie", suffix: "insert", color: "#3b82f6", dash: [], width: 2.5, label: "kntrie" },
+  { key: "map",    suffix: "insert", color: "#ef4444", dash: [], width: 2.5, label: "map" },
+  { key: "umap",   suffix: "insert", color: "#22c55e", dash: [], width: 2.5, label: "umap" },
+];
+
+const LINES_ERASE = [
+  { key: "kntrie", suffix: "erase", color: "#3b82f6", dash: [], width: 2.5, label: "kntrie" },
+  { key: "map",    suffix: "erase", color: "#ef4444", dash: [], width: 2.5, label: "map" },
+  { key: "umap",   suffix: "erase", color: "#22c55e", dash: [], width: 2.5, label: "umap" },
+];
+
+const LINES_MEM = [
+  { key: "kntrie", suffix: "mem", color: "#3b82f6", dash: [], width: 2.5, label: "kntrie" },
+  { key: "map",    suffix: "mem", color: "#ef4444", dash: [], width: 2.5, label: "map" },
+  { key: "umap",   suffix: "mem", color: "#22c55e", dash: [], width: 2.5, label: "umap" },
+  { key: "raw",    suffix: "mem", color: "#888",    dash: [3,3], width: 1, label: "raw (16B)" },
+];
+
+const LINES_ITER = [
+  { key: "kntrie", suffix: "iter", color: "#3b82f6", dash: [], width: 2.5, label: "kntrie" },
+  { key: "map",    suffix: "iter", color: "#ef4444", dash: [], width: 2.5, label: "map" },
+  { key: "umap",   suffix: "iter", color: "#22c55e", dash: [], width: 2.5, label: "umap" },
+];
+
+const METRICS = [
+  { id: "find",   lines: LINES_FIND,  convert: (ms, n) => (ms * 1e6) / n },
+  { id: "iter",   lines: LINES_ITER,  convert: (ms, n) => (ms * 1e6) / n },
+  { id: "insert", lines: LINES_OP,    convert: (ms, n) => (ms * 1e6) / n },
+  { id: "erase",  lines: LINES_ERASE, convert: (ms, n) => (ms * 1e6) / (n / 2) },
+  { id: "mem",    lines: LINES_MEM,   convert: (b, n) => b / n },
+];
+
+function buildData(pattern, metric) {
+  return RAW_DATA
+    .filter(r => r.pattern === pattern)
+    .map(r => {
+      const pt = { N: r.N };
+      for (const l of metric.lines) {
+        if (l.key === "raw") { pt["raw_mem"] = 16; continue; }
+        const raw = r[l.key + "_" + l.suffix];
+        if (raw != null) pt[l.key + "_" + l.suffix] = metric.convert(raw, r.N);
+      }
+      return pt;
+    });
+}
+
+const charts = {};
+
+function makeChart(canvasId, metric) {
+  const ctx = document.getElementById(canvasId).getContext("2d");
+  const data = buildData("random", metric);
+
+  charts[canvasId] = new Chart(ctx, {
+    type: "line",
+    data: {
+      labels: data.map(d => d.N),
+      datasets: metric.lines.map(l => ({
+        label: l.label,
+        data: data.map(d => d[l.key === "raw" ? "raw_mem" : l.key + "_" + l.suffix] ?? null),
+        borderColor: l.color,
+        backgroundColor: l.color + "33",
+        borderWidth: l.width,
+        borderDash: l.dash,
+        pointRadius: 0,
+        pointHitRadius: 8,
+        tension: 0.2,
+        spanGaps: true,
+      })),
+    },
+    options: {
+      responsive: true,
+      interaction: { mode: "index", intersect: false },
+      plugins: {
+        legend: { display: true, labels: { color: "#bbb", font: { size: 11 }, boxWidth: 20, padding: 10 } },
+        tooltip: {
+          backgroundColor: "#1a1a2e",
+          borderColor: "#444",
+          borderWidth: 1,
+          titleColor: "#aaa",
+          bodyColor: "#ddd",
+          callbacks: {
+            title: (items) => {
+              const v = items[0].parsed.x;
+              if (v >= 1e6) return "N = " + (v/1e6).toFixed(1) + "M";
+              if (v >= 1e3) return "N = " + (v/1e3).toFixed(1) + "K";
+              return "N = " + v;
+            },
+            label: (item) => {
+              const v = item.parsed.y;
+              if (v == null) return null;
+              const s = v < 0.1 ? v.toFixed(3) : v < 10 ? v.toFixed(2) : v < 1000 ? v.toFixed(1) : v.toFixed(0);
+              return " " + item.dataset.label + ": " + s;
+            },
+          },
+        },
+      },
+      scales: {
+        x: {
+          type: "logarithmic",
+          title: { display: false },
+          ticks: { color: "#888", font: { size: 11 },
+            callback: (v) => v >= 1e6 ? (v/1e6)+"M" : v >= 1e3 ? (v/1e3)+"K" : v },
+          grid: { color: "#2a2a3e" },
+        },
+        y: {
+          type: "logarithmic",
+          ticks: { color: "#888", font: { size: 10 },
+            callback: (v) => v < 0.1 ? v.toFixed(2) : v < 10 ? v.toFixed(1) : v >= 1000 ? v.toFixed(0) : v.toFixed(1) },
+          grid: { color: "#2a2a3e" },
+        },
+      },
+    },
+  });
+  charts[canvasId]._metric = metric;
+}
+
+METRICS.forEach(m => makeChart("c_" + m.id, m));
+
+function show(pattern) {
+  document.querySelectorAll(".btns button").forEach(b => b.classList.remove("active"));
+  event.target.classList.add("active");
+  for (const [id, chart] of Object.entries(charts)) {
+    const m = chart._metric;
+    const data = buildData(pattern, m);
+    chart.data.labels = data.map(d => d.N);
+    m.lines.forEach((l, i) => {
+      chart.data.datasets[i].data = data.map(d => d[l.key === "raw" ? "raw_mem" : l.key + "_" + l.suffix] ?? null);
+    });
+    chart.update("none");
+  }
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,1029 @@
+#pragma once
+
+#include "kstrie_bitmask.hpp"
+#include "kstrie_compact.hpp"
+#include "kstrie_support.hpp"
+#include <limits>
+#include <string>
+#include <string_view>
+
+namespace gteitelbaum {
+
+// ============================================================================
+// kstrie_impl -- engine trie class
+// ============================================================================
+
+template <typename VALUE,
+          typename CHARMAP = identity_char_map,
+          typename ALLOC   = std::allocator<uint64_t>>
+class kstrie_impl {
+public:
+    using key_type       = std::string;
+    using mapped_type    = VALUE;
+    using size_type      = std::size_t;
+    using allocator_type = ALLOC;
+    using char_map_type  = CHARMAP;
+
+    using hdr_type     = node_header<VALUE, CHARMAP, ALLOC>;
+    using mem_type     = kstrie_memory<ALLOC>;
+    using slots_type   = kstrie_slots<VALUE>;
+    using skip_type    = kstrie_skip<VALUE, CHARMAP, ALLOC>;
+    using bitmask_type = kstrie_bitmask<VALUE, CHARMAP, ALLOC>;
+    using compact_type = kstrie_compact<VALUE, CHARMAP, ALLOC>;
+
+private:
+    uint64_t* root_ = compact_type::sentinel();
+    size_type size_{};
+    mem_type  mem_{};
+
+public:
+    [[nodiscard]] uint64_t* get_sentinel() const noexcept { return compact_type::sentinel(); }
+private:
+
+    void init_empty_root() {
+        root_ = compact_type::sentinel();
+    }
+
+    void destroy_tree(uint64_t* node) {
+        if (!node || node == compact_type::sentinel()) return;
+        hdr_type h = hdr_type::from_node(node);
+        if (h.is_compact()) {
+            auto* vb = h.get_compact_slots(node);
+            slots_type::destroy_values(vb, 0, h.count, mem_.alloc_);
+        } else {
+            // bitmask: recurse all children + eos
+            uint64_t* cs_base = bitmask_type::child_slots(node);
+            for (uint16_t i = 0; i < h.count; ++i)
+                destroy_tree(slots_type::load_child(cs_base, i));
+            destroy_tree(bitmask_type::eos_child(node, h));
+        }
+        mem_.free_node(node);
+    }
+
+    size_type memory_usage_impl(const uint64_t* node) const noexcept {
+        if (!node || node == compact_type::sentinel()) return 0;
+        hdr_type h = hdr_type::from_node(node);
+        size_type total = h.alloc_u64 * U64_BYTES;
+        if (h.is_bitmap()) {
+            const uint64_t* cs = bitmask_type::child_slots(node);
+            for (uint16_t i = 0; i < h.count; ++i)
+                total += memory_usage_impl(slots_type::load_child(cs, i));
+            total += memory_usage_impl(bitmask_type::eos_child(node, h));
+        }
+        // tiny and compact are leaf-only, no recursion
+        return total;
+    }
+
+    // ------------------------------------------------------------------
+    // find_inner -- hot loop for trie traversal
+    // ------------------------------------------------------------------
+
+    const VALUE* find_inner(const uint8_t* mapped, uint32_t key_len) const noexcept {
+        const uint64_t* node = root_;
+        uint32_t consumed = 0;
+        hdr_type h;
+
+        for (;;) {
+            h = hdr_type::from_node(node);
+            if (h.has_skip()) [[unlikely]] {
+                if (!skip_type::match_skip_unchecked(node, h, mapped, key_len, consumed))
+                    [[unlikely]] return nullptr;
+            }
+            if (!h.is_bitmap()) [[unlikely]] break;
+            if (consumed == key_len) [[unlikely]] {
+                node = bitmask_type::eos_child(node, h);
+                h = hdr_type::from_node(node);
+                break;
+            }
+            node = bitmask_type::dispatch(node, h, mapped[consumed++]);
+        }
+        // Cold path: compact leaf node
+        return compact_type::find(node, h, mapped + consumed, key_len - consumed);
+    }
+
+    // ------------------------------------------------------------------
+    // find_impl -- wrapper: mapping + heap ownership
+    // ------------------------------------------------------------------
+
+    const VALUE* find_impl(const uint8_t* key_data, uint32_t key_len) const noexcept {
+        if constexpr (CHARMAP::IS_IDENTITY) {
+            return find_inner(key_data, key_len);
+        } else {
+            uint8_t stack_buf[256];
+            auto [mapped, heap_buf] = get_mapped<CHARMAP>(key_data, key_len,
+                                                  stack_buf, sizeof(stack_buf));
+            const VALUE* result = find_inner(mapped, key_len);
+            delete[] heap_buf;
+            return result;
+        }
+    }
+
+    VALUE* find_impl(const uint8_t* key_data, uint32_t key_len) noexcept {
+        return const_cast<VALUE*>(
+            static_cast<const kstrie_impl*>(this)->find_impl(key_data, key_len));
+    }
+
+public:
+    // ------------------------------------------------------------------
+    // Construction / destruction
+    // ------------------------------------------------------------------
+
+    kstrie_impl() { init_empty_root(); }
+    ~kstrie_impl() { if (root_) destroy_tree(root_); }
+
+    kstrie_impl(kstrie_impl&& o) noexcept
+        : root_(o.root_), size_(o.size_), mem_(std::move(o.mem_)) {
+        o.root_ = compact_type::sentinel();
+        o.size_ = 0;
+    }
+
+    kstrie_impl& operator=(kstrie_impl&& o) noexcept {
+        if (this != &o) {
+            if (root_) destroy_tree(root_);
+            root_ = o.root_;
+            size_ = o.size_;
+            mem_  = std::move(o.mem_);
+            o.root_ = compact_type::sentinel();
+            o.size_ = 0;
+        }
+        return *this;
+    }
+
+    // ------------------------------------------------------------------
+    // Deep copy
+    // ------------------------------------------------------------------
+
+    kstrie_impl(const kstrie_impl& o) : size_(o.size_) {
+        if (!o.root_) {
+            root_ = compact_type::sentinel();
+        } else {
+            root_ = clone_tree(o.root_);
+        }
+    }
+
+    kstrie_impl& operator=(const kstrie_impl& o) {
+        if (this != &o) {
+            kstrie_impl tmp(o);
+            swap(tmp);
+        }
+        return *this;
+    }
+
+private:
+    uint64_t* clone_tree(const uint64_t* node) {
+        if (!node || node == compact_type::sentinel()) return const_cast<uint64_t*>(node);
+        hdr_type h = hdr_type::from_node(node);
+
+        size_t nu = h.alloc_u64;
+        uint64_t* copy = mem_.alloc_node(nu);
+        std::memcpy(copy, node, nu * U64_BYTES);
+
+        if (h.is_compact()) {
+            auto* sb = hdr_type::from_node(copy).get_compact_slots(copy);
+            for (uint16_t i = 0; i < h.count; ++i) {
+                const VALUE* vp = slots_type::load_value(
+                    h.get_compact_slots(node), i);
+                sb[i] = {};
+                slots_type::store_value(sb, i, *vp, mem_.alloc_);
+            }
+        } else {
+            // bitmask: recurse children + eos, no leaf cloning
+            uint64_t* new_cs = bitmask_type::child_slots(copy);
+            const uint64_t* old_cs = bitmask_type::child_slots(node);
+            for (uint16_t i = 0; i < h.count; ++i) {
+                uint64_t* child = slots_type::load_child(old_cs, i);
+                slots_type::store_child(new_cs, i, clone_tree(child));
+            }
+            hdr_type& ch = hdr_type::from_node(copy);
+            uint64_t* old_eos = bitmask_type::eos_child(node, h);
+            bitmask_type::set_eos_child(copy, ch, clone_tree(old_eos));
+        }
+        return copy;
+    }
+
+public:
+    // ------------------------------------------------------------------
+    // Capacity
+    // ------------------------------------------------------------------
+
+    [[nodiscard]] bool empty() const noexcept { return size_ == 0; }
+    [[nodiscard]] size_type size() const noexcept { return size_; }
+    [[nodiscard]] size_type memory_usage() const noexcept {
+        return sizeof(*this) + memory_usage_impl(root_);
+    }
+
+    // ------------------------------------------------------------------
+    // Root access (for kstrie iterator layer)
+    // ------------------------------------------------------------------
+
+    [[nodiscard]] const uint64_t* get_root() const noexcept { return root_; }
+
+    // ------------------------------------------------------------------
+    // Lookup
+    // ------------------------------------------------------------------
+
+    const VALUE* find(std::string_view key) const {
+        return find_impl(
+            reinterpret_cast<const uint8_t*>(key.data()),
+            static_cast<uint32_t>(key.size()));
+    }
+
+    VALUE* find(std::string_view key) {
+        return const_cast<VALUE*>(
+            static_cast<const kstrie_impl*>(this)->find(key));
+    }
+
+    bool contains(std::string_view key) const {
+        return find(key) != nullptr;
+    }
+
+    // ------------------------------------------------------------------
+    // Modifiers
+    // ------------------------------------------------------------------
+
+    bool insert(std::string_view key, const VALUE& value) {
+        return modify_impl(key, value, insert_mode::INSERT);
+    }
+
+    bool insert_or_assign(std::string_view key, const VALUE& value) {
+        return modify_impl(key, value, insert_mode::UPSERT);
+    }
+
+    bool assign(std::string_view key, const VALUE& value) {
+        return modify_impl(key, value, insert_mode::ASSIGN);
+    }
+
+    size_type erase(std::string_view key) {
+        if (root_ == compact_type::sentinel()) return 0;
+
+        const uint8_t* raw = reinterpret_cast<const uint8_t*>(key.data());
+        uint32_t len = static_cast<uint32_t>(key.size());
+
+        uint8_t stack_buf[256];
+        auto [mapped, heap_buf] = get_mapped<CHARMAP>(raw, len,
+                                              stack_buf, sizeof(stack_buf));
+
+        erase_info r = erase_node(root_, mapped, len, 0);
+        delete[] heap_buf;
+
+        if (r.status == erase_status::MISSING)
+            return 0;
+
+        if (r.status == erase_status::DONE) {
+            root_ = r.leaf;
+            size_--;
+            return 1;
+        }
+
+        // PENDING: entry found but not erased yet.
+        // desc is remaining count after erase.
+        // PENDING only reaches here from a tiny/compact root.
+        // do_leaf_erase frees the old node and sets r.leaf to the rebuilt one.
+        do_leaf_erase(r.leaf, r.pos);
+        if (r.desc == 0) {
+            // r.leaf is a 0-entry node; free it
+            mem_.free_node(r.leaf);
+            root_ = compact_type::sentinel();
+        } else {
+            root_ = r.leaf;
+        }
+        size_--;
+        return 1;
+    }
+
+    void clear() noexcept {
+        if (root_) destroy_tree(root_);
+        init_empty_root();
+        size_ = 0;
+    }
+
+    // ------------------------------------------------------------------
+    // Utilities
+    // ------------------------------------------------------------------
+
+    size_type count(std::string_view key) const {
+        return contains(key) ? 1 : 0;
+    }
+
+    void swap(kstrie_impl& o) noexcept {
+        std::swap(root_, o.root_);
+        std::swap(size_, o.size_);
+        std::swap(mem_, o.mem_);
+    }
+
+    [[nodiscard]] size_type max_size() const noexcept {
+        return std::numeric_limits<size_type>::max();
+    }
+
+    [[nodiscard]] allocator_type get_allocator() const noexcept {
+        return mem_.alloc_;
+    }
+
+    mem_type& memory() noexcept { return mem_; }
+
+private:
+
+    // ------------------------------------------------------------------
+    // Erase internals
+    // ------------------------------------------------------------------
+
+    void do_leaf_erase(uint64_t*& leaf, int pos) {
+        hdr_type& lh = hdr_type::from_node(leaf);
+        compact_type::erase_in_place(leaf, lh, pos, mem_);
+
+        auto& p = compact_type::get_prefix(leaf, lh);
+        if (compact_type::should_shrink(lh.count, p.cap))
+            leaf = compact_type::shrink_compact(leaf, lh, mem_);
+    }
+
+    uint64_t node_tail_total(const uint64_t* node) const {
+        if (!node || node == compact_type::sentinel()) return 0;
+        hdr_type h = hdr_type::from_node(node);
+        if (h.is_compact()) {
+            // Each entry gains: 1 dispatch byte + skip bytes from this node
+            return compact_type::get_prefix(node, h).keysuffix_used
+                 + static_cast<uint64_t>(h.count) * (1 + h.skip_bytes());
+        }
+        return node[NODE_TOTAL_TAIL];
+    }
+
+    using build_entry = typename compact_type::build_entry;
+
+    void collect_inner(const uint64_t* node,
+                       uint8_t* prefix, uint32_t prefix_len,
+                       build_entry* out, uint8_t* key_buf,
+                       size_t& buf_off, uint32_t& ei,
+                       const uint64_t* skip_leaf, int skip_pos) const {
+        if (!node || node == compact_type::sentinel()) return;
+        hdr_type h = hdr_type::from_node(node);
+
+        if (h.has_skip()) [[unlikely]] {
+            uint32_t sb = h.skip_bytes();
+            std::memcpy(prefix + prefix_len,
+                        hdr_type::get_skip(node, h), sb);
+            prefix_len += sb;
+        }
+
+        collect_post_skip(node, h, prefix, prefix_len,
+                          out, key_buf, buf_off, ei,
+                          skip_leaf, skip_pos);
+    }
+
+    void collect_post_skip(const uint64_t* node, const hdr_type& h,
+                           uint8_t* prefix, uint32_t prefix_len,
+                           build_entry* out, uint8_t* key_buf,
+                           size_t& buf_off, uint32_t& ei,
+                           const uint64_t* skip_leaf, int skip_pos) const {
+        if (h.is_compact()) {
+            const uint8_t*  L  = compact_type::lengths(node, h);
+            const uint8_t*  F  = compact_type::firsts(node, h);
+            const ks_offset_type* O = compact_type::offsets(node, h);
+            const uint8_t*  B  = compact_type::keysuffix(node, h);
+            const auto*     sb = h.get_compact_slots(node);
+            for (uint16_t i = 0; i < h.count; ++i) {
+                if (node != skip_leaf ||
+                    static_cast<int>(i) != skip_pos) {
+                    uint8_t  klen = L[i];
+                    uint8_t* dst  = key_buf + buf_off;
+                    if (prefix_len > 0)
+                        std::memcpy(dst, prefix, prefix_len);
+                    if (klen > 0) {
+                        dst[prefix_len] = F[i];
+                        if (klen > 1)
+                            std::memcpy(dst + prefix_len + 1, B + O[i], klen - 1);
+                    }
+                    out[ei].key      = dst;
+                    out[ei].key_len  = prefix_len + klen;
+                    out[ei].raw_slot = slots_type::load_raw(sb, i);
+                    buf_off += prefix_len + klen;
+                    ei++;
+                }
+            }
+            return;
+        }
+
+        // Bitmask: eos_child + child bitmap only (no leaves)
+        uint64_t* eos = bitmask_type::eos_child(node, h);
+        if (eos != compact_type::sentinel()) {
+            collect_inner(eos, prefix, prefix_len,
+                          out, key_buf, buf_off, ei, skip_leaf, skip_pos);
+        }
+        const auto* bm = bitmask_type::get_bitmap(node, h);
+        int idx = bm->find_next_set(0);
+        while (idx >= 0) {
+            uint8_t byte = static_cast<uint8_t>(idx);
+            prefix[prefix_len] = byte;
+            int cs = bm->count_below(byte);
+            uint64_t* child = bitmask_type::child_by_slot(node, h, cs);
+            collect_inner(child, prefix, prefix_len + 1,
+                          out, key_buf, buf_off, ei, skip_leaf, skip_pos);
+            idx = bm->find_next_set(idx + 1);
+        }
+    }
+
+    void free_subtree_nodes(uint64_t* node) {
+        if (!node || node == compact_type::sentinel()) return;
+        hdr_type h = hdr_type::from_node(node);
+        if (h.is_bitmap()) {
+            for (uint16_t ci = 0; ci < h.count; ++ci)
+                free_subtree_nodes(bitmask_type::child_by_slot(node, h, ci));
+            free_subtree_nodes(bitmask_type::eos_child(node, h));
+        }
+        // tiny and compact: leaf-only, no children to free
+        mem_.free_node(node);
+    }
+
+    // ------------------------------------------------------------------
+    // fill_layout — recursive walker for collapse_to_compact.
+    // Fills stack-local L/F/O/blob/values arrays directly.
+    // prefix_buf[0..prefix_len-1]: bytes to prepend to all entries.
+    // Returns false if blob exceeds 256 bytes or entries exceed max.
+    // ------------------------------------------------------------------
+
+    static constexpr uint32_t MAX_COLLAPSE_ENTRIES = COMPACT_KEYSUFFIX_LIMIT + 257;
+
+    bool fill_layout(const uint64_t* node, const hdr_type& h,
+                     const uint8_t* prefix_buf, uint32_t prefix_len,
+                     uint8_t* cL, uint8_t* cF, ks_offset_type* cO, uint8_t* cblob,
+                     typename slots_type::value_base_t* cvals,
+                     uint16_t& ei, uint16_t& blob_cursor,
+                     int& chain_start) const {
+
+        if (h.is_compact()) {
+            const uint8_t* L  = compact_type::lengths(node, h);
+            const uint8_t* F  = compact_type::firsts(node, h);
+            const ks_offset_type* O = compact_type::offsets(node, h);
+            const uint8_t* B  = compact_type::keysuffix(node, h);
+            const auto*    sb = h.get_compact_slots(node);
+
+            for (uint16_t i = 0; i < h.count; ++i) {
+                if (ei >= MAX_COLLAPSE_ENTRIES) return false;
+
+                uint8_t orig_klen = L[i];
+                uint8_t orig_tail = orig_klen > 0 ? orig_klen - 1 : 0;
+                uint32_t new_klen = prefix_len + orig_klen;
+                if (new_klen > 255) return false;
+
+                uint8_t new_fb;
+                uint8_t new_tail_len;
+
+                if (prefix_len > 0) {
+                    new_fb = prefix_buf[0];
+                    new_tail_len = static_cast<uint8_t>(new_klen - 1);
+                } else if (orig_klen > 0) {
+                    new_fb = F[i];
+                    new_tail_len = orig_tail;
+                } else {
+                    new_fb = 0;
+                    new_tail_len = 0;
+                }
+
+                cL[ei] = static_cast<uint8_t>(new_klen);
+                cF[ei] = new_fb;
+                slots_type::copy_values(cvals, ei, sb, i, 1);
+
+                if (new_tail_len == 0) {
+                    cO[ei] = static_cast<ks_offset_type>(blob_cursor);
+                    ei++;
+                    continue;
+                }
+
+                // Sharing: source sharing implies collapsed sharing
+                // when prefix is the same (same compact child).
+                bool shares_into_next = false;
+                if (i + 1 < h.count) {
+                    uint32_t next_new_klen = prefix_len + L[i+1];
+                    if (next_new_klen > new_klen) {
+                        if (prefix_len > 0) {
+                            // Both have same prefix → same new F.
+                            // Share if source entries share.
+                            if (F[i] == F[i+1] &&
+                                O[i] == O[i+1] &&
+                                orig_klen < L[i+1])
+                                shares_into_next = true;
+                        } else {
+                            if (O[i] == O[i+1] && F[i] == F[i+1])
+                                shares_into_next = true;
+                        }
+                    }
+                }
+
+                if (shares_into_next) {
+                    if (chain_start < 0) chain_start = static_cast<int>(ei);
+                    ei++;
+                    continue;
+                }
+
+                // Chain head or standalone: write blob
+                if (blob_cursor + new_tail_len > COMPACT_KEYSUFFIX_LIMIT) return false;
+
+                cO[ei] = static_cast<ks_offset_type>(blob_cursor);
+
+                // Assemble tail: prefix[1..] + F[i] + B[O[i]..orig_tail]
+                uint16_t off = blob_cursor;
+                if (prefix_len > 1) {
+                    std::memcpy(cblob + off, prefix_buf + 1, prefix_len - 1);
+                    off += prefix_len - 1;
+                }
+                if (prefix_len > 0 && orig_klen > 0) {
+                    cblob[off++] = F[i];
+                }
+                if (orig_tail > 0)
+                    std::memcpy(cblob + off, B + O[i], orig_tail);
+
+                // Backfill chain
+                if (chain_start >= 0) {
+                    for (int j = chain_start; j < static_cast<int>(ei); ++j)
+                        if (cL[j] > 0) cO[j] = cO[ei];
+                    chain_start = -1;
+                }
+
+                blob_cursor += new_tail_len;
+                ei++;
+            }
+            return true;
+        }
+
+        // Bitmask node
+
+        // EOS child
+        uint64_t* eos = bitmask_type::eos_child(node, h);
+        if (eos != compact_type::sentinel()) {
+            hdr_type eh = hdr_type::from_node(eos);
+
+            uint8_t eos_prefix[512];
+            uint32_t eos_prefix_len = prefix_len;
+            if (prefix_len > 0)
+                std::memcpy(eos_prefix, prefix_buf, prefix_len);
+            if (eh.has_skip()) {
+                const uint8_t* sp = hdr_type::get_skip(eos, eh);
+                std::memcpy(eos_prefix + eos_prefix_len, sp, eh.skip);
+                eos_prefix_len += eh.skip;
+            }
+
+            if (!fill_layout(eos, eh,
+                             eos_prefix_len > 0 ? eos_prefix : nullptr,
+                             eos_prefix_len,
+                             cL, cF, cO, cblob, cvals,
+                             ei, blob_cursor, chain_start))
+                return false;
+        }
+
+        // Children in byte order
+        const auto* bm = bitmask_type::get_bitmap(node, h);
+        int idx = bm->find_next_set(0);
+        while (idx >= 0) {
+            uint8_t byte = static_cast<uint8_t>(idx);
+            int cs = bm->count_below(byte);
+            uint64_t* child = slots_type::load_child(
+                bitmask_type::child_slots(node), cs);
+            hdr_type ch = hdr_type::from_node(child);
+
+            uint8_t child_prefix[512];
+            uint32_t child_prefix_len = prefix_len;
+            if (prefix_len > 0)
+                std::memcpy(child_prefix, prefix_buf, prefix_len);
+            child_prefix[child_prefix_len++] = byte;
+            if (ch.has_skip()) {
+                const uint8_t* sp = hdr_type::get_skip(child, ch);
+                std::memcpy(child_prefix + child_prefix_len, sp, ch.skip);
+                child_prefix_len += ch.skip;
+            }
+
+            if (!fill_layout(child, ch,
+                             child_prefix, child_prefix_len,
+                             cL, cF, cO, cblob, cvals,
+                             ei, blob_cursor, chain_start))
+                return false;
+
+            idx = bm->find_next_set(idx + 1);
+        }
+        return true;
+    }
+
+    uint64_t* collapse_to_compact(uint64_t* node) {
+        uint8_t  cL[MAX_COLLAPSE_ENTRIES];
+        uint8_t  cF[MAX_COLLAPSE_ENTRIES];
+        ks_offset_type cO[MAX_COLLAPSE_ENTRIES];
+        uint8_t  cblob[COMPACT_KEYSUFFIX_LIMIT];
+        typename slots_type::value_base_t cvals[slots_type::value_array_size(MAX_COLLAPSE_ENTRIES)];
+
+        uint16_t ei = 0;
+        uint16_t blob_cursor = 0;
+        int chain_start = -1;
+
+        hdr_type h = hdr_type::from_node(node);
+
+        const uint8_t* skip_data = nullptr;
+        uint8_t skip_len = h.skip;
+        if (h.has_skip()) skip_data = hdr_type::get_skip(node, h);
+
+        // Handle top-level skip: becomes prefix for all entries
+        uint8_t top_prefix[256];
+        uint32_t top_prefix_len = 0;
+        if (h.has_skip()) {
+            std::memcpy(top_prefix, skip_data, skip_len);
+            top_prefix_len = skip_len;
+        }
+
+        // For top-level bitmask: walk without the skip (it stays as node skip)
+        // The skip belongs to the collapsed node, not to entries.
+        // So we pass no prefix and let the bitmask walk add dispatch bytes.
+        bool ok;
+        if (h.is_compact()) {
+            // Collapsing a single compact node — just shrink
+            ok = fill_layout(node, h, nullptr, 0,
+                             cL, cF, cO, cblob, cvals,
+                             ei, blob_cursor, chain_start);
+        } else {
+            // Bitmask: walk children. Skip stays on the collapsed node.
+            ok = fill_layout(node, h, nullptr, 0,
+                             cL, cF, cO, cblob, cvals,
+                             ei, blob_cursor, chain_start);
+        }
+
+        if (!ok) {
+            // Keysuffix > COMPACT_KEYSUFFIX_LIMIT: collapse would produce the same bitmask structure.
+            // Do nothing — trie is already correct.
+            return node;
+        }
+
+        if (ei == 0) {
+            free_subtree_nodes(node);
+            return compact_type::sentinel();
+        }
+
+        // Alloc exact-sized node, memcpy in
+        uint64_t* nn = compact_type::alloc_compact_ks(
+            mem_, skip_len, skip_data, ei, blob_cursor);
+        hdr_type& nh = hdr_type::from_node(nn);
+
+        std::memcpy(compact_type::lengths(nn, nh), cL, ei);
+        std::memcpy(compact_type::firsts(nn, nh),  cF, ei);
+        std::memcpy(compact_type::offsets(nn, nh), cO, ei * sizeof(ks_offset_type));
+        if (blob_cursor > 0)
+            std::memcpy(compact_type::keysuffix(nn, nh), cblob, blob_cursor);
+
+        auto* nsb = nh.get_compact_slots(nn);
+        slots_type::copy_values(nsb, 0, cvals, 0, ei);
+
+        compact_type::get_prefix(nn, nh).keysuffix_used = blob_cursor;
+        nh.count = ei;
+        hdr_type::from_node(nn).count = ei;
+
+        free_subtree_nodes(node);
+        return nn;
+    }
+
+    erase_info erase_node(uint64_t* node, const uint8_t* key,
+                          uint32_t key_len, uint32_t consumed) {
+        hdr_type h = hdr_type::from_node(node);
+
+        auto mr = skip_type::match_prefix(node, h, key, key_len, consumed);
+        if (mr.status != skip_type::match_status::MATCHED)
+            return {0, erase_status::MISSING, nullptr, 0};
+        consumed = mr.consumed;
+
+        // COMPACT: return PENDING with found position
+        if (h.is_compact()) {
+            auto [found, pos] = compact_type::find_pos(
+                node, h, key + consumed, key_len - consumed);
+            if (!found)
+                return {0, erase_status::MISSING, nullptr, 0};
+            return {static_cast<uint32_t>(h.count - 1),
+                    erase_status::PENDING, node, pos};
+        }
+
+        // BITMASK
+
+        // EOS case
+        if (consumed == key_len) {
+            uint64_t* eos = bitmask_type::eos_child(node, h);
+            if (eos == compact_type::sentinel()) return {0, erase_status::MISSING, nullptr, 0};
+            uint64_t old_eos_tail = node_tail_total(eos);
+            // Recurse into eos child
+            erase_info r = erase_node(eos, key, key_len, consumed);
+            if (r.status == erase_status::MISSING) return r;
+            // Handle result
+            uint64_t* new_eos = eos;
+            if (r.status == erase_status::PENDING) {
+                do_leaf_erase(r.leaf, r.pos);
+                hdr_type eh = hdr_type::from_node(r.leaf);
+                if (eh.count == 0) {
+                    mem_.free_node(r.leaf);
+                    bitmask_type::set_eos_child(node, h, compact_type::sentinel());
+                    new_eos = compact_type::sentinel();
+                } else {
+                    bitmask_type::set_eos_child(node, h, r.leaf);
+                    new_eos = r.leaf;
+                }
+            } else {
+                new_eos = r.leaf;
+                if (r.leaf != eos)
+                    bitmask_type::set_eos_child(node, h, r.leaf);
+            }
+            node[NODE_TOTAL_TAIL] -= old_eos_tail - node_tail_total(new_eos)
+                                  + h.skip_bytes();
+            // Check if bitmask is empty
+            if (h.count == 0 && !bitmask_type::has_eos(node, h)) {
+                mem_.free_node(node);
+                return {0, erase_status::DONE, compact_type::sentinel(), 0};
+            }
+            // Try collapse
+            if (node[NODE_TOTAL_TAIL] <= COMPACT_KEYSUFFIX_LIMIT) {
+                uint64_t* collapsed = collapse_to_compact(node);
+                if (collapsed != node)
+                    return {0, erase_status::DONE, collapsed, 0};
+            }
+            return {0, erase_status::DONE, node, 0};
+        }
+
+        // Child lookup
+        uint8_t byte = key[consumed++];
+        uint64_t* child = bitmask_type::dispatch(node, h, byte);
+        if (child == compact_type::sentinel()) return {0, erase_status::MISSING, nullptr, 0};
+
+        uint64_t old_child_tail = node_tail_total(child);
+        erase_info r = erase_node(child, key, key_len, consumed);
+
+        if (r.status == erase_status::MISSING)
+            return r;
+
+        if (r.status == erase_status::DONE) {
+            uint64_t* new_child = r.leaf;
+            if (new_child != child) {
+                if (new_child != compact_type::sentinel())
+                    bitmask_type::replace_child(node, h, byte, new_child);
+                else
+                    node = bitmask_type::remove_child(node, h, byte);
+            }
+            node[NODE_TOTAL_TAIL] -= old_child_tail - node_tail_total(new_child)
+                                  + h.skip_bytes();
+            // Empty check
+            h = hdr_type::from_node(node);
+            if (h.count == 0 && !bitmask_type::has_eos(node, h)) {
+                mem_.free_node(node);
+                return {0, erase_status::DONE, compact_type::sentinel(), 0};
+            }
+            // Try collapse
+            if (node[NODE_TOTAL_TAIL] <= COMPACT_KEYSUFFIX_LIMIT) {
+                uint64_t* collapsed = collapse_to_compact(node);
+                if (collapsed != node)
+                    return {0, erase_status::DONE, collapsed, 0};
+            }
+            return {0, erase_status::DONE, node, 0};
+        }
+
+        // PENDING from child: r.leaf is the compact leaf to erase from.
+        // Check if this is the last entry in the entire subtree.
+        // If count==1, eos==sentinel, and the child has 1 entry, propagate PENDING.
+        if (h.count == 1 && !bitmask_type::has_eos(node, h)) {
+            hdr_type ch = hdr_type::from_node(r.leaf);
+            if (ch.count == 1) {
+                // Last entry — propagate PENDING, caller handles the erase.
+                return {0, erase_status::PENDING, r.leaf, r.pos};
+            }
+        }
+
+        // Do the leaf erase.
+        uint64_t old_leaf_tail = node_tail_total(r.leaf);
+        do_leaf_erase(r.leaf, r.pos);
+        uint64_t new_leaf_tail = node_tail_total(r.leaf);
+
+        hdr_type ch = hdr_type::from_node(r.leaf);
+        if (ch.count == 0) {
+            mem_.free_node(r.leaf);
+            node = bitmask_type::remove_child(node, h, byte);
+        } else if (r.leaf != child) {
+            bitmask_type::replace_child(node, h, byte, r.leaf);
+        }
+        node[NODE_TOTAL_TAIL] -= old_leaf_tail - new_leaf_tail
+                              + h.skip_bytes();
+
+        // Empty check
+        h = hdr_type::from_node(node);
+        if (h.count == 0 && !bitmask_type::has_eos(node, h)) {
+            mem_.free_node(node);
+            return {0, erase_status::DONE, compact_type::sentinel(), 0};
+        }
+        // Try collapse
+        if (node[NODE_TOTAL_TAIL] <= COMPACT_KEYSUFFIX_LIMIT) {
+            uint64_t* collapsed = collapse_to_compact(node);
+            if (collapsed != node)
+                return {0, erase_status::DONE, collapsed, 0};
+        }
+        return {0, erase_status::DONE, node, 0};
+    }
+
+    // ------------------------------------------------------------------
+    // Insert internals
+    // ------------------------------------------------------------------
+
+    bool modify_impl(std::string_view key, const VALUE& value,
+                     insert_mode mode) {
+        const uint8_t* raw = reinterpret_cast<const uint8_t*>(key.data());
+        uint32_t len = static_cast<uint32_t>(key.size());
+
+        uint8_t stack_buf[256];
+        auto [mapped, heap_buf] = get_mapped<CHARMAP>(raw, len,
+                                              stack_buf, sizeof(stack_buf));
+
+        insert_result r = insert_node(root_, mapped, len, value, 0, mode);
+        root_ = r.node;
+        delete[] heap_buf;
+
+        if (r.outcome == insert_outcome::INSERTED) {
+            size_++;
+            return true;
+        }
+        if (r.outcome == insert_outcome::UPDATED)
+            return true;
+        return false;
+    }
+
+    insert_result insert_node(uint64_t* node, const uint8_t* key_data,
+                               uint32_t key_len, const VALUE& value,
+                               uint32_t consumed, insert_mode mode) {
+        hdr_type h = hdr_type::from_node(node);
+
+        auto mr = skip_type::match_prefix(node, h, key_data, key_len, consumed);
+
+        if (h.is_compact())
+            return compact_type::insert(node, h, key_data, key_len,
+                                         value, consumed, mr, mode, mem_);
+
+        // --- Bitmask cases ---
+
+        if (mr.status == skip_type::match_status::MISMATCH) {
+            if (mode == insert_mode::ASSIGN)
+                return {node, insert_outcome::FOUND};
+
+            const uint8_t* skip_data = hdr_type::get_skip(node, h);
+            uint32_t old_skip = h.skip_bytes();
+            uint32_t match_len = mr.match_len;
+
+            uint8_t skip_copy[256];
+            std::memcpy(skip_copy, skip_data, old_skip);
+
+            uint8_t old_byte = skip_copy[match_len];
+            uint8_t new_byte = key_data[consumed + match_len];
+
+            uint32_t new_old_skip = old_skip - match_len - 1;
+            uint64_t* old_reskipped = bitmask_type::reskip(
+                node, h, mem_, static_cast<uint8_t>(new_old_skip),
+                skip_copy + match_len + 1);
+
+            uint32_t new_consumed = consumed + match_len + 1;
+            uint64_t* leaf = add_child(key_data + new_consumed,
+                                       key_len - new_consumed, value);
+
+            uint8_t bucket_idx[2];
+            uint64_t* children[2];
+            if (old_byte < new_byte) {
+                bucket_idx[0] = old_byte;  bucket_idx[1] = new_byte;
+                children[0] = old_reskipped; children[1] = leaf;
+            } else {
+                bucket_idx[0] = new_byte;  bucket_idx[1] = old_byte;
+                children[0] = leaf;        children[1] = old_reskipped;
+            }
+            uint64_t* parent = bitmask_type::create_with_children(
+                mem_, static_cast<uint8_t>(match_len), skip_copy,
+                bucket_idx, children, 2);
+            parent[NODE_TOTAL_TAIL] = node_tail_total(old_reskipped)
+                                   + node_tail_total(leaf);
+
+            return {parent, insert_outcome::INSERTED};
+        }
+
+        if (mr.status == skip_type::match_status::KEY_EXHAUSTED) {
+            if (mode == insert_mode::ASSIGN)
+                return {node, insert_outcome::FOUND};
+
+            const uint8_t* skip_data = hdr_type::get_skip(node, h);
+            uint32_t old_skip = h.skip_bytes();
+            uint32_t match_len = mr.match_len;
+
+            uint8_t skip_copy[256];
+            std::memcpy(skip_copy, skip_data, old_skip);
+
+            uint8_t old_byte = skip_copy[match_len];
+
+            uint32_t new_old_skip = old_skip - match_len - 1;
+            uint64_t* old_reskipped = bitmask_type::reskip(
+                node, h, mem_, static_cast<uint8_t>(new_old_skip),
+                skip_copy + match_len + 1);
+
+            uint8_t bucket_idx[1] = {old_byte};
+            uint64_t* children[1] = {old_reskipped};
+            uint64_t* parent = bitmask_type::create_with_children(
+                mem_, static_cast<uint8_t>(match_len), skip_copy,
+                bucket_idx, children, 1);
+
+            parent[NODE_TOTAL_TAIL] = node_tail_total(old_reskipped);
+
+            // Create compact(1) with EOS value, set as eos_child
+            uint64_t eos_raw = slots_type::make_raw(value, mem_.alloc_);
+            typename compact_type::build_entry eos_be{nullptr, 0, eos_raw};
+            uint64_t* eos_node = compact_type::build_compact(mem_, 0, nullptr, &eos_be, 1);
+            bitmask_type::set_eos_child(parent, hdr_type::from_node(parent), eos_node);
+            // EOS node has keysuffix_used=0, no tail delta
+
+            return {parent, insert_outcome::INSERTED};
+        }
+
+        // MATCHED
+        consumed = mr.consumed;
+
+        if (consumed == key_len) {
+            // EOS at bitmask node
+            uint64_t* eos = bitmask_type::eos_child(node, h);
+            if (eos != compact_type::sentinel()) {
+                // Recurse into existing EOS node
+                uint64_t old_et = node_tail_total(eos);
+                insert_result r = insert_node(eos, key_data, key_len, value, consumed, mode);
+                if (r.node != eos)
+                    bitmask_type::set_eos_child(node, h, r.node);
+                node[NODE_TOTAL_TAIL] += node_tail_total(r.node) - old_et;
+                if (r.outcome == insert_outcome::INSERTED)
+                    node[NODE_TOTAL_TAIL] += h.skip_bytes();
+                return {node, r.outcome};
+            }
+            if (mode == insert_mode::ASSIGN) return {node, insert_outcome::FOUND};
+            // Create compact(1) with EOS entry
+            uint64_t raw = slots_type::make_raw(value, mem_.alloc_);
+            typename compact_type::build_entry be{nullptr, 0, raw};
+            uint64_t* eos_node = compact_type::build_compact(mem_, 0, nullptr, &be, 1);
+            bitmask_type::set_eos_child(node, h, eos_node);
+            node[NODE_TOTAL_TAIL] += node_tail_total(eos_node) + h.skip_bytes();
+            return {node, insert_outcome::INSERTED};
+        }
+
+        {
+            uint8_t byte = key_data[consumed++];
+            uint64_t* child = bitmask_type::dispatch(node, h, byte);
+            if (child == compact_type::sentinel()) {
+                if (mode == insert_mode::ASSIGN) return {node, insert_outcome::FOUND};
+                uint64_t* new_child = add_child(key_data + consumed,
+                                                 key_len - consumed, value);
+                node = bitmask_type::insert_child(node, h, mem_, byte, new_child);
+                node[NODE_TOTAL_TAIL] += node_tail_total(new_child) + h.skip_bytes();
+                return {node, insert_outcome::INSERTED};
+            }
+            // Recurse
+            uint64_t old_ct = node_tail_total(child);
+            insert_result r = insert_node(child, key_data, key_len, value,
+                                           consumed, mode);
+            if (r.node != child)
+                bitmask_type::replace_child(node, h, byte, r.node);
+            node[NODE_TOTAL_TAIL] += node_tail_total(r.node) - old_ct;
+            if (r.outcome == insert_outcome::INSERTED)
+                node[NODE_TOTAL_TAIL] += h.skip_bytes();
+            return {node, r.outcome};
+        }
+    }
+
+    uint64_t* add_child(const uint8_t* suffix, uint32_t suffix_len,
+                        const VALUE& value) {
+        if (suffix_len > hdr_type::SKIP_MAX) {
+            constexpr uint32_t step = hdr_type::SKIP_MAX;
+            uint8_t dispatch = suffix[step];
+            uint64_t* child = add_child(suffix + step + 1,
+                                         suffix_len - step - 1, value);
+            uint64_t* bm_node = bitmask_type::create_with_children(
+                mem_, static_cast<uint8_t>(step), suffix,
+                &dispatch, &child, 1);
+            bm_node[NODE_TOTAL_TAIL] = node_tail_total(child) + step;
+            return bm_node;
+        }
+        uint64_t raw = slots_type::make_raw(value, mem_.alloc_);
+        typename compact_type::build_entry be{nullptr, 0, raw};
+        return compact_type::build_compact(mem_,
+            static_cast<uint8_t>(suffix_len), suffix, &be, 1);
+    }
+
+    struct child_entry {
+        const uint8_t* suffix;
+        uint32_t       suffix_len;
+        const VALUE*   value;
+    };
+
+    uint64_t* add_children(const child_entry* entries, size_t count) {
+        if (count == 0)
+            return mem_.alloc_node(1);
+
+        using be = typename compact_type::build_entry;
+        be* arr = new be[count];
+        for (size_t i = 0; i < count; ++i) {
+            uint64_t raw = slots_type::make_raw(*entries[i].value, mem_.alloc_);
+            arr[i].key      = entries[i].suffix;
+            arr[i].key_len  = entries[i].suffix_len;
+            arr[i].raw_slot = raw;
+        }
+        uint64_t* node = compact_type::build_compact(
+            mem_, 0, nullptr, arr, static_cast<uint16_t>(count));
+        delete[] arr;
+        return node;
+    }
+};
+
+} // namespace gteitelbaum
