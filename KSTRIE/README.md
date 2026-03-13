@@ -14,7 +14,6 @@ A **sorted**, **compressed** associative container for string keys. Follows the 
 
 
 
-* [Abstract](./ktrie_abstract.md)
 * [Concepts](./concepts.md)
 
 
