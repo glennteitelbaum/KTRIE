@@ -1,4 +1,5 @@
 KTRIE
 
-KNTRIE - numeric keys
-KSTRIE - string keys
+- KNTRIE - numeric keys
+
+- KSTRIE - string keys
