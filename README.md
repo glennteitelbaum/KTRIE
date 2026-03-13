@@ -1,9 +1,10 @@
-KTRIE
+# KTRIE
 
 > It's what would happen if a B-Tree had a child with a Trie
 
-[ABSTRACT](./ktrie_abstract.md)
+|Implemenation|Keys|Concepts|
+|-------------|----|--------|
+|KNTRIE|Numeric|[KNTRIE Concepts](KNTRIE/concepts.md)|
+|KSTRIE|String|[KSTRIE Concepts](KSTRIE/kstrie_concepts.md)|
 
-- KNTRIE - numeric keys
-
-- KSTRIE - string keys
+## [ABSTRACT](./ktrie_abstract.md)
