@@ -16,6 +16,6 @@ Benchmarks demonstrate that across all operations, both KNTRIE and KSTRIE are co
 
 The primary contribution is the prefix/branch/suffix decomposition as a unified hybrid design, with the novel integration of keysuffix sharing.
 
-The design draws on established techniques: the trie structure (Fredkin, 1960; Knuth, 1973, 1998); prefix compression from the Patricia trie (Morrison, 1968); the B-tree (Bayer and McCreight, 1972); bitmap-indexed child compression from Judy arrays (Baskins, 2004) and the Adaptive Radix Tree (Leis et al., 2013); the branchless binary search (Khuong and Morin, 2017); the boolean bit-packing (Stepanov and Lee, 1994; Austern, 1998); and Small String Optimization (Sutter, 1999; ISO/IEC 14882).
+The design draws on established techniques: the trie structure (Fredkin, 1960; Knuth, 1973, 1998); prefix compression from the Patricia trie (Morrison, 1968); the B-tree (Bayer and McCreight, 1972); bitmap-indexed child compression from Judy arrays (Baskins, 2004) and the Adaptive Radix Tree (Leis et al., 2013); the branchless binary search (Khuong and Morin, 2017); the boolean bit-packing (Stepanov and Lee, 1994; Austern, 1998).
 
 **Keywords:** trie, B-tree, ordered associative container, prefix/suffix decomposition, keysuffix sharing, cache locality, bitmap indexing, branchless search, variable-length keys
