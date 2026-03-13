@@ -70,7 +70,7 @@ private:
                 total += memory_usage_impl(slots_type::load_child(cs, i));
             total += memory_usage_impl(bitmask_type::eos_child(node, h));
         }
-        // tiny and compact are leaf-only, no recursion
+        // compact: leaf-only, no recursion
         return total;
     }
 
@@ -277,7 +277,7 @@ public:
 
         // PENDING: entry found but not erased yet.
         // desc is remaining count after erase.
-        // PENDING only reaches here from a tiny/compact root.
+        // PENDING only reaches here from a compact root.
         // do_leaf_erase frees the old node and sets r.leaf to the rebuilt one.
         do_leaf_erase(r.leaf, r.pos);
         if (r.desc == 0) {
@@ -429,7 +429,7 @@ private:
                 free_subtree_nodes(bitmask_type::child_by_slot(node, h, ci));
             free_subtree_nodes(bitmask_type::eos_child(node, h));
         }
-        // tiny and compact: leaf-only, no children to free
+        // compact: leaf-only, no children to free
         mem_.free_node(node);
     }
 
@@ -462,7 +462,7 @@ private:
                 uint8_t orig_klen = L[i];
                 uint8_t orig_tail = orig_klen > 0 ? orig_klen - 1 : 0;
                 uint32_t new_klen = prefix_len + orig_klen;
-                if (new_klen > 255) return false;
+                if (new_klen > COMPACT_SUFFIX_LEN_MAX) return false;
 
                 uint8_t new_fb;
                 uint8_t new_tail_len;
@@ -551,7 +551,7 @@ private:
         if (eos != compact_type::sentinel()) {
             hdr_type eh = hdr_type::from_node(eos);
 
-            uint8_t eos_prefix[512];
+            uint8_t eos_prefix[COMPACT_KEYSUFFIX_LIMIT];
             uint32_t eos_prefix_len = prefix_len;
             if (prefix_len > 0)
                 std::memcpy(eos_prefix, prefix_buf, prefix_len);
@@ -579,7 +579,7 @@ private:
                 bitmask_type::child_slots(node), cs);
             hdr_type ch = hdr_type::from_node(child);
 
-            uint8_t child_prefix[512];
+            uint8_t child_prefix[COMPACT_KEYSUFFIX_LIMIT];
             uint32_t child_prefix_len = prefix_len;
             if (prefix_len > 0)
                 std::memcpy(child_prefix, prefix_buf, prefix_len);

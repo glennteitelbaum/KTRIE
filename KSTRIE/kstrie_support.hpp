@@ -466,10 +466,10 @@ constinit bool kstrie_slots<VALUE>::BOOL_VALUES[2] = {false, true};
 template <typename VALUE, typename CHARMAP, typename ALLOC>
 struct node_header {
     uint16_t alloc_u64;     // allocation size in u64 units
-    uint16_t count;         // tiny/compact: entry count, bitmask: child_count
-    uint16_t slots_off;     // compact: values offset (u64 units), bitmask/tiny: unused
+    uint16_t count;         // compact: entry count, bitmask: child_count
+    uint16_t slots_off;     // compact: values offset (u64 units), bitmask: unused
     uint8_t  skip;          // prefix byte count (0 = no prefix)
-    uint8_t  flags;         // bit0: bitmask, bit2: has_skip, bit4: compact. All-zeros = tiny.
+    uint8_t  flags;         // bit0: bitmask, bit2: has_skip. All-zeros = compact.
 
     // Maximum skip prefix that fits in a single node (full u8 range, no sentinel)
     static constexpr uint8_t SKIP_MAX = 255;
@@ -619,6 +619,7 @@ inline int makecmp(T a, T b) noexcept {
 }
 
 inline constexpr uint32_t COMPACT_KEYSUFFIX_LIMIT = 4096;  // max keysuffix bytes
+inline constexpr uint8_t  COMPACT_SUFFIX_LEN_MAX = 255;    // max suffix length per entry (uint8_t L[])
 using ks_offset_type = std::conditional_t<COMPACT_KEYSUFFIX_LIMIT <= 256, uint8_t, uint16_t>;
 
 enum class insert_mode : uint8_t { INSERT, UPSERT, ASSIGN };

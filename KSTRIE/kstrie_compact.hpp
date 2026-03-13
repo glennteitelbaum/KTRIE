@@ -744,7 +744,7 @@ struct kstrie_compact {
 
             // Invariant check: suffix_len > 255 cannot be stored in u8 L[].
             // Route to bitmask promotion path.
-            if (suffix_len > 255) [[unlikely]]
+            if (suffix_len > COMPACT_SUFFIX_LEN_MAX) [[unlikely]]
                 return rebuild_with_new(node, h, key_data, key_len, value,
                                         consumed, mr, mem);
 
@@ -1049,7 +1049,7 @@ struct kstrie_compact {
         bool needs_bitmask = false;
         uint32_t total_tail = 0;
         for (uint16_t i = 0; i < count; ++i) {
-            if (entries[i].key_len > 255) { needs_bitmask = true; break; }
+            if (entries[i].key_len > COMPACT_SUFFIX_LEN_MAX) { needs_bitmask = true; break; }
             if (entries[i].key_len > 1)
                 total_tail += entries[i].key_len - 1;
         }
@@ -1092,7 +1092,7 @@ struct kstrie_compact {
         }
 
         // Build a child node for each bucket.
-        // Single-entry key_len==1 buckets become TINY(1) children (no bitmask leaves).
+        // Single-entry key_len==1 buckets become compact(1) children.
         uint64_t* children[256];
         uint8_t   child_bytes[256];
         int       n_children = 0;
@@ -1140,7 +1140,7 @@ struct kstrie_compact {
             }
             // Zero-length entries before first_nz share no prefix; LCP must be 0.
             if (first_nz > 0) lcp = 0;
-            if (lcp > 254) lcp = 254;
+            if (lcp > hdr_type::SKIP_MAX) lcp = hdr_type::SKIP_MAX;
 
             const uint8_t* child_skip = (lcp > 0) ? child_entries[first_nz].key : nullptr;
 
