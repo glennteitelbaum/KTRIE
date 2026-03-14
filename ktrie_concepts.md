@@ -4,17 +4,17 @@ This document describes the data structures, algorithms, and shared design conce
 
 ## Table of Contents
 
-- [1 Data Structures](#1-data-structures)
+- [1 Data Structures and Algorithms](#1-data-structures-and-algorithms)
   - [1.1 TRIE](#11-trie)
   - [1.2 Binary Search](#12-binary-search)
   - [1.3 B-TREE](#13-b-tree)
   - [1.4 KTRIE](#14-ktrie)
-- [2 Shared Concepts](#2-shared-concepts)
-  - [2.1 Bitmaps](#21-bitmaps)
-  - [2.2 Sentinel](#22-sentinel)
+- [2 KTRIE Shared Concepts](#2-ktrie-shared-concepts)
+  - [2.1 Sentinel](#21-sentinel)
+  - [2.2 Bitmaps](#22-bitmaps)
   - [2.3 Value Storage](#23-value-storage)
 
-## 1 Data Structures
+## 1 Data Structures and Algorithms
 
 ### 1.1 TRIE
 
@@ -44,7 +44,7 @@ static const K* find_base(const K* base, unsigned count, K key) noexcept {
 
 Each iteration halves `count` and conditionally advances `base`. The comparison `base[count] <= key` produces a boolean that the compiler emits as a cmov instruction: the CPU computes both possible values of `base` and selects one, with no branch prediction involved. This executes in ~2 cycles per iteration regardless of the data pattern.
 
-The requirement is that `count` must be a power of 2. The KTRIE guarantees this by allocating leaf arrays at power-of-two sizes, padded with duplicate entries to fill the boundary. This is a deliberate trade-off: a small amount of wasted space in exchange for completely predictable search performance.
+The requirement is that `count` must be a power of 2.
 
 A `find_base_first` variant uses strict `<` instead of `<=` to find the first occurrence of a key (lower bound), used by iterator operations and duplicate-aware insertion.
 
@@ -62,7 +62,7 @@ However, B-trees have their own weaknesses. Lookup cost is O(log_M N): it depend
 
 ### 1.4 KTRIE
 
-The KTRIE is a cross between a TRIE and a B-tree, designed for compact data and fast reads (implemented with integer keys for kntrie, and variable length strings as keys for kstrie). It uses TRIE-style prefix routing to navigate to the right region of the key space, then stores the remaining suffixes in B-tree-style wide sorted leaves. This combination introduces three structural ideas that address the classic problems of both parent structures.
+The KTRIE is a cross between a TRIE and a B-tree, designed for compact data and fast reads. It uses TRIE-style prefix routing to navigate to the right region of the key space, then stores the remaining suffixes in B-tree-style wide sorted leaves. This combination introduces three structural ideas that address the classic problems of both parent structures.
 
 A key in the KTRIE is decomposed into three logical regions:
 
@@ -88,9 +88,20 @@ The naïve TRIE has a fixed structure: every level creates a node, every node fa
 
 The result is a structure whose depth and memory usage adapt to the actual key distribution rather than being fixed by the key width. Dense, clustered key ranges are captured by PREFIX nodes and compact leaves. Sparse, spread-out ranges are handled by BRANCH nodes that only allocate for children that exist.
 
-## 2 Shared Concepts
+## 2 KTRIE Shared Concepts
 
-### 2.1 Bitmaps
+### 2.1 Sentinel
+
+The sentinel is a statically-allocated node that represents "not found." It is a valid node that satisfies the same structural contract as a real node, but contains zero entries and returns not-found for all operations. Because it is a real node, no special-casing is needed: the same dispatch mechanism that reaches a real leaf also reaches the sentinel, and the result is a uniform not-found response.
+
+The sentinel appears in two roles:
+
+- **Empty root.** When the container has no entries, the root points to the sentinel. Find reaches it and returns not-found through the normal dispatch path.
+- **Branch node miss target.** Branch nodes reference the sentinel for absent children. When a bitmap lookup misses, the dispatch resolves to the sentinel rather than requiring a conditional branch to check for absence.
+
+The sentinel is per-template-instantiation (one for each value type) because the dispatch types differ. It is initialized as a static local and never deallocated. Because it is a single instance per type, repeated misses all hit the same cache lines, which stay hot.
+
+### 2.2 Bitmaps
 
 The `bitmap_256_t` is a 256-bit bitmap stored as 4 `uint64_t` words, used throughout the KTRIE for compact representation of sets over the 256 possible byte values. Each branch node uses a bitmap to record which of the 256 possible child byte values are present, compressing the 256-entry child array to only the children that exist.
 
@@ -124,18 +135,7 @@ slot += std::popcount(words[2]) & -int(w > 2);
 
 The `& -int(w > N)` trick: when true, `-int(true)` is `-1` (all-ones in two's complement), so the popcount passes through. When false, the popcount is masked to zero. No branches.
 
-**Branchless miss fallback.** When a bitmap lookup misses (the target byte is not present), the popcount-based dispatch resolves to a known position that references a sentinel node. The sentinel always returns "not found," so no conditional branch is needed at the bitmap level. A miss and a hit follow the same code path; only the data differs. Implementation-specific dispatch modes and miss-target conventions are described in the KNTRIE and KSTRIE concept documents.
-
-### 2.2 Sentinel
-
-The sentinel is a statically-allocated node that represents "not found." It is a valid node that satisfies the same structural contract as a real node, but contains zero entries and returns not-found for all operations. Because it is a real node, no special-casing is needed: the same dispatch mechanism that reaches a real leaf also reaches the sentinel, and the result is a uniform not-found response.
-
-The sentinel appears in two roles:
-
-- **Empty root.** When the container has no entries, the root points to the sentinel. Find reaches it and returns not-found through the normal dispatch path.
-- **Branch node miss target.** Branch nodes reference the sentinel for absent children. When a bitmap lookup misses, the dispatch resolves to the sentinel rather than requiring a conditional branch to check for absence.
-
-The sentinel is per-template-instantiation (one for each value type) because the dispatch types differ. It is initialized as a static local and never deallocated. Because it is a single instance per type, repeated misses all hit the same cache lines, which stay hot. The concrete layout (size, fields, function pointers vs. zeroed words) differs between KNTRIE and KSTRIE and is described in each implementation's concept document.
+**Branchless miss fallback.** When a bitmap lookup misses (the target byte is not present), the popcount-based dispatch resolves to a known position that references a sentinel node. The sentinel always returns "not found," so no conditional branch is needed at the bitmap level. A miss and a hit follow the same code path; only the data differs.
 
 ### 2.3 Value Storage
 
@@ -163,4 +163,3 @@ Values are handled through a compile-time trait that selects one of three storag
 
 All dispatch is `if constexpr`; dead branches are eliminated at compile time. The slot movement strategy is uniform: non-overlapping transfers (realloc, new node, split) use `std::copy` (optimized to `memcpy` for trivial types); overlapping transfers (in-place insert gap, erase compaction) use `std::move` / `std::move_backward` (optimized to `memmove`).
 
-Implementation-specific details — KNTRIE's normalization of small types to fixed-width unsigned integers, KNTRIE's bitmap256 bool specialization, KSTRIE's slot naming conventions — are described in their respective concept documents.
