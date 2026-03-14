@@ -1,6 +1,6 @@
 # KSTRIE Concepts
 
-This document describes the KSTRIE, the variable-length string key instantiation of the KTRIE. For shared data structure concepts (TRIE, B-tree, KTRIE decomposition), binary search, bitmap representation, sentinel design, and value storage categories, see [KTRIE Concepts](ktrie_concepts.md).
+This document describes the KSTRIE, the variable-length string key instantiation of the KTRIE. For shared data structure concepts (TRIE, B-tree, KTRIE decomposition), binary search, bitmap representation, sentinel design, and value storage categories, see [KTRIE Concepts](../ktrie_concepts.md).
 
 ## Table of Contents
 
@@ -84,7 +84,7 @@ Many-to-one maps (like case folding) reduce the effective fan-out at branch leve
 
 ### 1.2 Value Storage: Implementation Details
 
-The three value storage categories (A: trivial inline, B: packed bool, C: heap pointer) are described in [KTRIE Concepts](ktrie_concepts.md). This section covers KSTRIE-specific implementation details.
+The three value storage categories (A: trivial inline, B: packed bool, C: heap pointer) are described in [KTRIE Concepts](../ktrie_concepts.md). This section covers KSTRIE-specific implementation details.
 
 **Category A storage.** Values are stored directly in the value region of the compact node via memcpy. For the common case of `kstrie<int>`, each value is 4 bytes (padded to u64 alignment in the value region).
 
@@ -131,7 +131,7 @@ This padding creates room for in-place operations. A node allocated larger than 
 
 ### 2.1 Bitmap Dispatch
 
-The shared bitmap representation and popcount mechanics are described in [KTRIE Concepts](ktrie_concepts.md). The KSTRIE uses branchless popcount dispatch: if the target byte is present, the popcount gives the 0-based index into the dense child array. If the target byte is absent, the dispatch falls through to the sentinel. The sentinel is a static node that always returns "not found," so no conditional branch is needed at the bitmap level.
+The shared bitmap representation and popcount mechanics are described in [KTRIE Concepts](../ktrie_concepts.md). The KSTRIE uses branchless popcount dispatch: if the target byte is present, the popcount gives the 0-based index into the dense child array. If the target byte is absent, the dispatch falls through to the sentinel. The sentinel is a static node that always returns "not found," so no conditional branch is needed at the bitmap level.
 
 ### 2.2 Node Header
 
@@ -168,7 +168,7 @@ Compact nodes carry an additional prefix structure beyond the common header, sto
 
 ### 3.1 Sentinel
 
-The sentinel concept is described in [KTRIE Concepts](ktrie_concepts.md). The KSTRIE sentinel is a static compact node with zero entries:
+The sentinel concept is described in [KTRIE Concepts](../ktrie_concepts.md). The KSTRIE sentinel is a static compact node with zero entries:
 
 ```cpp
 static inline constinit uint64_t sentinel_data_[3] = {};
@@ -317,7 +317,7 @@ During lookup, the skip bytes are compared against the key. Three outcomes:
 
 #### 3.3.3 Dispatch
 
-Child lookup uses branchless popcount dispatch as described in [KTRIE Concepts](ktrie_concepts.md). Given a byte value, the bitmap is checked for the byte's presence and the popcount gives the position in the dense child array:
+Child lookup uses branchless popcount dispatch as described in [KTRIE Concepts](../ktrie_concepts.md). Given a byte value, the bitmap is checked for the byte's presence and the popcount gives the position in the dense child array:
 
 ```cpp
 uint64_t* child = dispatch(node, h, byte);
