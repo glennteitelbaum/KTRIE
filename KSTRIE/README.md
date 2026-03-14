@@ -13,8 +13,10 @@ A KTRIE for String keys
 A **sorted**, **compressed** associative container for string keys. Follows the `std::map` interface. **Header-only**, **C++23**, requires **x86-64-v3** (`popcnt`, `tzcnt`, `lzcnt`) for best performance.
 
 
+* [KTRIE Concepts](../ktrie_concepts.md)
 
-* [Concepts](./concepts.md)
+
+* [KSTRIE Concepts](./kstrie_concepts.md)
 
 
 
