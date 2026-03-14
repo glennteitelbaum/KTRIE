@@ -13,8 +13,9 @@ A KTRIE for Integral keys
 A **sorted**, **compressed** associative container for integer keys (`uint8\_t` through `uint64\_t`, signed and unsigned). Follows the `std::map` interface. **Header-only**, **C++23**, requires **x86-64-v3** (`popcnt`, `tzcnt`, `lzcnt`) for best performance.
 
 
+* [KTRIE Concepts](../ktrie_concepts.md)
 
-* [Concepts](./concepts.md)
+* [KNTRIE Concepts](./kntrie_concepts.md)
 
 
 
