@@ -5,8 +5,8 @@ This document describes the data structures, algorithms, and shared design conce
 ## Table of Contents
 
 - [1 Data Structures](#1-data-structures)
-  - [1.1 Binary Search](#11-binary-search)
-  - [1.2 TRIE](#12-trie)
+  - [1.1 TRIE](#11-trie)
+  - [1.2 Binary Search](#12-binary-search)
   - [1.3 B-TREE](#13-b-tree)
   - [1.4 KTRIE](#14-ktrie)
 - [2 Shared Concepts](#2-shared-concepts)
@@ -16,7 +16,15 @@ This document describes the data structures, algorithms, and shared design conce
 
 ## 1 Data Structures
 
-### 1.1 Binary Search
+### 1.1 TRIE
+
+A TRIE (from "retrieval") is a tree structure where each node represents a portion of a key rather than the whole key. In a string TRIE, each level might branch on one character. In a numeric TRIE, each level branches on some chunk of bits. The path from root to leaf spells out the complete key.
+
+This gives TRIEs a fundamental property that distinguishes them from comparison-based trees: lookup cost depends on the key's length, not the number of entries. A TRIE with 100 entries and a TRIE with 100 million entries traverse the same number of levels for the same key.
+
+The classic problems with TRIEs are well known. A naïve implementation that allocates a 256-entry child array at every level wastes enormous memory. Most slots are empty, especially near the leaves. Sparse levels dominate. The structure also suffers from pointer chasing: each level requires following a pointer to the next node, and those nodes are scattered across the heap with no cache locality guarantees. For small key populations, the overhead of multiple levels can exceed the cost of a flat sorted search. And for variable-depth TRIEs, the bookkeeping to know what type of node you're looking at, how deep you are, and when you've reached a leaf adds complexity at every step.
+
+### 1.2 Binary Search
 
 Binary search finds a target in a sorted array by repeatedly halving the search space. Starting with the full array, each step compares the middle element against the target and discards the half that cannot contain it. After log₂(N) comparisons, the target is either found or proven absent.
 
@@ -40,27 +48,17 @@ The requirement is that `count` must be a power of 2. The KTRIE guarantees this 
 
 A `find_base_first` variant uses strict `<` instead of `<=` to find the first occurrence of a key (lower bound), used by iterator operations and duplicate-aware insertion.
 
-### 1.2 TRIE
-
-A TRIE (from "retrieval") is a tree structure where each node represents a portion of a key rather than the whole key. In a string TRIE, each level might branch on one character. In a numeric TRIE, each level branches on some chunk of bits. The path from root to leaf spells out the complete key.
-
-This gives TRIEs a fundamental property that distinguishes them from comparison-based trees: lookup cost depends on the key's length, not the number of entries. A TRIE with 100 entries and a TRIE with 100 million entries traverse the same number of levels for the same key.
-
-The classic problems with TRIEs are well known. A naïve implementation that allocates a 256-entry child array at every level wastes enormous memory. Most slots are empty, especially near the leaves. Sparse levels dominate. The structure also suffers from pointer chasing: each level requires following a pointer to the next node, and those nodes are scattered across the heap with no cache locality guarantees. For small key populations, the overhead of multiple levels can exceed the cost of a flat sorted search. And for variable-depth TRIEs, the bookkeeping to know what type of node you're looking at, how deep you are, and when you've reached a leaf adds complexity at every step.
-
 ### 1.3 B-TREE
 
 A B-tree is a self-balancing search tree designed for systems where large blocks of data are read at once (originally disk pages, but equally applicable to CPU cache lines). Unlike a binary tree where each node holds one key and has two children, a B-tree node holds many keys in a sorted array and fans out to many children. A B-tree of order M stores up to M-1 keys per node and has up to M children.
 
-The fundamental insight is that when data is accessed in blocks (whether disk sectors or cache lines), it's better to pack many keys into each block and search within it than to follow pointers between small nodes. A B-tree node with 100 keys in a contiguous sorted array touches 1-2 cache lines to search, while the same 100 keys in a binary tree require ~7 pointer-chasing hops across 7 random cache lines.
+The fundamental insight is that when data is accessed in blocks (whether disk sectors or cache lines), it's better to pack many keys into each block and search within it than to follow pointers between small nodes. A B-tree node with 100 keys in a contiguous sorted array can be searched with binary search, touching 1-2 cache lines, while the same 100 keys in a binary tree require ~7 pointer-chasing hops across 7 random cache lines.
 
 B-trees maintain balance through split and merge operations. When a node overflows (exceeds M-1 keys), it splits into two nodes and pushes the median key up to the parent. When a node underflows (drops below ⌈M/2⌉-1 keys), it merges with a sibling. This keeps the tree balanced with O(log_M N) depth, much shallower than a binary tree's O(log_2 N) because the logarithm base is the fan-out M rather than 2.
 
-The B-tree's strengths (wide nodes, sorted arrays, cache-friendly access patterns, and shallow depth) are exactly what a naïve TRIE lacks. A TRIE has the advantage of key-length-dependent lookup (independent of N), but its nodes are typically small and pointer-heavy.
+The B-tree's strengths (wide nodes, sorted arrays searched via binary search, cache-friendly access patterns, and shallow depth) are exactly what a naïve TRIE lacks. A TRIE has the advantage of key-length-dependent lookup (independent of N), but its nodes are typically small and pointer-heavy.
 
 However, B-trees have their own weaknesses. Lookup cost is O(log_M N): it depends on the number of entries, not the key length. As N grows into the millions, even with a high branching factor M, the tree deepens and each level is a potential cache miss. B-trees also provide no key compression: every entry stores the complete key, even when adjacent entries share long common prefixes. In a dataset where a million keys share the same first 6 bytes, a B-tree stores those 6 bytes a million times. Finally, B-tree split and merge operations must maintain global balance invariants, which adds complexity and can cascade upward through the tree.
-
-Combining the two approaches yields a structure with the routing efficiency of a TRIE (O(K) lookup independent of N, prefix compression) and the storage efficiency of a B-tree (wide sorted leaves, cache-friendly sequential access).
 
 ### 1.4 KTRIE
 
