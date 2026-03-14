@@ -1,6 +1,6 @@
 # KNTRIE Concepts
 
-This document describes the KNTRIE, the integer-key instantiation of the KTRIE. For shared data structure concepts (TRIE, B-tree, KTRIE decomposition), binary search, bitmap representation, sentinel design, and value storage categories, see [KTRIE Concepts](ktrie_concepts.md).
+This document describes the KNTRIE, the integer-key instantiation of the KTRIE. For shared data structure concepts (TRIE, B-tree, KTRIE decomposition), binary search, bitmap representation, sentinel design, and value storage categories, see [KTRIE Concepts](../ktrie_concepts.md).
 
 ## Table of Contents
 
@@ -63,7 +63,7 @@ Without this normalization, every node operation would need key-width-specific l
 
 ### 1.2 Value Storage: Implementation Details
 
-The three value storage categories (A: trivial inline, B: packed bool, C: heap pointer) are described in [KTRIE Concepts](ktrie_concepts.md). This section covers KNTRIE-specific implementation details.
+The three value storage categories (A: trivial inline, B: packed bool, C: heap pointer) are described in [KTRIE Concepts](../ktrie_concepts.md). This section covers KNTRIE-specific implementation details.
 
 **Normalization to fixed-width unsigned.** Category A values are normalized to a fixed-width unsigned integer type to reduce template instantiations: 1 byte → `uint8_t`, 2 → `uint16_t`, 3–4 → `uint32_t`, 5–8 → `uint64_t`. This means `kntrie<uint64_t, int>` and `kntrie<uint64_t, float>` share the same internal implementation. The `slot_type` is the normalized unsigned type.
 
@@ -101,7 +101,7 @@ This padding creates room for in-place insert and erase operations. A node alloc
 
 ### 2.1 Bitmap Dispatch Modes
 
-The shared bitmap representation and popcount mechanics are described in [KTRIE Concepts](ktrie_concepts.md). The KNTRIE uses three dispatch modes, selected at compile time via `slot_mode`:
+The shared bitmap representation and popcount mechanics are described in [KTRIE Concepts](../ktrie_concepts.md). The KNTRIE uses three dispatch modes, selected at compile time via `slot_mode`:
 
 **FAST_EXIT** (insert, erase, iteration): Check whether the target bit is set. If not, return -1 immediately. If set, subtract 1 from the popcount to get the 0-based index into the dense array.
 
@@ -186,7 +186,7 @@ The skip mechanism described above applies to leaves. Internal node skip operate
 
 ### 3.1 Sentinel
 
-The sentinel concept is described in [KTRIE Concepts](ktrie_concepts.md). The KNTRIE sentinel is a statically-allocated 7-u64 block matching the leaf header layout:
+The sentinel concept is described in [KTRIE Concepts](../ktrie_concepts.md). The KNTRIE sentinel is a statically-allocated 7-u64 block matching the leaf header layout:
 
 ```
 [header=0] [find_fn→nullptr] [next_fn→{not_found}] [prev_fn→{not_found}]
@@ -260,9 +260,9 @@ The threshold is COMPACT_MAX = 4096. This value is intentionally large. The kntr
 [Header: 7 u64] [Sorted keys (aligned to 8)] [Values (aligned to 8)]
 ```
 
-The 7-u64 leaf header carries the `node_header_t`, 5 function pointers, and the prefix. The keys and values arrays have `total_slots` physical entries, where `total_slots` is a power of 2 ≥ `entries`. The extra slots are filled with duplicates of adjacent entries, padding that enables in-place mutation and guarantees power-of-2 array sizes for the branchless binary search (see [KTRIE Concepts](ktrie_concepts.md), section 1.1).
+The 7-u64 leaf header carries the `node_header_t`, 5 function pointers, and the prefix. The keys and values arrays have `total_slots` physical entries, where `total_slots` is a power of 2 ≥ `entries`. The extra slots are filled with duplicates of adjacent entries, padding that enables in-place mutation and guarantees power-of-2 array sizes for the branchless binary search (see [KTRIE Concepts](../ktrie_concepts.md), section 1.1).
 
-**Search** uses the branchless binary search described in [KTRIE Concepts](ktrie_concepts.md). The power-of-2 slot count guarantees the required input constraint. Every compact leaf has `total_slots = bit_ceil(entries)` physical slots, padded with dup entries to fill the boundary. The minimum of 2 slots ensures count enters the loop as ≥ 2, so at least one comparison always executes.
+**Search** uses the branchless binary search described in [KTRIE Concepts](../ktrie_concepts.md). The power-of-2 slot count guarantees the required input constraint. Every compact leaf has `total_slots = bit_ceil(entries)` physical slots, padded with dup entries to fill the boundary. The minimum of 2 slots ensures count enters the loop as ≥ 2, so at least one comparison always executes.
 
 **Dup tombstone / padding strategy.** The power-of-two allocation means a compact leaf almost always has more physical slots than entries. Rather than leaving the extra space unused, the leaf fills it with **dup slots**, copies of adjacent real entries. These dups serve two purposes:
 
