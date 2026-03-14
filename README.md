@@ -2,6 +2,10 @@
 
 > It's what would happen if a B-Tree had a child with a Trie
 
+## [CONCEPTS](./ktrie_concepts.md)
+
+## Implemenations
+
 |Implemenation|Keys|Concepts|README|
 |-------------|----|--------|------|
 |KNTRIE|Numeric|[KNTRIE Concepts](KNTRIE/kntrie_concepts.md)|[KNTRIE](KNTRIE/README.md)|
