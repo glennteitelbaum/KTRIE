@@ -2,7 +2,9 @@
 
 > It's what would happen if a B-Tree had a child with a Trie
 
-## [CONCEPTS](./ktrie_concepts.md)
+## [KTRIE CONCEPTS](./ktrie_concepts.md)
+
+Concepts that apply to both implementations
 
 ## Implemenations
 
