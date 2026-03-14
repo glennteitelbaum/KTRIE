@@ -1,97 +1,43 @@
-# kntrie Concepts
+# KNTRIE Concepts
+
+This document describes the KNTRIE, the integer-key instantiation of the KTRIE. For shared data structure concepts (TRIE, B-tree, KTRIE decomposition), binary search, bitmap representation, sentinel design, and value storage categories, see [KTRIE Concepts](ktrie_concepts.md).
 
 ## Table of Contents
 
-- [1 Data Structures](#1-data-structures)
-  - [1.1 TRIE](#11-trie)
-  - [1.2 B-TREE](#12-b-tree)
-  - [1.3 KTRIE](#13-ktrie)
-- [2 Optimizations](#2-optimizations)
-  - [2.1 Key Representation](#21-key-representation)
-  - [2.2 Value Storage](#22-value-storage)
-  - [2.3 Memory Hysteresis](#23-memory-hysteresis)
-- [3 Node Concepts](#3-node-concepts)
-  - [3.1 Bitmaps](#31-bitmaps)
-  - [3.2 Node Header](#32-node-header)
-  - [3.3 Tagged Pointers](#33-tagged-pointers)
-  - [3.4 Descendants](#34-descendants)
-  - [3.5 Leaf Contract](#35-leaf-contract)
-- [4 Nodes](#4-nodes)
-  - [4.1 Sentinel](#41-sentinel)
-  - [4.2 Internal Nodes](#42-internal-nodes)
-  - [4.3 Compact Leaves](#43-compact-leaves)
-  - [4.4 Bitmap256 Leaves](#44-bitmap256-leaves)
-  - [4.5 Root](#45-root)
-- [5 Operations](#5-operations)
-  - [5.1 Depth-Based Dispatch](#51-depth-based-dispatch)
-  - [5.2 find](#52-find)
-  - [5.3 find first / find last](#53-find-first--find-last)
-  - [5.4 find next / find prev](#54-find-next--find-prev)
-  - [5.5 insert](#55-insert)
-  - [5.6 erase](#56-erase)
-  - [5.7 Iterators are Snapshots](#57-iterators-are-snapshots)
-- [6 Performance](#6-performance)
-  - [6.1 std::map](#61-stdmap)
-  - [6.2 std::unordered_map](#62-stdunordered_map)
-  - [6.3 KNTRIE](#63-kntrie)
-  - [6.4 The Real Complexity: Memory Hierarchy](#64-the-real-complexity-memory-hierarchy)
-- [7 Summary](#7-summary)
+- [1 Optimizations](#1-optimizations)
+  - [1.1 Key Representation](#11-key-representation)
+  - [1.2 Value Storage: Implementation Details](#12-value-storage-implementation-details)
+  - [1.3 Memory Hysteresis](#13-memory-hysteresis)
+- [2 Node Concepts](#2-node-concepts)
+  - [2.1 Bitmap Dispatch Modes](#21-bitmap-dispatch-modes)
+  - [2.2 Node Header](#22-node-header)
+  - [2.3 Tagged Pointers](#23-tagged-pointers)
+  - [2.4 Descendants](#24-descendants)
+  - [2.5 Leaf Contract](#25-leaf-contract)
+- [3 Nodes](#3-nodes)
+  - [3.1 Sentinel](#31-sentinel)
+  - [3.2 Internal Nodes](#32-internal-nodes)
+  - [3.3 Compact Leaves](#33-compact-leaves)
+  - [3.4 Bitmap256 Leaves](#34-bitmap256-leaves)
+  - [3.5 Root](#35-root)
+- [4 Operations](#4-operations)
+  - [4.1 Depth-Based Dispatch](#41-depth-based-dispatch)
+  - [4.2 find](#42-find)
+  - [4.3 find first / find last](#43-find-first--find-last)
+  - [4.4 find next / find prev](#44-find-next--find-prev)
+  - [4.5 insert](#45-insert)
+  - [4.6 erase](#46-erase)
+  - [4.7 Iterators are Snapshots](#47-iterators-are-snapshots)
+- [5 Performance](#5-performance)
+  - [5.1 std::map](#51-stdmap)
+  - [5.2 std::unordered_map](#52-stdunordered_map)
+  - [5.3 KNTRIE](#53-kntrie)
+  - [5.4 The Real Complexity: Memory Hierarchy](#54-the-real-complexity-memory-hierarchy)
+- [6 Summary](#6-summary)
 
-## 1 Data Structures
+## 1 Optimizations
 
-### 1.1 TRIE
-
-A TRIE (from "retrieval") is a tree structure where each node represents a portion of a key rather than the whole key. In a string TRIE, each level might branch on one character. In a numeric TRIE, each level branches on some chunk of bits. The path from root to leaf spells out the complete key.
-
-This gives TRIEs a fundamental property that distinguishes them from comparison-based trees: lookup cost depends on the key's length, not the number of entries. A TRIE with 100 entries and a TRIE with 100 million entries traverse the same number of levels for the same key.
-
-The classic problems with TRIEs are well known. A naïve implementation that allocates a 256-entry child array at every level wastes enormous memory. Most slots are empty, especially near the leaves. Sparse levels dominate. The structure also suffers from pointer chasing: each level requires following a pointer to the next node, and those nodes are scattered across the heap with no cache locality guarantees. For small key populations, the overhead of multiple levels can exceed the cost of a flat sorted search. And for variable-depth TRIEs, the bookkeeping to know what type of node you're looking at, how deep you are, and when you've reached a leaf adds complexity at every step.
-
-### 1.2 B-TREE
-
-A B-tree is a self-balancing search tree designed for systems where large blocks of data are read at once (originally disk pages, but equally applicable to CPU cache lines). Unlike a binary tree where each node holds one key and has two children, a B-tree node holds many keys in a sorted array and fans out to many children. A B-tree of order M stores up to M-1 keys per node and has up to M children.
-
-The fundamental insight is that when data is accessed in blocks (whether disk sectors or cache lines), it's better to pack many keys into each block and search within it than to follow pointers between small nodes. A B-tree node with 100 keys in a contiguous sorted array touches 1-2 cache lines to search, while the same 100 keys in a binary tree require ~7 pointer-chasing hops across 7 random cache lines.
-
-B-trees maintain balance through split and merge operations. When a node overflows (exceeds M-1 keys), it splits into two nodes and pushes the median key up to the parent. When a node underflows (drops below ⌈M/2⌉-1 keys), it merges with a sibling. This keeps the tree balanced with O(log_M N) depth, much shallower than a binary tree's O(log_2 N) because the logarithm base is the fan-out M rather than 2.
-
-The B-tree's strengths (wide nodes, sorted arrays, cache-friendly access patterns, and shallow depth) are exactly what a naïve TRIE lacks. A TRIE has the advantage of key-length-dependent lookup (independent of N), but its nodes are typically small and pointer-heavy.
-
-However, B-trees have their own weaknesses. Lookup cost is O(log_M N): it depends on the number of entries, not the key length. As N grows into the millions, even with a high branching factor M, the tree deepens and each level is a potential cache miss. B-trees also provide no key compression: every entry stores the complete key, even when adjacent entries share long common prefixes. In a dataset where a million keys share the same first 6 bytes, a B-tree stores those 6 bytes a million times. Finally, B-tree split and merge operations must maintain global balance invariants, which adds complexity and can cascade upward through the tree.
-
-Combining the two approaches yields a structure with the routing efficiency of a TRIE (O(K) lookup independent of N, prefix compression) and the storage efficiency of a B-tree (wide sorted leaves, cache-friendly sequential access).
-
-### 1.3 KTRIE
-
-The KTRIE is a cross between a TRIE and a B-tree, designed for compact data and fast reads (implemented with integer keys for kntrie, and variable length strings as keys for kstrie). It uses TRIE-style prefix routing to navigate to the right region of the key space, then stores the remaining suffixes in B-tree-style wide sorted leaves. This combination introduces three structural ideas that address the classic problems of both parent structures.
-
-A key in the KTRIE is decomposed into three logical regions:
-
-```
-KEY = [PREFIX] [BRANCH ...] [SUFFIX]
-```
-
-**PREFIX** is a run of key bytes that all entries in a subtree share. Rather than creating a chain of single-child nodes to traverse this common prefix (as a naïve TRIE would), the KTRIE captures the entire shared prefix in a single node. This eliminates the wasted memory and latency of redundant intermediate levels. When a lookup reaches a prefix-captured node, it compares the full prefix in one step and either continues or exits immediately.
-
-**BRANCH** nodes are the KTRIE's equivalent of TRIE nodes. They fan out to up to N children based on a fixed-width chunk of the key. A TRIE node that branches on one byte has up to 256 children. The KTRIE may use one or more BRANCH levels depending on key width and data distribution. Each BRANCH node routes the lookup one step closer to the leaf by consuming a fixed number of key bits. The key difference from a naïve TRIE is that BRANCH nodes only exist where the data actually fans out. PREFIX capture absorbs the levels where it doesn't.
-
-**SUFFIX** is the remaining portion of the key after all BRANCH levels have been consumed. Rather than continuing to subdivide into deeper BRANCH nodes, the KTRIE collects entries with different suffixes into a **compact leaf**: a flat sorted array of suffix/value pairs stored in a single allocation. This is the B-tree inheritance: wide sorted leaves that trade further tree subdivision for cache-friendly sequential storage. It directly addresses two TRIE problems: it eliminates pointer chasing for the tail of the key, and it avoids the memory overhead of sparsely-populated BRANCH nodes near the leaves. A compact leaf holding 100 entries in a contiguous sorted array is far more cache-friendly and memory-efficient than 100 entries scattered across a tree of BRANCH nodes.
-
-**How this improves on a generic TRIE:**
-
-The naïve TRIE has a fixed structure: every level creates a node, every node fans out by the same width, and every key traverses every level. The KTRIE adapts its structure to the data:
-
-- Where keys share a common prefix, PREFIX capture collapses the redundant levels into a single comparison. A subtree where 1000 keys share the same top 4 bytes uses one node instead of four.
-
-- Where the key space is sparse at a given level, BRANCH nodes only allocate for children that actually exist rather than reserving the full fan-out width.
-
-- Where a subtree is small enough, compact leaves absorb all remaining SUFFIXes into a flat array, avoiding further branching entirely. The threshold for "small enough" determines how deep the TRIE actually goes for a given dataset; small datasets may never create BRANCH nodes at all.
-
-The result is a structure whose depth and memory usage adapt to the actual key distribution rather than being fixed by the key width. Dense, clustered key ranges are captured by PREFIX nodes and compact leaves. Sparse, spread-out ranges are handled by BRANCH nodes that only allocate for children that exist.
-
-## 2 Optimizations
-
-### 2.1 Key Representation
+### 1.1 Key Representation
 
 All key types (`uint16_t`, `int32_t`, `uint64_t`, signed or unsigned) are transformed into a canonical 64-bit internal representation before any kntrie operation. This transformation is the foundation that makes the entire structure work uniformly.
 
@@ -115,21 +61,13 @@ This left-alignment is what makes the 8-bit byte-wise dispatch work uniformly. T
 
 Without this normalization, every node operation would need key-width-specific logic. With it, the byte at any depth is always at the same bit position in the 64-bit internal key.
 
-### 2.2 Value Storage
+### 1.2 Value Storage: Implementation Details
 
-Values stored in the kntrie are handled through a compile-time trait, `value_traits<VALUE, ALLOC>`, that selects one of three categories based on type properties. The selection is entirely `constexpr`. The compiler generates specialized code for each category with zero runtime dispatch overhead.
+The three value storage categories (A: trivial inline, B: packed bool, C: heap pointer) are described in [KTRIE Concepts](ktrie_concepts.md). This section covers KNTRIE-specific implementation details.
 
-| Cat | Condition | Storage | Explanation |
-|-----|-----------|---------|-------------|
-| A | trivially_copyable && sizeof ≤ 8 | normalized u8/u16/u32/u64 | baseline for small trivial types |
-| B | `std::is_same_v<VALUE, bool>` | packed bits in u64 words | specialization of A; bool is intercepted for bit-packing |
-| C | all remaining types | pointer to heap-allocated T | non-trivial or sizeof > 8 |
+**Normalization to fixed-width unsigned.** Category A values are normalized to a fixed-width unsigned integer type to reduce template instantiations: 1 byte → `uint8_t`, 2 → `uint16_t`, 3–4 → `uint32_t`, 5–8 → `uint64_t`. This means `kntrie<uint64_t, int>` and `kntrie<uint64_t, float>` share the same internal implementation. The `slot_type` is the normalized unsigned type.
 
-**Category A: Trivial inline.** Applies when `sizeof(VALUE) <= 8` and the type is trivially copyable. The value is **normalized** to a fixed-width unsigned integer type to reduce template instantiations: 1 byte → `uint8_t`, 2 → `uint16_t`, 3–4 → `uint32_t`, 5–8 → `uint64_t`. This means `kntrie<uint64_t, int>` and `kntrie<uint64_t, float>` share the same internal implementation. Values are stored directly in the slot array: no indirection, no heap allocation, no destructor call. For the common case of `kntrie<uint64_t, uint64_t>`, each value is just 8 bytes in a contiguous array with excellent cache behavior.
-
-**Category B: Packed bool.** Applies when `VALUE` is `bool`. Instead of storing one byte per boolean, values are packed into `uint64_t` words via the `bool_slots` helper (64 booleans per word). This halves the per-entry memory cost for boolean-valued maps and set-like use cases. The `as_ptr` helper returns a pointer to a static `true` or `false` constant based on the bit value. When a leaf covers exactly 256 possible key values — the case where the remaining unresolved key portion is a single byte — bool values are packed into a dedicated 256-bit bitmap with one bit per key and no per-value slot overhead.
-
-**Category C: Heap-allocated pointer.** Applies when `sizeof(VALUE) > 8` or the type is not trivially copyable. The kntrie allocates a `VALUE*` on the heap via the rebind allocator, constructs the value in place, and stores the 8-byte pointer in the slot array. `slot_type` is `VALUE*`. Since a pointer is trivially copyable, the compiler optimizes moves of pointer arrays to `memcpy`/`memmove` automatically. Destroy must deallocate the heap object on erase or node teardown.
+**Bitmap256 bool specialization.** When a leaf covers exactly 256 possible key values — the case where the remaining unresolved key portion is a single byte — bool values are packed into a dedicated 256-bit bitmap with one bit per key and no per-value slot overhead.
 
 The compile-time booleans that drive all internal dispatch:
 
@@ -139,27 +77,7 @@ HAS_DESTRUCTOR = !IS_TRIVIAL                                  // A: false   B: f
 IS_BOOL        = std::is_same_v<VALUE, bool>                  // A: false   B: true   C: false
 ```
 
-The `slot_type` is either a normalized unsigned integer (A), `bool` (B), or `VALUE*` (C), and all node code operates on `slot_type` uniformly.
-
-#### 2.2.1 Slot Movement: std::copy vs std::move
-
-Two cases based on whether source and destination can overlap:
-
-**No overlap (realloc, new node, split):** `std::copy`. Compiler optimizes to `memcpy` for trivial types. Faster than `memmove` because `memmove` must check whether source and destination overlap to determine copy direction, a check that `memcpy`/`std::copy` skips since overlap is guaranteed absent.
-
-**Overlap (in-place insert gap, erase compaction):** `std::move` / `std::move_backward`. Compiler optimizes to `memmove` for trivial types (handles overlap).
-
-All dispatch is `if constexpr`; dead branches are eliminated at compile time.
-
-#### 2.2.2 Insert / Erase / Destroy Splits
-
-| Operation | A | B | C |
-|---|---|---|---|
-| Insert (store) | raw write | bit set | alloc + placement-new |
-| Erase (single) | nothing | bit clear | dtor + dealloc |
-| Destroy leaf | nothing | nothing | dtor + dealloc all live slots |
-
-#### 2.2.3 Abstraction Responsibilities
+**Abstraction responsibilities:**
 
 **kntrie** (API boundary): Normalizes both key and value before forwarding to `kntrie_impl`. Calls `store(val, alloc)` to get a `slot_type` on insert. Calls `as_ptr(slot)` to get `const VALUE*` on find/iterator deref. Never destroys directly.
 
@@ -169,7 +87,7 @@ All dispatch is `if constexpr`; dead branches are eliminated at compile time.
 
 **_compact / _bitmask** (node internals): No-overlap operations (realloc, new node builds) use `std::copy`. In-place shifts (insert gap, erase compaction) use `std::move` / `std::move_backward`. Insert and destroy dispatch on `if constexpr (IS_TRIVIAL)` (A/B) vs `if constexpr (!IS_TRIVIAL)` (C).
 
-### 2.3 Memory Hysteresis
+### 1.3 Memory Hysteresis
 
 Node allocations snap to size classes. For allocations up to 128 u64s, a fixed bin table provides 12 size classes: {4, 6, 8, 10, 14, 18, 26, 34, 48, 69, 98, 128} u64s, growing by approximately 1.25–1.5× per step. Beyond 128 u64s, sizes snap to power-of-two with midpoints. The worst-case overhead is about 50%.
 
@@ -179,43 +97,11 @@ This padding creates room for in-place insert and erase operations. A node alloc
 
 **Compact leaves** use power-of-two slot counts via `std::bit_ceil`, with a minimum of 2 slots. Compact leaves track the physical slot count and the entry count as separate values. The physical count may exceed the entry count due to dup padding (extra slots filled with copies of adjacent entries to enable in-place mutation).
 
-## 3 Node Concepts
+## 2 Node Concepts
 
-### 3.1 Bitmaps
+### 2.1 Bitmap Dispatch Modes
 
-The `bitmap_256_t` is a 256-bit bitmap stored as 4 `uint64_t` words, used throughout the kntrie for compact representation of sets over the 256 possible byte values. Each node type that uses bitmaps introduces its specific usage; this section describes the shared bitmap operations.
-
-**Presence check.** Bit `i` of the bitmap represents index `i`:
-
-```
-word_index = i >> 6       // which of the 4 u64s (i / 64)
-bit_index  = i & 63       // which bit within that word (i % 64)
-```
-
-Checking: `words[word_index] & (1ULL << bit_index)`.
-
-**Computing the dense array position.** Given that index `i` is present, its position in the packed array is the number of set bits *before* index `i`, the popcount of all bits below position `i`.
-
-The shift-left trick isolates the relevant bits. For the word containing the target bit:
-
-```cpp
-uint64_t before = words[w] << (63 - b);
-```
-
-This moves the target bit to position 63 and shifts everything above it out. `std::popcount(before)` counts the set bits at positions ≤ `b` in the original word, including the target bit itself.
-
-To get the full position across all 4 words, add the popcounts of all complete words below the target word, done branchlessly:
-
-```cpp
-int slot = std::popcount(before);
-slot += std::popcount(words[0]) & -int(w > 0);
-slot += std::popcount(words[1]) & -int(w > 1);
-slot += std::popcount(words[2]) & -int(w > 2);
-```
-
-The `& -int(w > N)` trick: when true, `-int(true)` is `-1` (all-ones in two's complement), so the popcount passes through. When false, the popcount is masked to zero. No branches.
-
-**Three modes** of bitmap lookup, selected at compile time via `slot_mode`:
+The shared bitmap representation and popcount mechanics are described in [KTRIE Concepts](ktrie_concepts.md). The KNTRIE uses three dispatch modes, selected at compile time via `slot_mode`:
 
 **FAST_EXIT** (insert, erase, iteration): Check whether the target bit is set. If not, return -1 immediately. If set, subtract 1 from the popcount to get the 0-based index into the dense array.
 
@@ -229,7 +115,7 @@ A miss produces slot index 0. Slot 0 in any child array is reserved as the miss-
 
 **UNFILTERED** (insertion position): Returns the count of set bits strictly before the target, giving the correct insertion point in the dense array.
 
-### 3.2 Node Header
+### 2.2 Node Header
 
 All allocated nodes in the kntrie share a common 8-byte header (`node_header_t`) at position `node[0]`:
 
@@ -246,7 +132,7 @@ All allocated nodes in the kntrie share a common 8-byte header (`node_header_t`)
 
 Internal nodes use only `node_header_t` (1 u64). Leaf nodes additionally carry 5 function pointers and a u64 prefix field beyond the common header, occupying 7 u64s total.
 
-### 3.3 Tagged Pointers
+### 2.3 Tagged Pointers
 
 Every child pointer in the kntrie is a tagged `uint64_t` encoding both address and type:
 
@@ -255,11 +141,11 @@ Every child pointer in the kntrie is a tagged `uint64_t` encoding both address a
 
 The `while (!(ptr & LEAF_BIT))` loop tests the sign bit with a single instruction to distinguish internal nodes from leaves.
 
-### 3.4 Descendants
+### 2.4 Descendants
 
 Descendants are not stored in the node header. Internal nodes store a `uint64_t` descendant count at the end of their allocation, holding the exact total entry count for the subtree. This count drives coalesce decisions on erase: when the subtree total drops to 4096 entries or below, the entire subtree is collapsed back into a single compact leaf. Leaves don't need descendant tracking; their `entries` field is exact.
 
-### 3.5 Leaf Contract
+### 2.5 Leaf Contract
 
 **Leaf header (7 u64 = 56 bytes).** All leaf node types share an extended header layout:
 
@@ -296,11 +182,11 @@ Leaves store skip information in two places: the `skip` count in `depth_t`, and 
 
 The skip mechanism described above applies to leaves. Internal node skip operates on the same `depth_t.skip` field but serves a different structural purpose.
 
-## 4 Nodes
+## 3 Nodes
 
-### 4.1 Sentinel
+### 3.1 Sentinel
 
-The sentinel is a leaf node that represents "not found": a statically-allocated 7-u64 block matching the leaf header layout:
+The sentinel concept is described in [KTRIE Concepts](ktrie_concepts.md). The KNTRIE sentinel is a statically-allocated 7-u64 block matching the leaf header layout:
 
 ```
 [header=0] [find_fn→nullptr] [next_fn→{not_found}] [prev_fn→{not_found}]
@@ -309,14 +195,9 @@ The sentinel is a leaf node that represents "not found": a statically-allocated 
 
 Each function pointer targets a static function returning the appropriate "not found" value: `find_fn` returns `nullptr`, the iter/edge functions return `{0, nullptr, false}`. Because these are real function pointers, the sentinel is callable through the same dispatch mechanism as any real leaf. No special-casing needed.
 
-A zeroed `node_header_t` has `entries = 0`, which makes the sentinel a valid empty leaf. The sentinel is per-template-instantiation (one for each `VALUE` type) because the function pointer types differ. It's initialized as a static local and never deallocated. Because it's a single instance per type, repeated misses all hit the same cache lines, which stay hot.
+A zeroed `node_header_t` has `entries = 0`, which makes the sentinel a valid empty leaf. The sentinel's tagged pointer is `SENTINEL_TAGGED`. Internal nodes store `SENTINEL_TAGGED` at child position 0, enabling the BRANCHLESS dispatch mode where a miss resolves to slot 0.
 
-The sentinel appears in two roles:
-
-- **Empty root.** When the kntrie has no entries, the root pointer is `SENTINEL_TAGGED`, a tagged pointer to the sentinel. Find loads the function pointer, calls it, gets nullptr.
-- **Internal node miss target.** Internal nodes store `SENTINEL_TAGGED` at child position 0. This allows branchless bitmap lookups: a miss resolves to a valid leaf node that simply returns "not found" rather than requiring a conditional branch.
-
-### 4.2 Internal Nodes
+### 3.2 Internal Nodes
 
 Internal nodes implement the KTRIE's BRANCH concept: 256-way fan-out dispatching on one byte of the key per node. They use the `bitmap_256_t` to compress the 256-entry child array to only the children that exist.
 
@@ -328,7 +209,7 @@ Internal nodes implement the KTRIE's BRANCH concept: 256-way fan-out dispatching
 
 The header is a single u64 `node_header_t`. The bitmap records which of the 256 possible byte values have children. The miss pointer at position 0 of the children area holds `SENTINEL_TAGGED` for BRANCHLESS miss fallback: when a bitmap lookup misses (the target byte isn't present), the popcount returns index 0, which loads the miss pointer. The find loop sees the LEAF_BIT, untags, loads the not-found node's `find_fn`, calls it, and returns nullptr. No conditional branch at the bitmap level. The N children are tagged u64 pointers, packed densely in bitmap order. The descendants counter at the end holds the exact total entry count for the subtree.
 
-**Child lookup** uses the bitmap modes described earlier. On the find path, BRANCHLESS mode returns a 1-based index (hitting the sentinel on miss). On insert/erase, FAST_EXIT mode returns -1 on miss.
+**Child lookup** uses the bitmap modes described in section 2.1. On the find path, BRANCHLESS mode returns a 1-based index (hitting the sentinel on miss). On insert/erase, FAST_EXIT mode returns -1 on miss.
 
 The child at each position is a tagged pointer that can reference another internal node (for deeper BRANCH levels), a compact leaf (a flat sorted array of suffix/value pairs), a leaf that uses a 256-bit bitmap as key storage rather than a sorted array, or the sentinel. This is how the kntrie forms chains of variable depth. Each internal node links to the next level, and the chain terminates at a leaf.
 
@@ -367,7 +248,7 @@ An internal node with skip=2 and N real children looks like:
 
 The find loop traverses embeds transparently. `bm_child()` works on any bitmap pointer, whether it points to an embed's bitmap or the final bitmap. The difference is that embeds are inline in the same allocation, eliminating the pointer chase between the skip levels and the real dispatch level. This adds 6 u64s per skip level to the node allocation but avoids a separate heap allocation for each single-child intermediate node.
 
-### 4.3 Compact Leaves
+### 3.3 Compact Leaves
 
 Compact leaf nodes implement the KTRIE's SUFFIX concept: they store key/value pairs in sorted arrays within a single allocation. They handle the case where a subtree's keys are few enough that a flat sorted structure outperforms further BRANCH subdivision.
 
@@ -379,25 +260,9 @@ The threshold is COMPACT_MAX = 4096. This value is intentionally large. The kntr
 [Header: 7 u64] [Sorted keys (aligned to 8)] [Values (aligned to 8)]
 ```
 
-The 7-u64 leaf header carries the `node_header_t`, 5 function pointers, and the prefix. The keys and values arrays have `total_slots` physical entries, where `total_slots` is a power of 2 ≥ `entries`. The extra slots are filled with duplicates of adjacent entries, padding that enables in-place mutation and guarantees power-of-2 array sizes for the branchless binary search.
+The 7-u64 leaf header carries the `node_header_t`, 5 function pointers, and the prefix. The keys and values arrays have `total_slots` physical entries, where `total_slots` is a power of 2 ≥ `entries`. The extra slots are filled with duplicates of adjacent entries, padding that enables in-place mutation and guarantees power-of-2 array sizes for the branchless binary search (see [KTRIE Concepts](ktrie_concepts.md), section 1.1).
 
-**Search: branchless binary search.** Finding a key in a compact leaf uses a pure cmov halving loop:
-
-```cpp
-static const K* find_base(const K* base, unsigned count, K key) noexcept {
-    do {
-        count >>= 1;
-        base += (base[count] <= key) ? count : 0;
-    } while (count > 1);
-    return base;
-}
-```
-
-This performs exactly `log2(count)` comparisons, each compiling to a cmov instruction with no data-dependent branch. Modern x86 CPUs execute this in ~2 cycles per iteration regardless of the data, making the search completely branch-predictor-independent.
-
-The key requirement is that `count` must be a power of 2, which is guaranteed by the compact leaf's slot allocation strategy. Every compact leaf has `total_slots = bit_ceil(entries)` physical slots, padded with dup entries to fill the power-of-2 boundary. The minimum of 2 slots ensures count enters the loop as ≥ 2, so at least one comparison always executes.
-
-A separate `find_base_first` variant uses strict `<` instead of `<=` to find the first occurrence of a key (lower bound), used by iterator operations and dup-aware insert.
+**Search** uses the branchless binary search described in [KTRIE Concepts](ktrie_concepts.md). The power-of-2 slot count guarantees the required input constraint. Every compact leaf has `total_slots = bit_ceil(entries)` physical slots, padded with dup entries to fill the boundary. The minimum of 2 slots ensures count enters the loop as ≥ 2, so at least one comparison always executes.
 
 **Dup tombstone / padding strategy.** The power-of-two allocation means a compact leaf almost always has more physical slots than entries. Rather than leaving the extra space unused, the leaf fills it with **dup slots**, copies of adjacent real entries. These dups serve two purposes:
 
@@ -413,7 +278,7 @@ The dup count is never stored; it's always derived: `total_slots - entries`. Thi
 
 For heap-allocated values (`VALUE*`), all dup slots in a run share the same pointer as their neighbor. Destroy must be called exactly once per unique key, not once per physical slot. The `destroy_and_dealloc` operation skips adjacent duplicate keys to avoid double-free.
 
-### 4.4 Bitmap256 Leaves
+### 3.4 Bitmap256 Leaves
 
 When the remaining suffix at a given depth is exactly 8 bits (the suffix type is `uint8_t`), a compact leaf would hold entries whose keys span at most 256 possible values. A bitmap256 leaf is a more compact representation for this case: since all 256 possibilities can be encoded in a 256-bit bitmap, there is no need for a sorted key array. The bitmap itself *is* the key storage.
 
@@ -437,7 +302,7 @@ Lookup is a single `find_slot<FAST_EXIT>`: check the bit in the presence bitmap,
 
 Bitmap256 leaves can appear at any depth where the remaining suffix is 8 bits, which depends on the original key width and how many skip prefix bytes have been captured.
 
-### 4.5 Root
+### 3.5 Root
 
 The root of the kntrie ties all node types together. It is a single tagged pointer (`root_ptr_v`) that can reference any node type: the sentinel (when empty), a compact leaf (for small collections), or an internal node (for large collections that require BRANCH dispatch).
 
@@ -454,9 +319,9 @@ When the kntrie is empty, `root_ptr_v` is `SENTINEL_TAGGED`. The first insert cr
 
 This design costs 25 bytes of fixed state (root_ptr 8 + prefix 8 + size 8 + skip_bits 1), padded to 32 bytes with the default stateless allocator. Stateful allocators increase the builder's size accordingly. For small collections (which may be just a single compact leaf), there is no wasted root structure. For large collections, the single root pointer leads to an internal node that provides 256-way fan-out.
 
-## 5 Operations
+## 4 Operations
 
-### 5.1 Depth-Based Dispatch
+### 4.1 Depth-Based Dispatch
 
 The kntrie tracks position within the key using a **byte depth**, the number of key bytes consumed from the root to the current node. Each internal node dispatches on one byte, incrementing depth by 1. Skip levels increment depth by the skip count.
 
@@ -474,7 +339,7 @@ Because there are only a few possible function pointer targets (one per suffix t
 
 For write operations (insert, erase), `depth_switch` dispatches at the point where template-specialized code is needed: node splitting, coalescing, and suffix extraction. These operations are not on the hot read path, so the switch overhead is negligible compared to allocation and memmove costs.
 
-### 5.2 find
+### 4.2 find
 
 Find is the hot path. It begins with a root prefix check: `(ik ^ root_prefix_v) & root_prefix_mask()`. If any prefix byte differs, the key is absent immediately, no descent needed.
 
@@ -484,7 +349,7 @@ When the loop reaches a leaf (sign bit set), it untags the pointer, loads the le
 
 The entire find path from root to result is typically 2-4 pointer dereferences plus one branchless search for collections below ~1M entries, with no heap allocation and no locking.
 
-### 5.3 find first / find last
+### 4.3 find first / find last
 
 `descend_first_loop` and `descend_last_loop` find the minimum and maximum entries in the trie. They follow the same internal node loop as find, but instead of extracting a key byte, they follow the first or last child at each level:
 
@@ -496,7 +361,7 @@ return get_find_first<VALUE>(untag_leaf(ptr))(node);
 
 `bm_first_child` returns the child at the lowest set bit in the bitmap; `bm_last_child` returns the highest. At the leaf, the `find_first_fn` / `find_last_fn` function pointer returns the minimum or maximum entry within that leaf. These are used by `begin()`, `rbegin()`, and the walk-back phase of iteration.
 
-### 5.4 find next / find prev
+### 4.4 find next / find prev
 
 Iterator advancement is the second-hottest path after find. `iter_next_loop` finds the smallest key strictly greater than the current key. It operates in three phases:
 
@@ -510,7 +375,7 @@ Iterator advancement is the second-hottest path after find. `iter_next_loop` fin
 
 The root prefix is checked before entering the loop. If the iterator's key falls outside the root prefix, the prefix comparison determines whether to descend to the first entry (key is below the prefix) or return end (key is above).
 
-### 5.5 insert
+### 4.5 insert
 
 Insert begins with a root prefix check. If the new key diverges from the current root prefix, `reduce_root_skip` shortens the prefix to the point of divergence, creating internal nodes to fan out on the differing byte.
 
@@ -524,7 +389,7 @@ The core insertion is `insert_node`, a runtime-recursive function that descends 
 
 After insert returns to the root level, `normalize_root` checks whether the root can absorb additional prefix bytes (if the root is an internal node with uniform first-byte children).
 
-### 5.6 erase
+### 4.6 erase
 
 Erase follows the same descent structure as insert: root prefix check, then `erase_node` recurses through sentinel (return immediately), leaf (erase from sorted array or bitmap), and internal node (recurse into child).
 
@@ -538,7 +403,7 @@ The interesting logic is on the unwind path:
 
 For compact leaves, erase converts the removed entry into a dup by overwriting it with a copy of its neighbor, an O(1) operation with no memmove. For bitmap256 leaves, erase clears the presence bit and shifts subsequent values down by one slot, an O(N) operation bounded by 256. If the leaf becomes empty, it is deallocated and the parent removes the child from its bitmap.
 
-### 5.7 Iterators are Snapshots
+### 4.7 Iterators are Snapshots
 
 The kntrie iterator is a snapshot: it stores a copy of the current key and value, not a pointer into the trie. Each `operator++` and `operator--` re-descends the trie from the root via `iter_next` or `iter_prev` to find the next or previous entry.
 
@@ -550,11 +415,11 @@ This design has two consequences:
 
 The cost of this approach is that each iterator increment performs a full root-to-leaf descent rather than following a stored pointer. In practice this cost is low: most increments resolve within a single compact leaf (the hot path in `find_next_fn`), and the descent through internal nodes is the same tight loop as find. The benefit is simplicity: no iterator bookkeeping, no invalidation tracking, and no dangling pointer risk.
 
-## 6 Performance
+## 5 Performance
 
 Performance graphs and detailed benchmark results are maintained separately and updated with each optimization pass. This section describes the conceptual performance characteristics and why they arise.
 
-### 6.1 std::map
+### 5.1 std::map
 
 `std::map` is a red-black tree, a self-balancing binary search tree where each node contains one key-value pair, two child pointers, a parent pointer, and a color bit. On most implementations, each node is a separate heap allocation of about 72 bytes (key + value + 3 pointers + color + alignment padding).
 
@@ -568,7 +433,7 @@ The fundamental costs are:
 
 **Sorted iteration.** The red-black tree provides naturally sorted in-order traversal, with O(1) amortized iterator increment and decrement. kntrie provides the same sorted iteration, but resolves most increments within a single compact leaf via branchless binary search rather than following parent/child pointers.
 
-### 6.2 std::unordered_map
+### 5.2 std::unordered_map
 
 `std::unordered_map` is a hash table, typically implemented as an array of buckets with separate chaining. Each entry is a heap-allocated node containing the key, value, hash, and a next pointer. On most implementations, per-entry overhead is roughly 40-64 bytes depending on key/value size and alignment.
 
@@ -584,7 +449,7 @@ The fundamental costs are:
 
 **No compression.** Every entry stores the complete key, the full hash value, and structural pointers. Adjacent entries with similar keys get no benefit from their similarity.
 
-### 6.3 KNTRIE
+### 5.3 KNTRIE
 
 The kntrie's lookup complexity is O(K) where K is the key width in bytes, a constant determined at compile time. For `uint64_t`, K=8 means at most 8 levels of internal nodes (one per byte). For `int32_t`, K=4 means at most 4 levels. For `uint16_t`, K=2 means at most 2 levels. This is independent of N, the number of entries.
 
@@ -606,7 +471,7 @@ These two mechanisms create a dependency on N for the effective depth:
 
 The key insight: O(K) is the theoretical bound, but the compact leaf mechanism makes the practical behavior closer to O(1) with a binary search whose size grows slowly with N. The kntrie's depth only increases when a key range is dense enough to overflow compact leaves.
 
-### 6.4 The Real Complexity: Memory Hierarchy
+### 5.4 The Real Complexity: Memory Hierarchy
 
 Textbook complexity treats memory access as uniform cost. In practice, every pointer chase or array lookup pays a cost determined by where the data lives in the memory hierarchy: L1, L2, L3, or DRAM. As N grows and the working set exceeds each cache level, per-operation cost increases for all three structures.
 
@@ -616,6 +481,6 @@ The kntrie's advantage is twofold. First, much smaller memory footprint means th
 
 In short: as N grows, all three structures pay an increasing cost per operation driven by cache pressure. The kntrie's smaller memory footprint keeps the working set in faster cache levels for larger N.
 
-## 7 Summary
+## 6 Summary
 
 The kntrie combines three inheritances: TRIE-style prefix routing for O(K) lookup independent of collection size, B-tree-style wide sorted leaves for cache-friendly storage and iteration, and bitmap compression for memory-efficient internal dispatch. The result is an ordered associative container that approaches hash-table lookup speed while maintaining full key ordering, with a memory footprint that can fall below the raw key-value data size through prefix and suffix compression. Benchmark data is maintained separately from this document.

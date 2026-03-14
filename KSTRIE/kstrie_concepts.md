@@ -1,93 +1,39 @@
-# kstrie Concepts
+# KSTRIE Concepts
+
+This document describes the KSTRIE, the variable-length string key instantiation of the KTRIE. For shared data structure concepts (TRIE, B-tree, KTRIE decomposition), binary search, bitmap representation, sentinel design, and value storage categories, see [KTRIE Concepts](ktrie_concepts.md).
 
 ## Table of Contents
 
-- [1 Data Structures](#1-data-structures)
-  - [1.1 TRIE](#11-trie)
-  - [1.2 B-TREE](#12-b-tree)
-  - [1.3 KTRIE](#13-ktrie)
-- [2 Optimizations](#2-optimizations)
-  - [2.1 Key Representation and Character Maps](#21-key-representation-and-character-maps)
-  - [2.2 Value Storage](#22-value-storage)
-  - [2.3 Memory Hysteresis](#23-memory-hysteresis)
-- [3 Node Concepts](#3-node-concepts)
-  - [3.1 Bitmaps](#31-bitmaps)
-  - [3.2 Node Header](#32-node-header)
-  - [3.3 Compact Node Prefix](#33-compact-node-prefix)
-- [4 Nodes](#4-nodes)
-  - [4.1 Sentinel](#41-sentinel)
-  - [4.2 Compact Nodes](#42-compact-nodes)
-  - [4.3 Bitmask Nodes](#43-bitmask-nodes)
-  - [4.4 Root](#44-root)
-- [5 Operations](#5-operations)
-  - [5.1 find](#51-find)
-  - [5.2 insert](#52-insert)
-  - [5.3 erase](#53-erase)
-  - [5.4 find first / find last](#54-find-first--find-last)
-  - [5.5 find next / find prev](#55-find-next--find-prev)
-  - [5.6 Iterators are Snapshots](#56-iterators-are-snapshots)
-- [6 Performance](#6-performance)
-  - [6.1 std::map](#61-stdmap)
-  - [6.2 std::unordered_map](#62-stdunordered_map)
-  - [6.3 KSTRIE](#63-kstrie)
-  - [6.4 The Real Complexity: Memory Hierarchy](#64-the-real-complexity-memory-hierarchy)
-- [7 Summary](#7-summary)
+- [1 Optimizations](#1-optimizations)
+  - [1.1 Key Representation and Character Maps](#11-key-representation-and-character-maps)
+  - [1.2 Value Storage: Implementation Details](#12-value-storage-implementation-details)
+  - [1.3 Memory Hysteresis](#13-memory-hysteresis)
+- [2 Node Concepts](#2-node-concepts)
+  - [2.1 Bitmap Dispatch](#21-bitmap-dispatch)
+  - [2.2 Node Header](#22-node-header)
+  - [2.3 Compact Node Prefix](#23-compact-node-prefix)
+- [3 Nodes](#3-nodes)
+  - [3.1 Sentinel](#31-sentinel)
+  - [3.2 Compact Nodes](#32-compact-nodes)
+  - [3.3 Bitmask Nodes](#33-bitmask-nodes)
+  - [3.4 Root](#34-root)
+- [4 Operations](#4-operations)
+  - [4.1 find](#41-find)
+  - [4.2 insert](#42-insert)
+  - [4.3 erase](#43-erase)
+  - [4.4 find first / find last](#44-find-first--find-last)
+  - [4.5 find next / find prev](#45-find-next--find-prev)
+  - [4.6 Iterators are Snapshots](#46-iterators-are-snapshots)
+- [5 Performance](#5-performance)
+  - [5.1 std::map](#51-stdmap)
+  - [5.2 std::unordered_map](#52-stdunordered_map)
+  - [5.3 KSTRIE](#53-kstrie)
+  - [5.4 The Real Complexity: Memory Hierarchy](#54-the-real-complexity-memory-hierarchy)
+- [6 Summary](#6-summary)
 
-## 1 Data Structures
+## 1 Optimizations
 
-### 1.1 TRIE
-
-A TRIE (from "retrieval") is a tree structure where each node represents a portion of a key rather than the whole key. In a string TRIE, each level might branch on one character. In a numeric TRIE, each level branches on some chunk of bits. The path from root to leaf spells out the complete key.
-
-This gives TRIEs a fundamental property that distinguishes them from comparison-based trees: lookup cost depends on the key's length, not the number of entries. A TRIE with 100 entries and a TRIE with 100 million entries traverse the same number of levels for the same key.
-
-The classic problems with TRIEs are well known. A naïve implementation that allocates a 256-entry child array at every level wastes enormous memory. Most slots are empty, especially near the leaves. Sparse levels dominate. The structure also suffers from pointer chasing: each level requires following a pointer to the next node, and those nodes are scattered across the heap with no cache locality guarantees. For small key populations, the overhead of multiple levels can exceed the cost of a flat sorted search. And for variable-depth TRIEs, the bookkeeping to know what type of node you're looking at, how deep you are, and when you've reached a leaf adds complexity at every step.
-
-### 1.2 B-TREE
-
-A B-tree is a self-balancing search tree designed for systems where large blocks of data are read at once (originally disk pages, but equally applicable to CPU cache lines). Unlike a binary tree where each node holds one key and has two children, a B-tree node holds many keys in a sorted array and fans out to many children. A B-tree of order M stores up to M-1 keys per node and has up to M children.
-
-The fundamental insight is that when data is accessed in blocks (whether disk sectors or cache lines), it's better to pack many keys into each block and search within it than to follow pointers between small nodes. A B-tree node with 100 keys in a contiguous sorted array touches 1-2 cache lines to search, while the same 100 keys in a binary tree require ~7 pointer-chasing hops across 7 random cache lines.
-
-B-trees maintain balance through split and merge operations. When a node overflows (exceeds M-1 keys), it splits into two nodes and pushes the median key up to the parent. When a node underflows (drops below ⌈M/2⌉-1 keys), it merges with a sibling. This keeps the tree balanced with O(log_M N) depth, much shallower than a binary tree's O(log_2 N) because the logarithm base is the fan-out M rather than 2.
-
-The B-tree's strengths (wide nodes, sorted arrays, cache-friendly access patterns, and shallow depth) are exactly what a naïve TRIE lacks. A TRIE has the advantage of key-length-dependent lookup (independent of N), but its nodes are typically small and pointer-heavy.
-
-However, B-trees have their own weaknesses. Lookup cost is O(log_M N): it depends on the number of entries, not the key length. As N grows into the millions, even with a high branching factor M, the tree deepens and each level is a potential cache miss. B-trees also provide no key compression: every entry stores the complete key, even when adjacent entries share long common prefixes. In a dataset where a million keys share the same first 6 bytes, a B-tree stores those 6 bytes a million times. Finally, B-tree split and merge operations must maintain global balance invariants, which adds complexity and can cascade upward through the tree.
-
-Combining the two approaches yields a structure with the routing efficiency of a TRIE (O(K) lookup independent of N, prefix compression) and the storage efficiency of a B-tree (wide sorted leaves, cache-friendly sequential access).
-
-### 1.3 KTRIE
-
-The KTRIE is a cross between a TRIE and a B-tree, designed for compact data and fast reads (implemented with integer keys for kntrie, and variable length strings as keys for kstrie). It uses TRIE-style prefix routing to navigate to the right region of the key space, then stores the remaining suffixes in B-tree-style wide sorted leaves. This combination introduces three structural ideas that address the classic problems of both parent structures.
-
-A key in the KTRIE is decomposed into three logical regions:
-
-```
-KEY = [PREFIX] [BRANCH ...] [SUFFIX]
-```
-
-**PREFIX** is a run of key bytes that all entries in a subtree share. Rather than creating a chain of single-child nodes to traverse this common prefix (as a naïve TRIE would), the KTRIE captures the entire shared prefix in a single node. This eliminates the wasted memory and latency of redundant intermediate levels. When a lookup reaches a prefix-captured node, it compares the full prefix in one step and either continues or exits immediately.
-
-**BRANCH** nodes are the KTRIE's equivalent of TRIE nodes. They fan out to up to N children based on a fixed-width chunk of the key. A TRIE node that branches on one byte has up to 256 children. The KTRIE may use one or more BRANCH levels depending on key width and data distribution. Each BRANCH node routes the lookup one step closer to the leaf by consuming a fixed number of key bits. The key difference from a naïve TRIE is that BRANCH nodes only exist where the data actually fans out. PREFIX capture absorbs the levels where it doesn't.
-
-**SUFFIX** is the remaining portion of the key after all BRANCH levels have been consumed. Rather than continuing to subdivide into deeper BRANCH nodes, the KTRIE collects entries with different suffixes into a **compact leaf**: a flat sorted array of suffix/value pairs stored in a single allocation. This is the B-tree inheritance: wide sorted leaves that trade further tree subdivision for cache-friendly sequential storage. It directly addresses two TRIE problems: it eliminates pointer chasing for the tail of the key, and it avoids the memory overhead of sparsely-populated BRANCH nodes near the leaves. A compact leaf holding 100 entries in a contiguous sorted array is far more cache-friendly and memory-efficient than 100 entries scattered across a tree of BRANCH nodes.
-
-**How this improves on a generic TRIE:**
-
-The naïve TRIE has a fixed structure: every level creates a node, every node fans out by the same width, and every key traverses every level. The KTRIE adapts its structure to the data:
-
-- Where keys share a common prefix, PREFIX capture collapses the redundant levels into a single comparison. A subtree where 1000 keys share the same top 4 bytes uses one node instead of four.
-
-- Where the key space is sparse at a given level, BRANCH nodes only allocate for children that actually exist rather than reserving the full fan-out width.
-
-- Where a subtree is small enough, compact leaves absorb all remaining SUFFIXes into a flat array, avoiding further branching entirely. The threshold for "small enough" determines how deep the TRIE actually goes for a given dataset; small datasets may never create BRANCH nodes at all.
-
-The result is a structure whose depth and memory usage adapt to the actual key distribution rather than being fixed by the key width. Dense, clustered key ranges are captured by PREFIX nodes and compact leaves. Sparse, spread-out ranges are handled by BRANCH nodes that only allocate for children that exist.
-
-## 2 Optimizations
-
-### 2.1 Key Representation and Character Maps
+### 1.1 Key Representation and Character Maps
 
 String keys in the kstrie are byte sequences. The trie branches on individual bytes — each branch level consumes one byte and fans out to up to 256 children. The raw bytes of the string determine the path through the trie, which means the byte ordering of the key determines the lexicographic ordering of the container.
 
@@ -136,19 +82,13 @@ The character map is a template parameter, resolved entirely at compile time. Ea
 
 Many-to-one maps (like case folding) reduce the effective fan-out at branch levels, which makes nodes denser and can improve memory efficiency. The trade-off is that keys that differ only in mapped-away distinctions become equivalent and cannot coexist in the container.
 
-### 2.2 Value Storage
+### 1.2 Value Storage: Implementation Details
 
-Values stored in the kstrie are handled through a compile-time trait, `kstrie_slots<VALUE>`, that selects one of three storage categories based on type properties. The selection is entirely `constexpr`. The compiler generates specialized code for each category with zero runtime dispatch overhead.
+The three value storage categories (A: trivial inline, B: packed bool, C: heap pointer) are described in [KTRIE Concepts](ktrie_concepts.md). This section covers KSTRIE-specific implementation details.
 
-| Cat | Condition | Storage | Explanation |
-|-----|-----------|---------|-------------|
-| A | trivially_copyable && sizeof ≤ 8 | inline in value array | baseline for small trivial types |
-| B | `std::is_same_v<VALUE, bool>` | packed bits in u64 words | specialization; bool is intercepted for bit-packing |
-| C | all remaining types | pointer to heap-allocated T | non-trivial or sizeof > 8 |
+**Category A storage.** Values are stored directly in the value region of the compact node via memcpy. For the common case of `kstrie<int>`, each value is 4 bytes (padded to u64 alignment in the value region).
 
-**Category A: Trivial inline.** Applies when `sizeof(VALUE) <= 8` and the type is trivially copyable and not `bool`. The value is stored directly in the value region of the compact node: no indirection, no heap allocation, no destructor call. Values are memcpy'd in and out. For the common case of `kstrie<int>`, each value is 4 bytes (padded to u64 alignment in the value region) with excellent cache behavior.
-
-**Category B: Packed bool.** Applies when `VALUE` is `bool`. Instead of storing one byte per boolean, values are packed into `uint64_t` words with one bit per entry. The `load_value` function returns a pointer to one of two static constants:
+**Category B bit operations.** Bool values are packed into `uint64_t` words with one bit per entry. The `load_value` function returns a pointer to one of two static constants:
 
 ```cpp
 static constinit bool BOOL_VALUES[2] = {false, true};
@@ -156,10 +96,6 @@ return &BOOL_VALUES[(base[index >> LOG2_BPW] >> (index & WORD_BIT_MASK)) & 1];
 ```
 
 One shift, one mask, one array index. Branchless. The static constants are thread-safe and their pointers are stable forever. Bit-shifting for insert and erase within the bitmap uses u64-level shift-with-carry operations that the compiler auto-vectorizes into AVX2 `vpsllq`/`vpsrlq` instructions on x86.
-
-**Category C: Heap-allocated pointer.** Applies when `sizeof(VALUE) > 8` or the type is not trivially copyable. The kstrie allocates a `VALUE` on the heap via the rebound allocator, constructs the value in place, and stores the 8-byte pointer in the value slot. Since a pointer is trivially copyable, the compiler optimizes moves of pointer arrays to `memcpy`/`memmove` automatically. Destroy must deallocate the heap object on erase or node teardown.
-
-All heap allocation and deallocation for non-inline values flows through the container's allocator, rebound to `VALUE`. This means a tracking allocator passed to the kstrie measures both node memory and value memory, giving an accurate total.
 
 The compile-time booleans that drive all internal dispatch:
 
@@ -171,16 +107,7 @@ IS_INLINE      = !IS_BITMAP && IS_TRIVIAL             // A: true    B: false  C:
 
 All node code operates on `value_base_t` uniformly, where `value_base_t` is `VALUE` for category A, `uint64_t` for categories B and C.
 
-#### 2.2.1 Insert / Erase / Destroy Splits
-
-| Operation | A (inline) | B (bitmap) | C (heap) |
-|---|---|---|---|
-| Insert (store) | memcpy | bit set | alloc + construct |
-| Erase (single) | nothing | nothing | destroy + dealloc |
-| Upsert (overwrite) | memcpy | bit set/clear | destroy + dealloc old, alloc + construct new |
-| Destroy node | nothing | nothing | destroy + dealloc all entries |
-
-#### 2.2.2 Abstraction Responsibilities
+**Abstraction responsibilities:**
 
 **kstrie** (API boundary): Accepts `std::string_view` keys and `VALUE` values. Converts keys to byte sequences via the character map. Forwards to `kstrie_impl`.
 
@@ -190,7 +117,7 @@ All node code operates on `value_base_t` uniformly, where `value_base_t` is `VAL
 
 **kstrie_bitmask** (bitmask node operations): Handles child dispatch, child insertion and removal, skip prefix management, and EOS child storage.
 
-### 2.3 Memory Hysteresis
+### 1.3 Memory Hysteresis
 
 Node allocations snap to size classes via `padded_size`. The allocation granularity grows with node size: small nodes round to nearby sizes; large nodes round to power-of-two with midpoints. The worst-case overhead is about 50%.
 
@@ -200,45 +127,13 @@ This padding creates room for in-place operations. A node allocated larger than 
 
 **In-place keysuffix shuffle.** When the keysuffix region is full but the overall allocation has unused space beyond the value slots, the kstrie can shift the value slots forward within the same allocation to make room for more keysuffix bytes. This avoids a full reallocation for the common case where a few more suffix bytes are needed but the node's total allocation has capacity.
 
-## 3 Node Concepts
+## 2 Node Concepts
 
-### 3.1 Bitmaps
+### 2.1 Bitmap Dispatch
 
-The `bitmap_256_t` is a 256-bit bitmap stored as 4 `uint64_t` words, used by bitmask nodes for compact representation of sets over the 256 possible byte values.
+The shared bitmap representation and popcount mechanics are described in [KTRIE Concepts](ktrie_concepts.md). The KSTRIE uses branchless popcount dispatch: if the target byte is present, the popcount gives the 0-based index into the dense child array. If the target byte is absent, the dispatch falls through to the sentinel. The sentinel is a static node that always returns "not found," so no conditional branch is needed at the bitmap level.
 
-**Presence check.** Bit `i` of the bitmap represents byte value `i`:
-
-```
-word_index = i / 64
-bit_index  = i % 64
-```
-
-Checking: `words[word_index] & (1ULL << bit_index)`.
-
-**Computing the dense array position.** Given that byte `i` is present, its position in the packed child array is the number of set bits *before* position `i`, the popcount of all bits below position `i`.
-
-The shift-left trick isolates the relevant bits. For the word containing the target bit:
-
-```cpp
-uint64_t before = words[w] << (63 - b);
-```
-
-This moves the target bit to position 63 and shifts everything above it out. `std::popcount(before)` counts the set bits at positions ≤ `b` in the original word, including the target bit itself.
-
-To get the full position across all 4 words, add the popcounts of all complete words below the target word, done branchlessly:
-
-```cpp
-int slot = std::popcount(before);
-slot += std::popcount(words[0]) & -int(w > 0);
-slot += std::popcount(words[1]) & -int(w > 1);
-slot += std::popcount(words[2]) & -int(w > 2);
-```
-
-The `& -int(w > N)` trick: when true, `-int(true)` is `-1` (all-ones in two's complement), so the popcount passes through. When false, the popcount is masked to zero. No branches.
-
-**Dispatch mode.** The kstrie uses branchless popcount dispatch. If the target byte is present, the popcount gives the 0-based index into the dense child array. If the target byte is absent, the dispatch falls through to the sentinel. The sentinel is a static node that always returns "not found", so no conditional branch is needed at the bitmap level.
-
-### 3.2 Node Header
+### 2.2 Node Header
 
 All allocated nodes in the kstrie share a common 8-byte header at `node[0]`:
 
@@ -256,7 +151,7 @@ The `flags` field distinguishes the two node types. A single bit test (`h.is_com
 
 `skip` records how many bytes of shared prefix are stored at this node. For compact nodes, skip bytes are stored in the prefix region of the header. For bitmask nodes, skip bytes are stored after the header. When a lookup reaches a node with skip > 0, it compares the skip bytes against the corresponding key bytes. A mismatch means the key is not in this subtree.
 
-### 3.3 Compact Node Prefix
+### 2.3 Compact Node Prefix
 
 Compact nodes carry an additional prefix structure beyond the common header, stored in the second u64 (`node[1]`):
 
@@ -269,11 +164,11 @@ Compact nodes carry an additional prefix structure beyond the common header, sto
 
 `keysuffix_used` tracks how many bytes of the keysuffix region are occupied. When `keysuffix_used` would exceed the available space (determined by the gap between the offset array and the value slots), the node must either shuffle slots forward, grow, or split.
 
-## 4 Nodes
+## 3 Nodes
 
-### 4.1 Sentinel
+### 3.1 Sentinel
 
-The sentinel is a static compact node with zero entries:
+The sentinel concept is described in [KTRIE Concepts](ktrie_concepts.md). The KSTRIE sentinel is a static compact node with zero entries:
 
 ```cpp
 static inline constinit uint64_t sentinel_data_[3] = {};
@@ -281,14 +176,14 @@ static inline constinit uint64_t sentinel_data_[3] = {};
 
 Three u64s of zeros. The header reads as a compact node with `count = 0`, `flags = 0`, `skip = 0`. Any operation that reaches the sentinel finds nothing: `find` returns nullptr, erase returns MISSING.
 
+The sentinel is 3 u64s rather than 2 to ensure that any code reading the prefix region at `node[1]` accesses valid (zero) memory. Since it is static and never modified, it is shared across all kstrie instances of the same type.
+
 The sentinel appears in two roles:
 
 - **Empty root.** When the kstrie has no entries, the root pointer is the sentinel. Find reaches it, sees count = 0, returns nullptr.
 - **Bitmask node miss target.** Bitmask nodes store the sentinel as their EOS child when no end-of-string entry exists. Child dispatch for absent bytes also resolves to the sentinel. The find loop follows the dispatch, reaches the sentinel, and returns not-found without a conditional branch.
 
-The sentinel is 3 u64s rather than 2 to ensure that any code reading the prefix region at `node[1]` accesses valid (zero) memory. Since it is static and never modified, it is shared across all kstrie instances of the same type.
-
-### 4.2 Compact Nodes
+### 3.2 Compact Nodes
 
 Compact nodes implement the KTRIE's SUFFIX concept: they store key-suffix/value pairs in parallel sorted arrays within a single allocation. They are the only node type that holds entries directly. Bitmask nodes route; compact nodes store.
 
@@ -321,7 +216,7 @@ At the default `COMPACT_KEYSUFFIX_LIMIT = 4096`, offset_type is `uint16_t` (2 by
 
 **Values.** The value slot region begins at offset `slots_off` (in u64 units from node start). For category A (inline), values are packed directly. For category B (bitmap), values are packed as bits in u64 words. For category C (heap), 8-byte pointers are stored.
 
-#### 4.2.1 Search
+#### 3.2.1 Search
 
 Finding an entry in a compact node is a two-phase process. The first phase locates the candidate position using the first-byte array F. The second phase verifies the full suffix against the keysuffix region.
 
@@ -331,7 +226,7 @@ Finding an entry in a compact node is a two-phase process. The first phase locat
 
 For entries with `L[i] = 0` (end-of-string), the match succeeds only if the lookup key is also exhausted at this point.
 
-#### 4.2.2 Keysuffix Sharing
+#### 3.2.2 Keysuffix Sharing
 
 Within each compact node, entries whose suffixes share a common prefix share the same bytes in the keysuffix region. The shorter entry's tail is a prefix of the longer entry's tail, so the shorter entry points into the longer entry's byte region at the same offset.
 
@@ -351,7 +246,7 @@ This sharing is not an optional optimization applied after construction. It is a
 
 Sharing reduces the keysuffix region size, which delays node splits and allows more entries per compact node. For key distributions with many shared prefixes (URLs, file paths, domain names), the savings are substantial.
 
-#### 4.2.3 Insert
+#### 3.2.3 Insert
 
 Insertion into a compact node follows one of four cases, determined by the relationship between the new entry's suffix and existing entries:
 
@@ -365,7 +260,7 @@ Insertion into a compact node follows one of four cases, determined by the relat
 
 Before insertion, a **pre-split check** computes the exact keysuffix delta for the operation. If `keysuffix_used + delta > COMPACT_KEYSUFFIX_LIMIT`, the node is split into a bitmask subtree before the insert proceeds.
 
-#### 4.2.4 Erase
+#### 3.2.4 Erase
 
 Erasure from a compact node follows one of three cases:
 
@@ -377,7 +272,7 @@ Erasure from a compact node follows one of three cases:
 
 In all cases, the L, F, O, and value arrays are shifted to close the gap left by the erased entry.
 
-#### 4.2.5 Grow and Shrink
+#### 3.2.5 Grow and Shrink
 
 **Grow.** When a compact node needs more capacity (either more entries than `cap` or more keysuffix space than the allocation allows), a new, larger node is allocated. The L, F, O, keysuffix, and value regions are memcpy'd into the new allocation. The caller (insert) then modifies the keysuffix region in the new node. Sharing is preserved because the keysuffix bytes and offsets are copied verbatim.
 
@@ -385,7 +280,7 @@ In all cases, the L, F, O, and value arrays are shifted to close the gap left by
 
 Both operations are single-allocation replacements. The old node is freed after the copy.
 
-### 4.3 Bitmask Nodes
+### 3.3 Bitmask Nodes
 
 Bitmask nodes implement the KTRIE's BRANCH concept: 256-way fan-out dispatching on one byte of the key per node. They use the `bitmap_256_t` to compress the 256-entry child array to only the children that exist.
 
@@ -402,13 +297,13 @@ Bitmask nodes implement the KTRIE's BRANCH concept: 256-way fan-out dispatching 
 
 The header is a single u64 `node_header_t` with `flags = FLAG_BITMASK`. Skip bytes (if any) follow the header, storing the prefix bytes shared by all entries in this subtree. The bitmap records which of the 256 possible byte values have children. The EOS (end-of-string) child is a pointer to a compact node holding entries whose keys end at this branch point — keys that have been fully consumed by the trie path and have no remaining bytes to dispatch on. The N child slots are u64 pointers packed densely in bitmap order. The total tail counter at the end holds a byte-budget estimate for collapse decisions.
 
-#### 4.3.1 EOS (End of String)
+#### 3.3.1 EOS (End of String)
 
 Variable-length string keys can end at any point in the trie. When a key is exactly as long as the prefix consumed by the path from root to a bitmask node, there is no remaining byte to dispatch on. The entry is stored in the EOS child, a compact node attached to the bitmask node outside the bitmap.
 
 The EOS child is typically a small compact node (often a single entry). It is checked when the lookup key is exhausted at a bitmask node. If the EOS child is the sentinel, the key does not exist.
 
-#### 4.3.2 Skip Prefix
+#### 3.3.2 Skip Prefix
 
 When all children of a bitmask node share a common prefix at a given depth, those bytes are captured as a skip prefix rather than creating a chain of single-child bitmask nodes. The skip byte count is stored in the header's `skip` field, and the actual bytes are stored after the header.
 
@@ -420,9 +315,9 @@ During lookup, the skip bytes are compared against the key. Three outcomes:
 
 **KEY_EXHAUSTED.** The lookup key is shorter than the skip prefix. The key ends within the prefix. For find, this is not-found (the key would need more bytes to reach any entry). For insert, a new bitmask node is created with the key's entry as an EOS child and the existing subtree as a byte-dispatched child.
 
-#### 4.3.3 Dispatch
+#### 3.3.3 Dispatch
 
-Child lookup uses branchless popcount dispatch. Given a byte value, the bitmap is checked for the byte's presence and the popcount gives the position in the dense child array:
+Child lookup uses branchless popcount dispatch as described in [KTRIE Concepts](ktrie_concepts.md). Given a byte value, the bitmap is checked for the byte's presence and the popcount gives the position in the dense child array:
 
 ```cpp
 uint64_t* child = dispatch(node, h, byte);
@@ -430,7 +325,7 @@ uint64_t* child = dispatch(node, h, byte);
 
 If the byte is absent, dispatch returns the sentinel. The find loop follows the sentinel, reaches count = 0, and returns nullptr.
 
-#### 4.3.4 Total Tail
+#### 3.3.4 Total Tail
 
 Each bitmask node stores a `total_tail` value: the estimated total byte cost of collapsing the entire subtree back into a single compact node. This estimate accounts for three components per entry in the subtree:
 
@@ -442,7 +337,7 @@ The total_tail is maintained incrementally. On insert, the delta propagates upwa
 
 The collapse check is: `total_tail <= COMPACT_KEYSUFFIX_LIMIT`. If true, the subtree can fit in a single compact node's keysuffix region. This avoids trial collapses — walking an entire subtree only to discover it won't fit — which was a significant performance problem before this heuristic was introduced.
 
-### 4.4 Root
+### 3.4 Root
 
 The root of the kstrie is a single `uint64_t*` that can point to any node type: the sentinel (when empty), a compact node (for small collections), or a bitmask node (for large collections that require branch dispatch).
 
@@ -452,15 +347,15 @@ The root has no special prefix mechanism beyond what the root node itself provid
 
 The kstrie object itself stores: the root pointer, the entry count (`size_`), and the memory allocator. The entry count is maintained by increment on insert and decrement on erase; it is not derived from the tree structure.
 
-## 5 Operations
+## 4 Operations
 
-### 5.1 find
+### 4.1 find
 
 Find is the hot path. It descends from the root through bitmask nodes to a compact leaf.
 
 The outer loop tests each node's type. At a bitmask node, find first checks the skip prefix (if any). If the skip matches, it extracts the next byte from the key and dispatches through the bitmap. If the key is exhausted at a bitmask node (no more bytes to dispatch), find checks the EOS child. If the dispatched child is the sentinel, the key is absent.
 
-At a compact node, find performs the two-phase search described in section 4.2.1: binary search on F to find the first-byte range, then suffix comparison within that range.
+At a compact node, find performs the two-phase search described in section 3.2.1: binary search on F to find the first-byte range, then suffix comparison within that range.
 
 The entire find path is a tight loop with no heap allocation. The loop body is:
 
@@ -474,7 +369,7 @@ at compact node:
     binary search + suffix compare
 ```
 
-### 5.2 insert
+### 4.2 insert
 
 Insert begins by descending through the trie, mirroring find. At each bitmask node, the skip prefix is checked. Three outcomes change the control flow:
 
@@ -484,13 +379,13 @@ Insert begins by descending through the trie, mirroring find. At each bitmask no
 
 **KEY_EXHAUSTED.** The new key is shorter than the skip prefix. A new bitmask node is created at the exhaustion point with the existing subtree as a byte-dispatched child and the new entry as an EOS child.
 
-At a compact node, the entry is inserted according to the four cases described in section 4.2.3. If the insert would overflow `COMPACT_KEYSUFFIX_LIMIT`, the compact node is split into a bitmask subtree: entries are grouped by first byte, each group becomes a compact child, and the bitmask node dispatches among them.
+At a compact node, the entry is inserted according to the four cases described in section 3.2.3. If the insert would overflow `COMPACT_KEYSUFFIX_LIMIT`, the compact node is split into a bitmask subtree: entries are grouped by first byte, each group becomes a compact child, and the bitmask node dispatches among them.
 
 On the unwind path, each bitmask node's `total_tail` is updated with the delta from the operation.
 
-### 5.3 erase
+### 4.3 erase
 
-Erase descends through the trie, mirroring find. At a compact node, it locates the entry and returns a PENDING status with the node and position. The actual erasure is deferred to the parent, which calls `erase_in_place` to remove the entry according to the three cases described in section 4.2.4.
+Erase descends through the trie, mirroring find. At a compact node, it locates the entry and returns a PENDING status with the node and position. The actual erasure is deferred to the parent, which calls `erase_in_place` to remove the entry according to the three cases described in section 3.2.4.
 
 On the unwind path after a successful erase:
 
@@ -502,13 +397,13 @@ On the unwind path after a successful erase:
 
 **Single-child bitmask.** If removing a child leaves a bitmask node with zero children and no EOS, it is freed.
 
-### 5.4 find first / find last
+### 4.4 find first / find last
 
 `iter_first` and `iter_last` find the minimum and maximum entries in the trie. They descend through bitmask nodes following the first or last child at each level. At a bitmask node, the first child is found by scanning the bitmap for the lowest set bit; the last child by scanning for the highest set bit. The EOS child, if present, precedes all byte-dispatched children in key order (a zero-length suffix sorts before any non-empty suffix). At a compact node, the first entry is at position 0 and the last at position `count - 1`.
 
 These operations build the full key as they descend: each skip prefix and dispatch byte is appended to a string that, upon reaching the leaf, represents the complete key of the minimum or maximum entry.
 
-### 5.5 find next / find prev
+### 4.5 find next / find prev
 
 Iterator advancement is the second-hottest path after find. `iter_next` finds the smallest key strictly greater than the current key.
 
@@ -520,7 +415,7 @@ Iterator advancement is the second-hottest path after find. `iter_next` finds th
 
 The key is reconstructed during descent. Each skip prefix and dispatch byte is tracked so that the full key is available when the target entry is reached.
 
-### 5.6 Iterators are Snapshots
+### 4.6 Iterators are Snapshots
 
 The kstrie iterator is a snapshot: it stores a copy of the current key (as `std::string`) and a copy of the current value, not a pointer into the trie. Each `operator++` and `operator--` re-descends the trie from the root via `iter_next` or `iter_prev` to find the next or previous entry.
 
@@ -532,11 +427,11 @@ This design has two consequences:
 
 The cost of this approach is that each iterator increment performs a full root-to-leaf descent rather than following a stored pointer. In practice this cost is low: most increments resolve within a single compact leaf, and the descent through bitmask nodes is the same tight loop as find. The benefit is simplicity: no iterator bookkeeping, no invalidation tracking, and no dangling pointer risk.
 
-## 6 Performance
+## 5 Performance
 
 Performance graphs and detailed benchmark results are maintained separately and updated with each optimization pass. This section describes the conceptual performance characteristics and why they arise.
 
-### 6.1 std::map
+### 5.1 std::map
 
 `std::map` is a red-black tree, a self-balancing binary search tree where each node contains one key-value pair, two child pointers, a parent pointer, and a color bit. On most implementations, each node is a separate heap allocation. For string-keyed maps, each node carries the overhead of the tree structure plus the overhead of the string itself (typically 32 bytes for the `std::string` object plus any heap-allocated buffer for strings longer than the SSO threshold).
 
@@ -550,7 +445,7 @@ The fundamental costs are:
 
 **Sorted iteration.** The red-black tree provides naturally sorted in-order traversal, with O(1) amortized iterator increment and decrement. The kstrie provides the same sorted iteration, but resolves most increments within a single compact leaf rather than following parent/child pointers.
 
-### 6.2 std::unordered_map
+### 5.2 std::unordered_map
 
 `std::unordered_map` is a hash table, typically implemented as an array of buckets with separate chaining. Each entry is a heap-allocated node containing the key, value, hash, and a next pointer. Per-entry overhead is roughly the string key size plus 40-64 bytes for structural overhead.
 
@@ -566,7 +461,7 @@ The fundamental costs are:
 
 **No compression.** Every entry stores the complete key. A million URLs sharing the prefix "https://example.com/" store that prefix a million times.
 
-### 6.3 KSTRIE
+### 5.3 KSTRIE
 
 The kstrie's lookup complexity is O(K) where K is the key length in bytes. Unlike kntrie where K is a compile-time constant, K varies per key. The number of bitmask levels traversed depends on how many bytes of the key are consumed by branch dispatch versus prefix capture versus suffix storage in compact leaves.
 
@@ -580,7 +475,7 @@ In practice, the effective depth is often much less than K because of three mech
 
 For small collections (hundreds to low thousands of entries), the entire dataset typically fits in a single compact node. For larger collections, one or two levels of bitmask dispatch fan out to compact leaves. The kstrie rarely exceeds 3-4 bitmask levels even for millions of entries, because each level resolves one byte of divergence and compact leaves absorb the remainder.
 
-### 6.4 The Real Complexity: Memory Hierarchy
+### 5.4 The Real Complexity: Memory Hierarchy
 
 Textbook complexity treats memory access as uniform cost. In practice, every pointer chase or array lookup pays a cost determined by where the data lives in the memory hierarchy: L1, L2, L3, or DRAM. As N grows and the working set exceeds each cache level, per-operation cost increases for all three structures.
 
@@ -590,6 +485,6 @@ The kstrie's advantage is twofold. First, much smaller memory footprint means th
 
 In short: as N grows, all three structures pay an increasing cost per operation driven by cache pressure. The kstrie's smaller memory footprint keeps the working set in faster cache levels for larger N.
 
-## 7 Summary
+## 6 Summary
 
 The kstrie combines three inheritances: TRIE-style prefix routing for O(K) lookup independent of collection size, B-tree-style wide sorted leaves for cache-friendly storage and iteration, and bitmap compression for memory-efficient branch dispatch. It extends the KTRIE design to variable-length string keys through keysuffix sharing within compact leaves, EOS handling at bitmask nodes, and a byte-budget collapse heuristic that avoids wasted subtree traversals. The result is an ordered associative container that approaches hash-table lookup speed while maintaining full lexicographic ordering, with a memory footprint that falls well below `std::unordered_map` through prefix capture, suffix sharing, and contiguous leaf storage. Benchmark data is maintained separately from this document.
