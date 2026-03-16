@@ -1141,6 +1141,8 @@ public:
             ptr = bm_child(ptr, static_cast<uint8_t>(shifted >> (U64_TOP_BYTE_SHIFT - depth * CHAR_BIT)));
             ++depth;
         }
+        if (ptr == SENTINEL_TAGGED) [[unlikely]]
+            return nullptr;
         const uint64_t* node = untag_leaf(ptr);
         auto fn = get_find_fn<VALUE>(node);
         return fn(node, ik);
