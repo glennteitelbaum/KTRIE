@@ -28,39 +28,11 @@ struct bitmask_ops {
     using BLD  = builder<VALUE, VT::IS_TRIVIAL, ALLOC>;
 
     // ==================================================================
-    // Sentinel fns — three variants for the three fn pointer types
+    // Sentinel — pure tag value, no physical node.
+    // Bitmap child[0] stores this on miss; find_loop detects via NOT_FOUND_BIT.
     // ==================================================================
 
-    static const VALUE* sentinel_find(const uint64_t*, uint64_t) noexcept {
-        return nullptr;
-    }
-    static leaf_result_t<VALUE> sentinel_iter(const uint64_t*, uint64_t) noexcept {
-        return {0, nullptr, false};
-    }
-    static leaf_result_t<VALUE> sentinel_edge(const uint64_t*) noexcept {
-        return {0, nullptr, false};
-    }
-
-    // 7 u64s: header, find, next, prev, first, last, prefix
-    static const uint64_t* sentinel_node_ptr() noexcept {
-        alignas(U64_BYTES) static const uint64_t SENTINEL_NODE[LEAF_HEADER_U64] = {
-            0,                                                // header
-            reinterpret_cast<uint64_t>(&sentinel_find),       // find_fn
-            reinterpret_cast<uint64_t>(&sentinel_iter),       // find_next_fn
-            reinterpret_cast<uint64_t>(&sentinel_iter),       // find_prev_fn
-            reinterpret_cast<uint64_t>(&sentinel_edge),       // find_first_fn
-            reinterpret_cast<uint64_t>(&sentinel_edge),       // find_last_fn
-            0,                                                // prefix
-        };
-        return SENTINEL_NODE;
-    }
-
-    static uint64_t sentinel_tagged() noexcept {
-        return tag_leaf(sentinel_node_ptr());
-    }
-
-    // Cache it — one call per instantiation
-    static inline const uint64_t SENTINEL_TAGGED = sentinel_tagged();
+    static constexpr uint64_t SENTINEL_TAGGED = LEAF_BIT | NOT_FOUND_BIT;
 
     // ==================================================================
     // Size calculations
@@ -1141,7 +1113,7 @@ public:
             ptr = bm_child(ptr, static_cast<uint8_t>(shifted >> (U64_TOP_BYTE_SHIFT - depth * CHAR_BIT)));
             ++depth;
         }
-        if (ptr == SENTINEL_TAGGED) [[unlikely]]
+        if (ptr & NOT_FOUND_BIT) [[unlikely]]
             return nullptr;
         const uint64_t* node = untag_leaf(ptr);
         auto fn = get_find_fn<VALUE>(node);

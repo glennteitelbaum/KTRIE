@@ -81,8 +81,9 @@ inline constexpr size_t DUP_SCAN_MAX = 64;             // linear dup scan thresh
 // --- Growth/shrink ---
 inline constexpr size_t SHRINK_FACTOR = 2;
 
-// Tagged pointer: sign bit = leaf
-static constexpr uint64_t LEAF_BIT = uint64_t(1) << (U64_BITS - 1);
+// Tagged pointer: sign bit = leaf, bit 62 = not found (sentinel)
+static constexpr uint64_t LEAF_BIT      = uint64_t(1) << (U64_BITS - 1);
+static constexpr uint64_t NOT_FOUND_BIT = uint64_t(1) << (U64_BITS - 2);
 
 // Sign-bit test for branchless bitmap
 inline bool tst_sign(uint64_t v) noexcept {
