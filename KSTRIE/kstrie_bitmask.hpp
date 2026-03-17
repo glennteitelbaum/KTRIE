@@ -316,5 +316,3 @@ struct kstrie_bitmask {
 } // namespace gteitelbaum
 
 #endif // KSTRIE_BITMASK_HPP
-
-#endif // KSTRIE_BITMASK_HPP

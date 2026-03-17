@@ -781,5 +781,3 @@ get_mapped(const uint8_t* raw, uint32_t len,
 } // namespace gteitelbaum
 
 #endif // KSTRIE_SUPPORT_HPP
-
-#endif // KSTRIE_SUPPORT_HPP

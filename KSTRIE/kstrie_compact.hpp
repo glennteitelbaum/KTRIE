@@ -1219,5 +1219,3 @@ struct kstrie_compact {
 } // namespace gteitelbaum
 
 #endif // KSTRIE_COMPACT_HPP
-
-#endif // KSTRIE_COMPACT_HPP
