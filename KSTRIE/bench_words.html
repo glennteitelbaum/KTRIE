@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"/>
+<title>kstrie vs umap — words.txt</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+<style>
+body{margin:0;background:#0f0f1a;color:#ddd;font-family:system-ui,sans-serif}
+.wrap{max-width:720px;margin:0 auto;padding:16px 12px}
+h2{margin:0 0 4px;font-size:18px;font-weight:700;text-align:center}
+.sub{text-align:center;color:#777;font-size:12px;margin:0 0 12px}
+.chart-box{margin-bottom:24px}
+.chart-box h3{margin:0 0 6px;font-size:14px;font-weight:600;text-align:center}
+canvas{background:#12122a;border-radius:8px}
+</style></head><body><div class="wrap">
+<h2>kstrie (identity / upper) vs unordered_map — 466550 words</h2>
+<p class="sub">Log-log · Per-entry · Lower is better</p>
+<div class="chart-box"><h3>Find (ns/entry)</h3><canvas id="c_find"></canvas></div>
+<div class="chart-box"><h3>Insert (ns/entry)</h3><canvas id="c_ins"></canvas></div>
+<div class="chart-box"><h3>Memory (B/entry)</h3><canvas id="c_mem"></canvas></div>
+</div><script>
+const D=[{N:100,kf:0.0016,kn:0.0019,ki:0.0329,kuf:0.0026,kun:0.0031,kui:0.0282,uf:0.0013,un:0.0012,ui:0.0071,km:2048,kum:2048,um:6424},
+{N:160,kf:0.0029,kn:0.0033,ki:0.0479,kuf:0.0048,kun:0.0055,kui:0.0478,uf:0.0021,un:0.0021,ui:0.0115,km:3072,kum:3072,um:10296},
+{N:256,kf:0.0053,kn:0.0062,ki:0.1098,kuf:0.0084,kun:0.0094,kui:0.0844,uf:0.0033,un:0.0032,ui:0.0158,km:6144,kum:6144,um:16392},
+{N:409,kf:0.0095,kn:0.0120,ki:0.1694,kuf:0.0150,kun:0.0180,kui:0.1592,uf:0.0055,un:0.0051,ui:0.0242,km:8192,kum:8192,um:26176},
+{N:655,kf:0.0143,kn:0.0160,ki:0.3126,kuf:0.0176,kun:0.0215,kui:0.2708,uf:0.0091,un:0.0089,ui:0.0387,km:15520,kum:13056,um:41968},
+{N:1048,kf:0.0386,kn:0.0467,ki:0.3943,kuf:0.0523,kun:0.0660,kui:0.3627,uf:0.0165,un:0.0165,ui:0.0614,km:21984,kum:20768,um:67560},
+{N:1677,kf:0.0941,kn:0.1092,ki:0.5729,kuf:0.1172,kun:0.1375,kui:0.5626,uf:0.0304,un:0.0296,ui:0.1057,km:33888,kum:33376,um:107840},
+{N:2684,kf:0.1900,kn:0.2196,ki:0.8890,kuf:0.2281,kun:0.2603,kui:0.8856,uf:0.0574,un:0.0632,ui:0.1565,km:55168,kum:51520,um:172328},
+{N:4294,kf:0.3567,kn:0.3967,ki:1.5409,kuf:0.5267,kun:0.4750,kui:1.5894,uf:0.1177,un:0.1354,ui:0.2579,km:82784,kum:78432,um:275256},
+{N:6871,kf:0.6470,kn:0.7244,ki:2.7756,kuf:0.7413,kun:0.9419,kui:2.9038,uf:0.2070,un:0.2351,ui:0.4588,km:126720,kum:126976,um:440368},
+{N:10995,kf:1.1333,kn:1.2515,ki:4.7239,kuf:1.2645,kun:1.4396,kui:5.1996,uf:0.4038,un:0.4407,ui:0.7585,km:207264,kum:203648,um:704624},
+{N:17592,kf:1.8635,kn:2.0209,ki:8.2845,kuf:1.9885,kun:2.2296,kui:8.8763,uf:0.7314,un:0.8163,ui:1.3347,km:322944,kum:332928,um:1127144},
+{N:28147,kf:3.0570,kn:3.3627,ki:13.9172,kuf:3.3751,kun:3.6968,kui:13.6929,uf:1.3331,un:1.4347,ui:2.4106,km:517696,kum:505760,um:1803520},
+{N:45035,kf:5.3106,kn:5.8721,ki:22.8596,kuf:6.4870,kun:6.2681,kui:22.3708,uf:2.3094,un:2.4911,ui:4.1218,km:822592,kum:820416,um:2885808},
+{N:72057,kf:9.4478,kn:10.2710,ki:38.1764,kuf:9.8584,kun:11.2604,kui:38.1956,uf:4.0129,un:4.2275,ui:8.5706,km:1294368,kum:1279648,um:4617728},
+{N:115292,kf:16.7199,kn:18.5028,ki:68.2962,kuf:17.6230,kun:19.4910,kui:73.5080,uf:7.1834,un:7.7140,ui:13.6890,km:2038272,kum:1988256,um:7390200},
+{N:184467,kf:28.8228,kn:31.6903,ki:127.1855,kuf:30.2089,kun:33.3775,kui:126.8218,uf:17.2758,un:14.6720,ui:29.3853,km:3165984,kum:3130048,um:11826880},
+{N:295147,kf:54.5011,kn:59.3060,ki:221.3734,kuf:56.8109,kun:61.5875,kui:212.7201,uf:23.5479,un:23.8647,ui:49.0314,km:4909344,kum:4832768,um:18927840},
+{N:466550,kf:97.4463,kn:109.7553,ki:376.2227,kuf:102.3610,kun:114.1200,kui:361.4707,uf:47.6980,un:50.6834,ui:96.2403,km:7512832,kum:7412288,um:29973848},
+];
+
+const L={
+  find:[
+    {k:"kf",color:"#3b82f6",dash:[],w:2.5,label:"identity FND"},
+    {k:"kn",color:"#93c5fd",dash:[6,3],w:1.5,label:"identity NF"},
+    {k:"kuf",color:"#f59e0b",dash:[],w:2.5,label:"upper FND"},
+    {k:"kun",color:"#fcd34d",dash:[6,3],w:1.5,label:"upper NF"},
+    {k:"uf",color:"#22c55e",dash:[],w:2.5,label:"umap FND"},
+    {k:"un",color:"#86efac",dash:[6,3],w:1.5,label:"umap NF"},
+  ],
+  ins:[
+    {k:"ki",color:"#3b82f6",dash:[],w:2.5,label:"identity"},
+    {k:"kui",color:"#f59e0b",dash:[],w:2.5,label:"upper"},
+    {k:"ui",color:"#22c55e",dash:[],w:2.5,label:"umap"},
+  ],
+  mem:[
+    {k:"km",color:"#3b82f6",dash:[],w:2.5,label:"identity"},
+    {k:"kum",color:"#f59e0b",dash:[],w:2.5,label:"upper"},
+    {k:"um",color:"#22c55e",dash:[],w:2.5,label:"umap"},
+  ]
+};
+function mk(id,lines,conv){
+  const ctx=document.getElementById(id).getContext("2d");
+  new Chart(ctx,{type:"line",data:{
+    labels:D.map(d=>d.N),
+    datasets:lines.map(l=>({label:l.label,data:D.map(d=>conv(d[l.k],d.N)),
+      borderColor:l.color,backgroundColor:l.color+"22",borderWidth:l.w,
+      borderDash:l.dash,pointRadius:0,pointHitRadius:8,tension:0.2,spanGaps:true}))
+  },options:{responsive:true,interaction:{mode:"index",intersect:false},
+    plugins:{legend:{display:true,labels:{color:"#bbb",font:{size:11},boxWidth:20,padding:10}},
+      tooltip:{backgroundColor:"#1a1a2e",borderColor:"#444",borderWidth:1,titleColor:"#aaa",bodyColor:"#ddd",
+        callbacks:{title:i=>{const v=i[0].parsed.x;return v>=1e6?"N="+(v/1e6).toFixed(1)+"M":v>=1e3?"N="+(v/1e3).toFixed(1)+"K":"N="+v},
+          label:i=>{const v=i.parsed.y;if(v==null)return null;const s=v<0.1?v.toFixed(3):v<10?v.toFixed(2):v<1e3?v.toFixed(1):v.toFixed(0);return" "+i.dataset.label+": "+s}}}},
+    scales:{x:{type:"logarithmic",ticks:{color:"#888",font:{size:11},callback:v=>v>=1e6?(v/1e6)+"M":v>=1e3?(v/1e3)+"K":v},grid:{color:"#2a2a3e"}},
+      y:{type:"logarithmic",ticks:{color:"#888",font:{size:10},callback:v=>v<0.1?v.toFixed(2):v<10?v.toFixed(1):v>=1e3?v.toFixed(0):v.toFixed(1)},grid:{color:"#2a2a3e"}}}}});
+}
+mk("c_find",L.find,(ms,n)=>(ms*1e6)/n);
+mk("c_ins",L.ins,(ms,n)=>(ms*1e6)/n);
+mk("c_mem",L.mem,(b,n)=>b/n);
+</script></body></html>
