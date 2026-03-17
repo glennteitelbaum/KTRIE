@@ -186,6 +186,25 @@ public:
     std::pair<bool, bool> assign(const KEY& key, const VALUE& value) {
         return impl_.assign(to_unsigned(key), value);
     }
+
+    // Single-walk read-modify-write with dup propagation.
+    // fn is VALUE(VALUE) — takes old value, returns new value.
+    // Returns true if key existed and was modified.
+    template<typename F>
+    bool modify(const KEY& key, F&& fn) {
+        return impl_.modify_existing(to_unsigned(key), std::forward<F>(fn));
+    }
+
+    // With default: if key is missing, inserts fn(default_val).
+    // Returns true if key existed (update), false if inserted.
+    template<typename F>
+    bool modify(const KEY& key, F&& fn, const VALUE& default_val) {
+        if (impl_.modify_existing(to_unsigned(key), std::forward<F>(fn)))
+            return true;
+        impl_.insert(to_unsigned(key), fn(default_val));
+        return false;
+    }
+
     template<typename... Args>
     std::pair<iterator, bool> emplace(Args&&... args) {
         value_type kv(std::forward<Args>(args)...);

@@ -532,6 +532,23 @@ private:
     }
 
     // ==================================================================
+    // Modify — single-walk read-modify-write
+    // ==================================================================
+public:
+    template<typename F>
+    bool modify_existing(const KEY& key, F&& fn) {
+        if (size_v == 0) [[unlikely]] return false;
+        uint64_t ik = key_to_u64(key);
+        if (root_skip_bits_v > 0) [[unlikely]] {
+            uint64_t diff = (ik ^ root_prefix_v) & root_prefix_mask();
+            if (diff) [[unlikely]] return false;
+        }
+        return OPS::modify_node(root_ptr_v, ik, ik << root_skip_bits_v,
+                                root_skip_bytes(), std::forward<F>(fn), bld_v);
+    }
+private:
+
+    // ==================================================================
     // first_descendant_prefix: descend to any leaf, return node[2]
     // ==================================================================
 

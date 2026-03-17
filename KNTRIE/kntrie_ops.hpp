@@ -655,6 +655,91 @@ struct kntrie_ops {
 
 
     // ==================================================================
+    // Modify — single-walk read-modify-write with dup propagation
+    //
+    // Descends to the leaf, applies fn(old_val) → new_val, writes back
+    // with dup propagation. Never allocates, never splits.
+    // Returns true if key found and modified, false if not found.
+    // ==================================================================
+
+    template<typename F>
+    static bool modify_node(uint64_t ptr, uint64_t ik,
+                            uint64_t shifted, uint8_t depth,
+                            F&& fn, BLD& bld) {
+        // SENTINEL
+        if (ptr == BO::SENTINEL_TAGGED) [[unlikely]]
+            return false;
+
+        // LEAF
+        if (ptr & LEAF_BIT) [[unlikely]] {
+            uint64_t* node = untag_leaf_mut(ptr);
+            auto* hdr = get_header(node);
+            uint8_t skip = hdr->skip();
+
+            uint64_t pfx_shifted = leaf_prefix(node) << (CHAR_BIT * depth);
+            for (uint8_t pos = 0; pos < skip; ++pos) {
+                uint8_t expected = static_cast<uint8_t>(shifted >> U64_TOP_BYTE_SHIFT);
+                uint8_t actual = static_cast<uint8_t>(pfx_shifted >> U64_TOP_BYTE_SHIFT);
+                if (expected != actual) [[unlikely]]
+                    return false;
+                shifted <<= CHAR_BIT;
+                pfx_shifted <<= CHAR_BIT;
+                depth++;
+            }
+
+            return depth_switch(depth, [&]<int BITS>() {
+                return leaf_modify<BITS>(node, hdr, ik, std::forward<F>(fn), bld);
+            });
+        }
+
+        // BITMASK
+        uint64_t* node = bm_to_node(ptr);
+        auto* hdr = get_header(node);
+        uint8_t sc = hdr->skip();
+
+        for (uint8_t pos = 0; pos < sc; ++pos) {
+            uint8_t expected = static_cast<uint8_t>(shifted >> U64_TOP_BYTE_SHIFT);
+            uint8_t actual = BO::skip_byte(node, pos);
+            if (expected != actual) [[unlikely]]
+                return false;
+            shifted <<= CHAR_BIT;
+            depth++;
+        }
+
+        uint8_t ti = static_cast<uint8_t>(shifted >> U64_TOP_BYTE_SHIFT);
+
+        typename BO::child_lookup cl;
+        if (sc > 0) [[unlikely]]
+            cl = BO::chain_lookup(node, sc, ti);
+        else
+            cl = BO::lookup(node, ti);
+
+        if (!cl.found) [[unlikely]]
+            return false;
+
+        return modify_node(cl.child, ik, shifted << CHAR_BIT, depth + 1,
+                           std::forward<F>(fn), bld);
+    }
+
+    // --- Leaf modify: compile-time NK dispatch ---
+    template<int BITS, typename F>
+    static bool leaf_modify(uint64_t* node, node_header_t* hdr,
+                            uint64_t ik, F&& fn, BLD& bld) {
+        using NK = nk_for_bits_t<BITS>;
+        NK suffix = leaf_ops_t<BITS>::template to_suffix<BITS>(ik);
+
+        if constexpr (sizeof(NK) == sizeof(uint8_t)) {
+            return BO::bitmap_modify(node, static_cast<uint8_t>(suffix),
+                                     std::forward<F>(fn), bld);
+        } else {
+            using CO = compact_ops<NK, VALUE, ALLOC>;
+            return CO::modify_existing(node, hdr, suffix,
+                                       std::forward<F>(fn), bld);
+        }
+    }
+
+
+    // ==================================================================
     // Erase — runtime-recursive, depth-based
     // ==================================================================
 
