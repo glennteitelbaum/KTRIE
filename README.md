@@ -8,7 +8,7 @@ Concepts that apply to both implementations
 
 ## Implemenations
 
-|Implemenation|Keys|Concepts|README|
+|Implemenation|Keys|Concepts|README (includes benchmark results)|
 |-------------|----|--------|------|
 |KNTRIE|Numeric|[KNTRIE Concepts](KNTRIE/kntrie_concepts.md)|[KNTRIE](KNTRIE/README.md)|
 |KSTRIE|String|[KSTRIE Concepts](KSTRIE/kstrie_concepts.md)|[KSTRIE](KSTRIE/README.md)|
