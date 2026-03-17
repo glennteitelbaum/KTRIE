@@ -111,7 +111,7 @@ The shared bitmap representation and popcount mechanics are described in [KTRIE 
 slot &= -int(bool(before & (1ULL << 63)));  // 0 if miss, 1-based if hit
 ```
 
-A miss produces slot index 0. Slot 0 in any child array is reserved as the miss-fallback: accessing it always yields a not-found result, so no conditional branch is needed at the bitmap level.
+A miss produces slot index 0. Slot 0 in any child array holds `SENTINEL_TAGGED` (`LEAF_BIT | NOT_FOUND_BIT`), a pure tag value with no backing allocation. The find loop sees `LEAF_BIT`, exits the descent, then tests `NOT_FOUND_BIT` to detect the miss — no pointer dereference needed.
 
 **UNFILTERED** (insertion position): Returns the count of set bits strictly before the target, giving the correct insertion point in the dense array.
 
@@ -138,8 +138,9 @@ Every child pointer in the kntrie is a tagged `uint64_t` encoding both address a
 
 - **Leaf tag:** The sign bit (bit 63) is set. `LEAF_BIT` = `1ULL << 63`. The node pointer is recovered by XORing with `LEAF_BIT`. Tagged leaf pointers point to `node[0]` (the header).
 - **Internal tag:** No sign bit. The pointer targets `node[1]`, one u64 past the header, allowing the pointer to be used directly without adjustment, saving one addition on every descent.
+- **Not-found tag:** Bit 62 is set alongside `LEAF_BIT`. `NOT_FOUND_BIT` = `1ULL << 62`. The sentinel value `LEAF_BIT | NOT_FOUND_BIT` is a pure bit pattern with no backing allocation. User-space pointers never have bit 62 set (addresses are < 2^47 on x86-64), so the tag is unambiguous.
 
-The `while (!(ptr & LEAF_BIT))` loop tests the sign bit with a single instruction to distinguish internal nodes from leaves.
+The `while (!(ptr & LEAF_BIT))` loop tests the sign bit with a single instruction to distinguish internal nodes from leaves. After the loop exits, `ptr & NOT_FOUND_BIT` distinguishes a miss (sentinel) from a hit (real leaf) with a single bit test — no pointer dereference, no indirect call.
 
 ### 2.4 Descendants
 
@@ -186,16 +187,19 @@ The skip mechanism described above applies to leaves. Internal node skip operate
 
 ### 3.1 Sentinel
 
-The sentinel concept is described in [KTRIE Concepts](../ktrie_concepts.md). The KNTRIE sentinel is a statically-allocated 7-u64 block matching the leaf header layout:
+The sentinel is a tagged pointer value, not a physical node. `SENTINEL_TAGGED` is the compile-time constant `LEAF_BIT | NOT_FOUND_BIT` — two bits set, no address. Internal nodes store this value at child position 0, enabling the BRANCHLESS dispatch mode where a bitmap miss resolves to slot 0.
 
+The find loop's descent treats the sentinel like any leaf: `LEAF_BIT` is set, so the `while (!(ptr & LEAF_BIT))` loop exits. The immediately following `NOT_FOUND_BIT` test distinguishes a miss from a real leaf:
+
+```cpp
+while (!(ptr & LEAF_BIT))
+    ptr = bm_child(ptr, byte);
+if (ptr & NOT_FOUND_BIT) [[unlikely]]
+    return nullptr;
+// real leaf — untag and dispatch
 ```
-[header=0] [find_fn→nullptr] [next_fn→{not_found}] [prev_fn→{not_found}]
-[first_fn→{not_found}] [last_fn→{not_found}] [prefix=0]
-```
 
-Each function pointer targets a static function returning the appropriate "not found" value: `find_fn` returns `nullptr`, the iter/edge functions return `{0, nullptr, false}`. Because these are real function pointers, the sentinel is callable through the same dispatch mechanism as any real leaf. No special-casing needed.
-
-A zeroed `node_header_t` has `entries = 0`, which makes the sentinel a valid empty leaf. The sentinel's tagged pointer is `SENTINEL_TAGGED`. Internal nodes store `SENTINEL_TAGGED` at child position 0, enabling the BRANCHLESS dispatch mode where a miss resolves to slot 0.
+The miss path is a bit test and a conditional return. No pointer dereference, no indirect call, no function dispatch. This matters for workloads with high miss rates — BPE pair lookups, for example, where most candidate pairs are not in the vocabulary.
 
 ### 3.2 Internal Nodes
 
@@ -207,7 +211,7 @@ Internal nodes implement the KTRIE's BRANCH concept: 256-way fan-out dispatching
 [Header: 1 u64] [Bitmap: 4 u64] [Miss ptr: 1 u64] [Children: N u64] [Descendants: 1 u64]
 ```
 
-The header is a single u64 `node_header_t`. The bitmap records which of the 256 possible byte values have children. The miss pointer at position 0 of the children area holds `SENTINEL_TAGGED` for BRANCHLESS miss fallback: when a bitmap lookup misses (the target byte isn't present), the popcount returns index 0, which loads the miss pointer. The find loop sees the LEAF_BIT, untags, loads the not-found node's `find_fn`, calls it, and returns nullptr. No conditional branch at the bitmap level. The N children are tagged u64 pointers, packed densely in bitmap order. The descendants counter at the end holds the exact total entry count for the subtree.
+The header is a single u64 `node_header_t`. The bitmap records which of the 256 possible byte values have children. The miss pointer at position 0 of the children area holds `SENTINEL_TAGGED` (`LEAF_BIT | NOT_FOUND_BIT`) for BRANCHLESS miss fallback: when a bitmap lookup misses (the target byte isn't present), the popcount returns index 0, which loads the sentinel tag value. The find loop sees `LEAF_BIT`, exits the descent, tests `NOT_FOUND_BIT`, and returns nullptr. No pointer dereference, no indirect call at the bitmap level. The N children are tagged u64 pointers, packed densely in bitmap order. The descendants counter at the end holds the exact total entry count for the subtree.
 
 **Child lookup** uses the bitmap modes described in section 2.1. On the find path, BRANCHLESS mode returns a 1-based index (hitting the sentinel on miss). On insert/erase, FAST_EXIT mode returns -1 on miss.
 
@@ -224,10 +228,11 @@ The find loop is:
 ```cpp
 while (!(ptr & LEAF_BIT))
     ptr = bm_child(ptr, byte_at_depth(shifted, depth++));
+if (ptr & NOT_FOUND_BIT) return nullptr;
 return get_find_fn<VALUE>(untag_leaf(ptr))(node, ik);
 ```
 
-Each iteration tests the sign bit (leaf vs internal), extracts the byte at the current depth, does a BRANCHLESS bitmap lookup, and follows the child pointer. When the sign bit indicates a leaf, the loop exits and dispatches through the leaf's function pointer. The entire descent is a tight loop with no type switches or template recursion.
+Each iteration tests the sign bit (leaf vs internal), extracts the byte at the current depth, does a BRANCHLESS bitmap lookup, and follows the child pointer. When the sign bit indicates a leaf, the loop exits. A `NOT_FOUND_BIT` test catches misses without a pointer dereference. Hits dispatch through the leaf's function pointer. The entire descent is a tight loop with no type switches or template recursion.
 
 **Embed chains (skip compression).** When a subtree has a single-child internal node (meaning only one byte value exists at that level), the kntrie can inline that level into the parent's allocation rather than creating a separate node. Each inlined level is an **embed** block of 6 u64s:
 
@@ -332,10 +337,11 @@ The kntrie tracks position within the key using a **byte depth**, the number of 
 ```cpp
 while (!(ptr & LEAF_BIT))
     ptr = bm_child(ptr, byte_at_depth(shifted, depth++));
+if (ptr & NOT_FOUND_BIT) return nullptr;
 return get_find_fn<VALUE>(untag_leaf(ptr))(node, ik);
 ```
 
-Because there are only a few possible function pointer targets (one per suffix type × skip), modern CPUs predict indirect calls well. The cost is 5 u64s of storage per leaf for the function pointers, but the benefit is a single indirect call instead of template recursion on the hot path.
+Misses resolve at the `NOT_FOUND_BIT` test — a single bit check, no pointer dereference. Hits dispatch through the leaf's function pointer. Because there are only a few possible function pointer targets (one per suffix type × skip), modern CPUs predict indirect calls well. The cost is 5 u64s of storage per leaf for the function pointers, but the benefit is a single indirect call instead of template recursion on the hot path.
 
 For write operations (insert, erase), `depth_switch` dispatches at the point where template-specialized code is needed: node splitting, coalescing, and suffix extraction. These operations are not on the hot read path, so the switch overhead is negligible compared to allocation and memmove costs.
 
@@ -343,9 +349,9 @@ For write operations (insert, erase), `depth_switch` dispatches at the point whe
 
 Find is the hot path. It begins with a root prefix check: `(ik ^ root_prefix_v) & root_prefix_mask()`. If any prefix byte differs, the key is absent immediately, no descent needed.
 
-Otherwise, `find_loop` executes a tight iteration through internal nodes. Each iteration tests the sign bit (leaf vs internal), extracts the byte at the current depth from the shifted key, performs a BRANCHLESS bitmap lookup, and follows the child pointer. No type switches, no template recursion, no conditional branches at the bitmap level. A miss falls through to the sentinel, which returns nullptr via its function pointer.
+Otherwise, `find_loop` executes a tight iteration through internal nodes. Each iteration tests the sign bit (leaf vs internal), extracts the byte at the current depth from the shifted key, performs a BRANCHLESS bitmap lookup, and follows the child pointer. No type switches, no template recursion, no conditional branches at the bitmap level.
 
-When the loop reaches a leaf (sign bit set), it untags the pointer, loads the leaf's `find_fn`, and calls it. The function pointer dispatches to the correct suffix type and skip variant. For compact leaves, this performs a branchless binary search over the sorted suffix array. For bitmap256 leaves, it checks a single bit in the presence bitmap and computes a popcount for the slot index.
+When the loop exits (sign bit set), a `NOT_FOUND_BIT` test resolves misses immediately — a single bit check returning nullptr with no pointer dereference and no indirect call. For hits, the pointer is untagged, the leaf's `find_fn` is loaded, and called. The function pointer dispatches to the correct suffix type and skip variant. For compact leaves, this performs a branchless binary search over the sorted suffix array. For bitmap256 leaves, it checks a single bit in the presence bitmap and computes a popcount for the slot index.
 
 The entire find path from root to result is typically 2-4 pointer dereferences plus one branchless search for collections below ~1M entries, with no heap allocation and no locking.
 
