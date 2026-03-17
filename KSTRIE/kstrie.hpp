@@ -65,7 +65,6 @@ public:
     // Lookup
     // ------------------------------------------------------------------
 
-    const VALUE* find(std::string_view key) const { return impl_.find(key); }
     bool contains(std::string_view key) const { return impl_.contains(key); }
     size_type count(std::string_view key) const { return impl_.count(key); }
 
@@ -179,6 +178,16 @@ public:
     const_reverse_iterator crend() const { return rend(); }
 
     // ------------------------------------------------------------------
+    // Lookup
+    // ------------------------------------------------------------------
+
+    const_iterator find(std::string_view key) const {
+        const VALUE* v = find_value(key);
+        if (!v) return end();
+        return {this, std::string(key), *v};
+    }
+
+    // ------------------------------------------------------------------
     // Ordered lookup
     // ------------------------------------------------------------------
 
@@ -207,12 +216,6 @@ public:
         const_iterator last  = v2 ? const_iterator{this, std::move(k2), *v2}
                                   : end();
         return {first, last};
-    }
-
-    const_iterator find_iter(std::string_view key) const {
-        const VALUE* v = impl_.find(key);
-        if (!v) return end();
-        return {this, std::string(key), *v};
     }
 
     // ------------------------------------------------------------------
@@ -280,6 +283,8 @@ public:
     bool operator!=(const kstrie& o) const { return !(*this == o); }
 
 private:
+
+    const VALUE* find_value(std::string_view key) const { return impl_.find(key); }
 
     // ------------------------------------------------------------------
     // Unmap helper

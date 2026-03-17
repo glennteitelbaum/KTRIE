@@ -438,10 +438,10 @@ struct kstrie_slots {
     // --- Child pointer access (always u64, separate from values) ---
 
     static void store_child(uint64_t* base, size_t index, uint64_t* child) noexcept {
-        base[index] = reinterpret_cast<uint64_t>(child);
+        base[index] = static_cast<uint64_t>(reinterpret_cast<std::uintptr_t>(child));
     }
     static uint64_t* load_child(const uint64_t* base, size_t index) noexcept {
-        return reinterpret_cast<uint64_t*>(base[index]);
+        return reinterpret_cast<uint64_t*>(static_cast<std::uintptr_t>(base[index]));
     }
     static void copy_children(uint64_t* dst, size_t di,
                               const uint64_t* src, size_t si, size_t n) noexcept {

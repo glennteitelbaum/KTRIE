@@ -234,15 +234,14 @@ public:
     // Lookup
     // ==================================================================
 
-    const VALUE* find_value(const KEY& key) const noexcept { return impl_.find_value(to_unsigned(key)); }
     bool contains(const KEY& key) const noexcept { return impl_.contains(to_unsigned(key)); }
     size_type count(const KEY& key) const noexcept { return contains(key) ? 1 : 0; }
 
     // at() is intentionally absent. The kntrie stores values in compact nodes
     // with dup-slot padding — multiple physical copies of each value exist for
     // in-place mutation. Returning VALUE& would allow writes that update one
-    // copy but not the others, corrupting the dup invariant. Use find_value()
-    // for const reads, insert_or_assign() or operator[] for writes.
+    // copy but not the others, corrupting the dup invariant. Use find()
+    // (returns snapshot iterator) or operator[] for writes.
 
     // ==================================================================
     // value_proxy — returned by operator[], routes writes through insert
@@ -326,6 +325,8 @@ public:
     const impl_t& impl() const noexcept { return impl_; }
 
 private:
+    const VALUE* find_value(const KEY& key) const noexcept { return impl_.find_value(to_unsigned(key)); }
+
     impl_t impl_;
 };
 

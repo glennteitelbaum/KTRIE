@@ -81,7 +81,14 @@ inline constexpr size_t DUP_SCAN_MAX = 64;             // linear dup scan thresh
 // --- Growth/shrink ---
 inline constexpr size_t SHRINK_FACTOR = 2;
 
-// Tagged pointer: sign bit = leaf, bit 62 = not found (sentinel)
+// Pointer tagging: pointers are cast through std::uintptr_t (guaranteed
+// lossless by the standard) then widened to uint64_t. Bits 62-63 are used
+// as tag bits. This assumes userspace heap allocations do not set bits 62-63,
+// which is true on x86-64 (canonical addresses use bits 0-47) but is not
+// guaranteed by the C++ standard.
+static_assert(sizeof(std::uintptr_t) <= sizeof(uint64_t),
+    "kntrie requires uintptr_t fits in uint64_t");
+
 static constexpr uint64_t LEAF_BIT      = uint64_t(1) << (U64_BITS - 1);
 static constexpr uint64_t NOT_FOUND_BIT = uint64_t(1) << (U64_BITS - 2);
 
@@ -268,19 +275,19 @@ using nk_for_bits_t = std::conditional_t<(BITS > U32_BITS), uint64_t,
 // Leaf ptr: points to header (node+0), has LEAF_BIT. Strip unconditionally.
 
 inline uint64_t tag_leaf(const uint64_t* node) noexcept {
-    return reinterpret_cast<uint64_t>(node) | LEAF_BIT;
+    return static_cast<uint64_t>(reinterpret_cast<std::uintptr_t>(node)) | LEAF_BIT;
 }
 inline uint64_t tag_bitmask(const uint64_t* node) noexcept {
-    return reinterpret_cast<uint64_t>(node + 1);  // skip header, point at bitmap
+    return static_cast<uint64_t>(reinterpret_cast<std::uintptr_t>(node + 1));
 }
 inline const uint64_t* untag_leaf(uint64_t tagged) noexcept {
-    return reinterpret_cast<const uint64_t*>(tagged ^ LEAF_BIT);
+    return reinterpret_cast<const uint64_t*>(static_cast<std::uintptr_t>(tagged ^ LEAF_BIT));
 }
 inline uint64_t* untag_leaf_mut(uint64_t tagged) noexcept {
-    return reinterpret_cast<uint64_t*>(tagged ^ LEAF_BIT);
+    return reinterpret_cast<uint64_t*>(static_cast<std::uintptr_t>(tagged ^ LEAF_BIT));
 }
 inline uint64_t* bm_to_node(uint64_t ptr) noexcept {
-    return reinterpret_cast<uint64_t*>(ptr) - 1;  // back up from bitmap to header
+    return reinterpret_cast<uint64_t*>(static_cast<std::uintptr_t>(ptr)) - 1;
 }
 inline const uint64_t* bm_to_node_const(uint64_t ptr) noexcept {
     return reinterpret_cast<const uint64_t*>(ptr) - 1;

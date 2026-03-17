@@ -296,7 +296,7 @@ struct bitmask_ops {
             embed[EMBED_SENTINEL] = SENTINEL_TAGGED;
             // child ptr → next embed's bitmap (or final bitmap)
             uint64_t* next_bm = nn + HEADER_U64 + (e + 1) * EMBED_U64;
-            embed[EMBED_CHILD_PTR] = reinterpret_cast<uint64_t>(next_bm);  // no LEAF_BIT
+            embed[EMBED_CHILD_PTR] = static_cast<uint64_t>(reinterpret_cast<std::uintptr_t>(next_bm));  // no LEAF_BIT
         }
 
         // Final bitmask
@@ -883,7 +883,7 @@ private:
     static void fix_embeds(uint64_t* nn, uint8_t sc) noexcept {
         for (uint8_t e = 0; e < sc; ++e) {
             uint64_t* next_bm = nn + HEADER_U64 + static_cast<size_t>(e + 1) * EMBED_U64;
-            nn[HEADER_U64 + static_cast<size_t>(e) * EMBED_U64 + EMBED_CHILD_PTR] = reinterpret_cast<uint64_t>(next_bm);
+            nn[HEADER_U64 + static_cast<size_t>(e) * EMBED_U64 + EMBED_CHILD_PTR] = static_cast<uint64_t>(reinterpret_cast<std::uintptr_t>(next_bm));
         }
         // Fix sentinel of final bitmap
         size_t fo = chain_hs(sc);
