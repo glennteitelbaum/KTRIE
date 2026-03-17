@@ -16,8 +16,9 @@ class kntrie {
     using UK     = std::make_unsigned_t<KEY>;
     using impl_t = kntrie_impl<UK, VALUE, ALLOC>;
 
-    static constexpr UK SIGN_BIT = std::is_signed_v<KEY>
-        ? (UK(1) << (sizeof(KEY) * 8 - 1)) : UK(0);
+    static constexpr int KEY_BITS = sizeof(KEY) * CHAR_BIT;
+    static constexpr UK  SIGN_BIT = std::is_signed_v<KEY>
+        ? (UK(1) << (KEY_BITS - 1)) : UK(0);
 
     static UK to_unsigned(KEY k) noexcept {
         return static_cast<UK>(k) ^ SIGN_BIT;
@@ -36,6 +37,12 @@ public:
 
     // ==================================================================
     // Iterator — snapshot-based, bidirectional
+    //
+    // IMPORTANT: Iterators are snapshots. operator*() returns a copy of
+    // the key/value pair, not a reference into the trie. Modifications
+    // via insert_or_assign do not update existing iterators. Each ++/--
+    // re-descends from the root. Concurrent reads are safe; concurrent
+    // read+write or write+write requires external synchronization.
     // ==================================================================
 
     class const_iterator {
@@ -57,8 +64,8 @@ public:
         using iterator_category = std::bidirectional_iterator_tag;
         using value_type        = std::pair<const KEY, VALUE>;
         using difference_type   = std::ptrdiff_t;
-        using pointer           = const std::pair<const KEY, VALUE>*;
-        using reference         = const std::pair<const KEY, VALUE>&;
+        using pointer           = void;
+        using reference         = std::pair<const KEY, VALUE>;
 
         const_iterator() = default;
 
@@ -167,8 +174,11 @@ public:
         if (r.inserted) return {const_iterator(&impl_, uk, kv.second, true), true};
         return {const_iterator(&impl_, uk, *r.existing, true), false};
     }
-    std::pair<bool, bool> insert(const KEY& key, const VALUE& value) {
-        return impl_.insert(to_unsigned(key), value);
+    std::pair<iterator, bool> insert(const KEY& key, const VALUE& value) {
+        UK uk = to_unsigned(key);
+        auto r = impl_.insert_ex(uk, value);
+        if (r.inserted) return {const_iterator(&impl_, uk, value, true), true};
+        return {const_iterator(&impl_, uk, *r.existing, true), false};
     }
     std::pair<bool, bool> insert_or_assign(const KEY& key, const VALUE& value) {
         return impl_.insert_or_assign(to_unsigned(key), value);
@@ -212,11 +222,11 @@ public:
     }
 
     iterator erase(const_iterator first, const_iterator last) {
-        std::vector<KEY> keys;
-        for (auto it = first; it != last; ++it)
-            keys.push_back(it.key());
-        for (auto k : keys)
+        while (first != last) {
+            KEY k = first.key();
+            ++first;
             impl_.erase(to_unsigned(k));
+        }
         return last;
     }
 
@@ -228,10 +238,11 @@ public:
     bool contains(const KEY& key) const noexcept { return impl_.contains(to_unsigned(key)); }
     size_type count(const KEY& key) const noexcept { return contains(key) ? 1 : 0; }
 
-    // Snapshot iterators: mutable at() cannot safely return VALUE& because
-    // dup-slot invariants require all copies to be updated via insert path.
-    // Use insert_or_assign() or operator[] proxy for writes.
-    // const at() also removed: snapshot values are copies, not references.
+    // at() is intentionally absent. The kntrie stores values in compact nodes
+    // with dup-slot padding — multiple physical copies of each value exist for
+    // in-place mutation. Returning VALUE& would allow writes that update one
+    // copy but not the others, corrupting the dup invariant. Use find_value()
+    // for const reads, insert_or_assign() or operator[] for writes.
 
     // ==================================================================
     // value_proxy — returned by operator[], routes writes through insert
