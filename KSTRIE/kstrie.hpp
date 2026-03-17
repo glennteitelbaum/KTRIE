@@ -26,21 +26,57 @@ namespace gteitelbaum {
 template <typename VALUE,
           typename CHARMAP = identity_char_map,
           typename ALLOC   = std::allocator<uint64_t>>
-class kstrie : public kstrie_impl<VALUE, CHARMAP, ALLOC> {
-    using base         = kstrie_impl<VALUE, CHARMAP, ALLOC>;
-    using hdr_type     = typename base::hdr_type;
-    using slots_type   = typename base::slots_type;
-    using bitmask_type = typename base::bitmask_type;
-    using compact_type = typename base::compact_type;
+class kstrie {
+    using impl_t       = kstrie_impl<VALUE, CHARMAP, ALLOC>;
+    using hdr_type     = typename impl_t::hdr_type;
+    using slots_type   = typename impl_t::slots_type;
+    using bitmask_type = typename impl_t::bitmask_type;
+    using compact_type = typename impl_t::compact_type;
+
+    impl_t impl_;
 
 public:
-    using typename base::key_type;
-    using typename base::mapped_type;
-    using typename base::size_type;
-    using typename base::allocator_type;
+    using key_type       = typename impl_t::key_type;
+    using mapped_type    = typename impl_t::mapped_type;
+    using size_type      = typename impl_t::size_type;
+    using allocator_type = typename impl_t::allocator_type;
 
-    // Inherit constructors
-    using base::base;
+    kstrie() = default;
+    ~kstrie() = default;
+    kstrie(kstrie&&) noexcept = default;
+    kstrie& operator=(kstrie&&) noexcept = default;
+    kstrie(const kstrie&) = default;
+    kstrie& operator=(const kstrie&) = default;
+
+    void swap(kstrie& o) noexcept { impl_.swap(o.impl_); }
+    friend void swap(kstrie& a, kstrie& b) noexcept { a.swap(b); }
+
+    // ------------------------------------------------------------------
+    // Capacity
+    // ------------------------------------------------------------------
+
+    [[nodiscard]] bool      empty()        const noexcept { return impl_.empty(); }
+    [[nodiscard]] size_type size()         const noexcept { return impl_.size(); }
+    [[nodiscard]] size_type memory_usage() const noexcept { return impl_.memory_usage(); }
+    [[nodiscard]] size_type max_size()     const noexcept { return impl_.max_size(); }
+    [[nodiscard]] allocator_type get_allocator() const noexcept { return impl_.get_allocator(); }
+
+    // ------------------------------------------------------------------
+    // Lookup
+    // ------------------------------------------------------------------
+
+    const VALUE* find(std::string_view key) const { return impl_.find(key); }
+    bool contains(std::string_view key) const { return impl_.contains(key); }
+    size_type count(std::string_view key) const { return impl_.count(key); }
+
+    // ------------------------------------------------------------------
+    // Modifiers
+    // ------------------------------------------------------------------
+
+    bool insert(std::string_view key, const VALUE& value) { return impl_.insert(key, value); }
+    bool insert_or_assign(std::string_view key, const VALUE& value) { return impl_.insert_or_assign(key, value); }
+    bool assign(std::string_view key, const VALUE& value) { return impl_.assign(key, value); }
+    void clear() noexcept { impl_.clear(); }
 
     // ------------------------------------------------------------------
     // const_iterator -- bidirectional, stores VALUE copy
@@ -94,7 +130,7 @@ public:
 
         const_iterator& operator--() {
             if (at_end_) {
-                auto [k, v] = trie_->iter_max(trie_->get_root());
+                auto [k, v] = trie_->iter_max(trie_->impl_.get_root());
                 if (v) { key_ = std::move(k); value_ = *v; at_end_ = false; }
             } else {
                 auto [k, v] = trie_->iter_prev(key_);
@@ -128,7 +164,7 @@ public:
     // ------------------------------------------------------------------
 
     const_iterator begin() const {
-        auto [k, v] = iter_min(this->get_root());
+        auto [k, v] = iter_min(impl_.get_root());
         if (!v) return end();
         return {this, std::move(k), *v};
     }
@@ -174,7 +210,7 @@ public:
     }
 
     const_iterator find_iter(std::string_view key) const {
-        const VALUE* v = this->find(key);
+        const VALUE* v = impl_.find(key);
         if (!v) return end();
         return {this, std::string(key), *v};
     }
@@ -188,20 +224,19 @@ public:
         auto [next_key, next_val] = iter_next(pos.key_);
         std::optional<VALUE> saved;
         if (next_val) saved = *next_val;
-        base::erase(pos.key_);
+        impl_.erase(pos.key_);
         if (!saved) return end();
         return {this, std::move(next_key), *saved};
     }
 
-    // Bring base erase(string_view) into scope (hidden by overload above)
-    using base::erase;
+    size_type erase(std::string_view key) { return impl_.erase(key); }
 
     const_iterator erase(const_iterator first, const_iterator last) {
         std::vector<std::string> keys;
         for (auto it = first; it != last; ++it)
             keys.push_back(it.key());
         for (auto& k : keys)
-            base::erase(k);
+            impl_.erase(k);
         if (last == end()) return end();
         auto [k, v] = iter_lower_bound(last.key());
         if (!v) return end();
@@ -211,18 +246,18 @@ public:
     template <typename... Args>
     std::pair<const_iterator, bool> emplace(std::string_view key, Args&&... args) {
         VALUE v(std::forward<Args>(args)...);
-        bool inserted = this->insert(key, v);
+        bool inserted = impl_.insert(key, v);
         auto [k, vp] = iter_lower_bound(key);
         return {const_iterator{this, std::move(k), *vp}, inserted};
     }
 
     template <typename... Args>
     std::pair<const_iterator, bool> try_emplace(std::string_view key, Args&&... args) {
-        const VALUE* existing = this->find(key);
+        const VALUE* existing = impl_.find(key);
         if (existing)
             return {const_iterator{this, std::string(key), *existing}, false};
         VALUE v(std::forward<Args>(args)...);
-        this->insert(key, v);
+        impl_.insert(key, v);
         return {const_iterator{this, std::string(key), v}, true};
     }
 
@@ -231,7 +266,7 @@ public:
     // ------------------------------------------------------------------
 
     bool operator==(const kstrie& o) const {
-        if (this->size() != o.size()) return false;
+        if (impl_.size() != o.impl_.size()) return false;
         auto a = begin(), b = o.begin();
         while (a != end()) {
             auto [ak, av] = *a;
@@ -275,7 +310,7 @@ private:
     }
 
     const VALUE* find_min_impl(const uint64_t* node, std::string& out) const {
-        if (node == this->get_sentinel()) [[unlikely]] return nullptr;
+        if (node == impl_.get_sentinel()) [[unlikely]] return nullptr;
         hdr_type h = hdr_type::from_node(node);
 
         if (h.has_skip()) [[unlikely]] {
@@ -299,7 +334,7 @@ private:
 
         // Bitmask: check eos first, then first child
         uint64_t* eos = bitmask_type::eos_child(node, h);
-        if (eos != this->get_sentinel()) {
+        if (eos != impl_.get_sentinel()) {
             return find_min_impl(eos, out);
         }
         const auto* bm = bitmask_type::get_bitmap(node, h);
@@ -312,7 +347,7 @@ private:
     }
 
     const VALUE* find_max_impl(const uint64_t* node, std::string& out) const {
-        if (node == this->get_sentinel()) [[unlikely]] return nullptr;
+        if (node == impl_.get_sentinel()) [[unlikely]] return nullptr;
         hdr_type h = hdr_type::from_node(node);
 
         if (h.has_skip()) [[unlikely]] {
@@ -350,7 +385,7 @@ private:
         }
 
         uint64_t* eos = bitmask_type::eos_child(node, h);
-        if (eos != this->get_sentinel())
+        if (eos != impl_.get_sentinel())
             return find_max_impl(eos, out);
 
         return nullptr;
@@ -370,7 +405,7 @@ private:
                                               stack_buf, sizeof(stack_buf));
 
         std::string result;
-        const VALUE* val = find_next_impl(this->get_root(), mapped, len,
+        const VALUE* val = find_next_impl(impl_.get_root(), mapped, len,
                                           0, result);
         delete[] heap_buf;
         return {std::move(result), val};
@@ -380,7 +415,7 @@ private:
                                 const uint8_t* mapped, uint32_t key_len,
                                 uint32_t consumed,
                                 std::string& out) const {
-        if (node == this->get_sentinel()) [[unlikely]] return nullptr;
+        if (node == impl_.get_sentinel()) [[unlikely]] return nullptr;
         hdr_type h = hdr_type::from_node(node);
 
         if (h.has_skip()) [[unlikely]] {
@@ -421,7 +456,7 @@ private:
         {
             uint8_t byte = mapped[consumed++];
             uint64_t* child = bitmask_type::dispatch(node, h, byte);
-            if (child != this->get_sentinel()) {
+            if (child != impl_.get_sentinel()) {
                 size_t prefix_len = out.size();
                 out.push_back(static_cast<char>(CHARMAP::from_index(byte)));
                 const VALUE* val = find_next_impl(child, mapped, key_len,
@@ -455,7 +490,7 @@ private:
                                               stack_buf, sizeof(stack_buf));
 
         std::string result;
-        const VALUE* val = find_prev_impl(this->get_root(), mapped, len,
+        const VALUE* val = find_prev_impl(impl_.get_root(), mapped, len,
                                           0, result);
         delete[] heap_buf;
         return {std::move(result), val};
@@ -465,7 +500,7 @@ private:
                                 const uint8_t* mapped, uint32_t key_len,
                                 uint32_t consumed,
                                 std::string& out) const {
-        if (node == this->get_sentinel()) [[unlikely]] return nullptr;
+        if (node == impl_.get_sentinel()) [[unlikely]] return nullptr;
         hdr_type h = hdr_type::from_node(node);
 
         if (h.has_skip()) [[unlikely]] {
@@ -500,7 +535,7 @@ private:
             }
             uint8_t byte = mapped[consumed++];
             uint64_t* child = bitmask_type::dispatch(node, h, byte);
-            if (child != this->get_sentinel()) {
+            if (child != impl_.get_sentinel()) {
                 size_t prefix_len = out.size();
                 out.push_back(static_cast<char>(CHARMAP::from_index(byte)));
                 const VALUE* val = find_prev_impl(child, mapped, key_len,
@@ -518,7 +553,7 @@ private:
             }
             // No prev child — check eos
             uint64_t* eos = bitmask_type::eos_child(node, h);
-            if (eos != this->get_sentinel())
+            if (eos != impl_.get_sentinel())
                 return find_max_impl(eos, out);
             return nullptr;
         }
@@ -538,7 +573,7 @@ private:
                                               stack_buf, sizeof(stack_buf));
 
         std::string result;
-        const VALUE* val = find_ge_impl(this->get_root(), mapped, len,
+        const VALUE* val = find_ge_impl(impl_.get_root(), mapped, len,
                                         0, result);
         delete[] heap_buf;
         return {std::move(result), val};
@@ -548,7 +583,7 @@ private:
                               const uint8_t* mapped, uint32_t key_len,
                               uint32_t consumed,
                               std::string& out) const {
-        if (node == this->get_sentinel()) [[unlikely]] return nullptr;
+        if (node == impl_.get_sentinel()) [[unlikely]] return nullptr;
         hdr_type h = hdr_type::from_node(node);
 
         if (h.has_skip()) [[unlikely]] {
@@ -601,7 +636,7 @@ private:
             uint8_t byte = mapped[consumed++];
             uint64_t* child = bitmask_type::dispatch(node, h, byte);
 
-            if (child != this->get_sentinel()) {
+            if (child != impl_.get_sentinel()) {
                 size_t prefix_len = out.size();
                 out.push_back(static_cast<char>(CHARMAP::from_index(byte)));
 
@@ -638,7 +673,7 @@ private:
         // Bitmask take_min: eos first, then first child
         {
             uint64_t* eos = bitmask_type::eos_child(node, h);
-            if (eos != this->get_sentinel())
+            if (eos != impl_.get_sentinel())
                 return find_min_impl(eos, out);
             const auto* bm = bitmask_type::get_bitmap(node, h);
             int idx = bm->find_next_set(0);
@@ -693,11 +728,11 @@ private:
         right_turn best_rt{};
         bool have_rt = false;
 
-        const uint64_t* node = this->get_root();
+        const uint64_t* node = impl_.get_root();
         uint32_t consumed = 0;
 
         while (consumed < len) {
-            if (node == this->get_sentinel()) [[unlikely]] goto not_found;
+            if (node == impl_.get_sentinel()) [[unlikely]] goto not_found;
             hdr_type h = hdr_type::from_node(node);
 
             {
@@ -743,7 +778,7 @@ private:
                 }
 
                 uint64_t* child = bitmask_type::dispatch(node, h, byte);
-                if (child == this->get_sentinel()) [[unlikely]] goto not_found;
+                if (child == impl_.get_sentinel()) [[unlikely]] goto not_found;
 
                 path.push_back(static_cast<char>(
                     CHARMAP::from_index(byte)));
@@ -882,7 +917,7 @@ private:
         }
         // Bitmask: eos first, then first child
         uint64_t* eos = bitmask_type::eos_child(node, h);
-        if (eos != this->get_sentinel())
+        if (eos != impl_.get_sentinel())
             return find_min_impl(eos, out);
         const auto* bm = bitmask_type::get_bitmap(node, h);
         int idx = bm->find_next_set(0);
