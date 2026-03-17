@@ -22,7 +22,8 @@ A **sorted**, **compressed** associative container for string keys. Follows the 
 
 Performance charts:
 
+* [400K+ words vs std::unordered_map](https://glennteitelbaum.github.io/KTRIE/KSTRIE/bench_words.html) [Ref: [400K+ words](./words.txt) ]
 
-
+* [100K elements vs std::map and std::unordered_map](https://glennteitelbaum.github.io/KTRIE/KSTRIE/bench_kstrie.html)
 
 *Note: This was done vibe coding with Claude Opus 4.6*
