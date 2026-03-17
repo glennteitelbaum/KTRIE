@@ -1,4 +1,5 @@
-#pragma once
+#ifndef KSTRIE_SUPPORT_HPP
+#define KSTRIE_SUPPORT_HPP
 
 #include <array>
 #include <bit>
@@ -778,3 +779,7 @@ get_mapped(const uint8_t* raw, uint32_t len,
 }
 
 } // namespace gteitelbaum
+
+#endif // KSTRIE_SUPPORT_HPP
+
+#endif // KSTRIE_SUPPORT_HPP

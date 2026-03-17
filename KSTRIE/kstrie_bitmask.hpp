@@ -1,4 +1,5 @@
-#pragma once
+#ifndef KSTRIE_BITMASK_HPP
+#define KSTRIE_BITMASK_HPP
 
 #include "kstrie_support.hpp"
 
@@ -313,3 +314,7 @@ struct kstrie_bitmask {
 };
 
 } // namespace gteitelbaum
+
+#endif // KSTRIE_BITMASK_HPP
+
+#endif // KSTRIE_BITMASK_HPP

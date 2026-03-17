@@ -1,4 +1,5 @@
-#pragma once
+#ifndef KSTRIE_HPP
+#define KSTRIE_HPP
 
 #include "kstrie_impl.hpp"
 #include <iterator>
@@ -12,6 +13,14 @@ namespace gteitelbaum {
 //
 // Inherits engine (find/insert/erase) from kstrie_impl.
 // Adds bidirectional iterator, ordered traversal, prefix queries.
+//
+// Thread safety: kstrie is not thread-safe. Concurrent reads are safe.
+// Concurrent read+write or write+write requires external synchronization.
+//
+// IMPORTANT: Iterators are snapshots. operator*() returns a copy of the
+// key/value pair, not a reference into the trie. Modifications via
+// insert_or_assign do not update existing iterators. Each ++/--
+// re-descends from the root.
 // ============================================================================
 
 template <typename VALUE,
@@ -59,7 +68,7 @@ public:
         using iterator_category = std::bidirectional_iterator_tag;
         using value_type        = std::pair<const std::string, VALUE>;
         using difference_type   = std::ptrdiff_t;
-        using pointer           = const value_type*;
+        using pointer           = void;
 
         using reference = std::pair<std::string, VALUE>;
 
@@ -886,3 +895,5 @@ private:
 };
 
 } // namespace gteitelbaum
+
+#endif // KSTRIE_HPP

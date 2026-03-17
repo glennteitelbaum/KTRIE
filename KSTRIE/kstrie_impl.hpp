@@ -1,4 +1,5 @@
-#pragma once
+#ifndef KSTRIE_IMPL_HPP
+#define KSTRIE_IMPL_HPP
 
 #include "kstrie_bitmask.hpp"
 #include "kstrie_compact.hpp"
@@ -118,11 +119,6 @@ private:
         }
     }
 
-    VALUE* find_impl(const uint8_t* key_data, uint32_t key_len) noexcept {
-        return const_cast<VALUE*>(
-            static_cast<const kstrie_impl*>(this)->find_impl(key_data, key_len));
-    }
-
 public:
     // ------------------------------------------------------------------
     // Construction / destruction
@@ -228,10 +224,9 @@ public:
             static_cast<uint32_t>(key.size()));
     }
 
-    VALUE* find(std::string_view key) {
-        return const_cast<VALUE*>(
-            static_cast<const kstrie_impl*>(this)->find(key));
-    }
+    // Mutable find() intentionally absent. Compact nodes use dup-slot
+    // padding — returning VALUE* would allow writes that corrupt the
+    // dup invariant. Use insert_or_assign() or assign() for writes.
 
     bool contains(std::string_view key) const {
         return find(key) != nullptr;
@@ -1027,3 +1022,5 @@ private:
 };
 
 } // namespace gteitelbaum
+
+#endif // KSTRIE_IMPL_HPP

@@ -1,4 +1,5 @@
-#pragma once
+#ifndef KSTRIE_COMPACT_HPP
+#define KSTRIE_COMPACT_HPP
 #include "kstrie_support.hpp"
 
 namespace gteitelbaum {
@@ -1216,3 +1217,7 @@ struct kstrie_compact {
 };
 
 } // namespace gteitelbaum
+
+#endif // KSTRIE_COMPACT_HPP
+
+#endif // KSTRIE_COMPACT_HPP
