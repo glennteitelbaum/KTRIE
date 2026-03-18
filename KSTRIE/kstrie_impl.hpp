@@ -8,7 +8,7 @@
 #include <string>
 #include <string_view>
 
-namespace gteitelbaum {
+namespace gteitelbaum::kstrie_detail {
 
 // ============================================================================
 // kstrie_impl -- engine trie class
@@ -1238,6 +1238,6 @@ private:
     }
 };
 
-} // namespace gteitelbaum
+} // namespace gteitelbaum::kstrie_detail
 
 #endif // KSTRIE_IMPL_HPP

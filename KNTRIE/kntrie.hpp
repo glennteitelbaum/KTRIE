@@ -14,7 +14,7 @@ class kntrie {
                   "KEY must be integral and at least 16 bits");
 
     using UK     = std::make_unsigned_t<KEY>;
-    using impl_t = kntrie_impl<UK, VALUE, ALLOC>;
+    using impl_t = kntrie_detail::kntrie_impl<UK, VALUE, ALLOC>;
 
     static constexpr int KEY_BITS = sizeof(KEY) * CHAR_BIT;
     static constexpr UK  SIGN_BIT = std::is_signed_v<KEY>

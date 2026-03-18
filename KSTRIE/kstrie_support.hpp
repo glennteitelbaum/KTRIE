@@ -29,7 +29,10 @@ inline constexpr size_t div_ceil(size_t x, size_t y) noexcept {
 }
 
 // Fundamental slot width
+#ifndef KTRIE_U64_BYTES_DEFINED
+#define KTRIE_U64_BYTES_DEFINED
 inline constexpr size_t U64_BYTES = sizeof(uint64_t);
+#endif
 
 // Named node-word indices (u64 offsets into node allocation)
 inline constexpr size_t NODE_HEADER      = 0;

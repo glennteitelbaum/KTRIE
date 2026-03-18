@@ -12,7 +12,7 @@
 #include <algorithm>
 #include <cassert>
 
-namespace gteitelbaum {
+namespace gteitelbaum::kntrie_detail {
 
 // ==========================================================================
 // Constants
@@ -987,6 +987,6 @@ struct erase_result_t {
     uint64_t subtree_entries;  // remaining entries in subtree (exact)
 };
 
-} // namespace gteitelbaum
+} // namespace gteitelbaum::kntrie_detail
 
 #endif // KNTRIE_SUPPORT_HPP

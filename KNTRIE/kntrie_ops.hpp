@@ -7,7 +7,7 @@
 #include <array>
 #include <bit>
 
-namespace gteitelbaum {
+namespace gteitelbaum::kntrie_detail {
 
 // ======================================================================
 // kntrie_ops<VALUE, ALLOC, KEY_BITS> — stateless trie operations.
@@ -1399,6 +1399,6 @@ struct kntrie_ops {
 
 };
 
-} // namespace gteitelbaum
+} // namespace gteitelbaum::kntrie_detail
 
 #endif // KNTRIE_OPS_HPP

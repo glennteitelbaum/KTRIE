@@ -7,7 +7,7 @@
 #include <cstring>
 #include <algorithm>
 
-namespace gteitelbaum {
+namespace gteitelbaum::kntrie_detail {
 
 // ==========================================================================
 // AdaptiveSearch  (branchless binary search for pow2 and 3/4 midpoint counts)
@@ -990,6 +990,6 @@ public:
     }
 };
 
-} // namespace gteitelbaum
+} // namespace gteitelbaum::kntrie_detail
 
 #endif // KNTRIE_COMPACT_HPP

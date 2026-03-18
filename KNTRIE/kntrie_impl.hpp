@@ -6,7 +6,7 @@
 #include <cstring>
 #include <algorithm>
 
-namespace gteitelbaum {
+namespace gteitelbaum::kntrie_detail {
 
 // Standalone stats accumulator
 struct kntrie_stats_t {
@@ -779,6 +779,6 @@ private:
     }
 };
 
-} // namespace gteitelbaum
+} // namespace gteitelbaum::kntrie_detail
 
 #endif // KNTRIE_IMPL_HPP

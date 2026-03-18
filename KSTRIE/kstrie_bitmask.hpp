@@ -3,7 +3,7 @@
 
 #include "kstrie_support.hpp"
 
-namespace gteitelbaum {
+namespace gteitelbaum::kstrie_detail {
 
 template <typename VALUE, typename CHARMAP, typename ALLOC>
 struct kstrie_bitmask {
@@ -313,6 +313,6 @@ struct kstrie_bitmask {
 
 };
 
-} // namespace gteitelbaum
+} // namespace gteitelbaum::kstrie_detail
 
 #endif // KSTRIE_BITMASK_HPP

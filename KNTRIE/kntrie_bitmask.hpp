@@ -3,7 +3,7 @@
 
 #include "kntrie_support.hpp"
 
-namespace gteitelbaum {
+namespace gteitelbaum::kntrie_detail {
 
 // ==========================================================================
 // bitmask_ops  -- unified bitmask node + bitmap_256_t leaf operations
@@ -1261,6 +1261,6 @@ public:
     }
 };
 
-} // namespace gteitelbaum
+} // namespace gteitelbaum::kntrie_detail
 
 #endif // KNTRIE_BITMASK_HPP
