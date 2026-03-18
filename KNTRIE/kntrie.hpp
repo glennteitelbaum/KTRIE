@@ -251,6 +251,16 @@ public:
         return last;
     }
 
+    // Single-walk conditional erase: find key, test fn(const VALUE&),
+    // erase only if predicate returns true.
+    // Returns true if erased, false if not found or predicate failed.
+    template<typename F>
+    bool erase_when(const KEY& key, F&& fn) {
+        return impl_.erase_when(to_unsigned(key), [&fn](const auto& slot) {
+            return fn(reinterpret_cast<const VALUE&>(slot));
+        });
+    }
+
     // ==================================================================
     // Lookup
     // ==================================================================

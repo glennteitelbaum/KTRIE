@@ -316,6 +316,36 @@ public:
         return erased;
     }
 
+    // Conditional erase: find key, test fn(const VALUE&), erase if true.
+    // Returns true if erased, false if not found or predicate failed.
+    template<typename F>
+    bool erase_when(const KEY& key, F&& fn) {
+        if (size_v == 0) [[unlikely]] return false;
+        uint64_t ik = key_to_u64(key);
+
+        if ((ik ^ root_prefix_v) & root_prefix_mask()) [[unlikely]] return false;
+
+        uint64_t old_root_ptr = root_ptr_v;
+        auto r = OPS::erase_when_node(root_ptr_v, ik, ik << root_skip_bits_v,
+                                       root_skip_bytes(), std::forward<F>(fn), bld_v);
+        if (r.erased) [[likely]] {
+            root_ptr_v = r.tagged_ptr ? r.tagged_ptr : BO::SENTINEL_TAGGED;
+            --size_v;
+            if (size_v == 0) [[unlikely]] {
+                root_ptr_v = BO::SENTINEL_TAGGED;
+                root_prefix_v = 0;
+                set_root(0);
+            } else {
+                if (root_ptr_v != old_root_ptr) [[unlikely]] normalize_root();
+                if (size_v <= COMPACT_MAX && !(root_ptr_v & LEAF_BIT)
+                    && root_ptr_v != BO::SENTINEL_TAGGED) [[unlikely]]
+                    coalesce_bm_to_leaf();
+            }
+            return true;
+        }
+        return false;
+    }
+
     // ==================================================================
     // Stats / Memory
     // ==================================================================

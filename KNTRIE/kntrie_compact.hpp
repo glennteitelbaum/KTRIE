@@ -360,6 +360,30 @@ struct compact_ops {
     }
 
     // ==================================================================
+    // Conditional erase: find key, test predicate, erase only if true.
+    // Returns {tagged, erased, remaining_entries}.
+    // ==================================================================
+
+    template<typename F>
+    static erase_result_t erase_when(uint64_t* node, node_header_t* h,
+                                     K suffix, F&& fn, BLD& bld) {
+        unsigned ts = h->total_slots();
+        constexpr size_t hs = LEAF_HEADER_U64;
+        const K* kd = keys(node, hs);
+
+        const K* base = adaptive_search<K>::find_base(kd, ts, suffix);
+        if (*base != suffix) [[unlikely]] return {tag_leaf(node), false, 0};
+
+        // Test predicate on the value
+        unsigned idx = static_cast<unsigned>(base - kd);
+        const VALUE* vp = val_ptr_at(node, ts, hs, idx);
+        if (!fn(*vp)) return {tag_leaf(node), false, h->entries()};
+
+        // Predicate passed — delegate to full erase
+        return erase(node, h, suffix, bld);
+    }
+
+    // ==================================================================
     // Modify existing value in-place with dup propagation
     //
     // fn is void(VALUE&) — modifies the value through a reference.

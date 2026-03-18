@@ -805,6 +805,31 @@ struct bitmask_ops {
     }
 
     // ==================================================================
+    // Bitmap256 leaf: conditional erase
+    // ==================================================================
+
+    template<typename F>
+    static erase_result_t bitmap_erase_when(uint64_t* node, uint8_t suffix,
+                                            F&& fn, BLD& bld) {
+        auto* h = get_header(node);
+        constexpr size_t hs = LEAF_HEADER_U64;
+        bitmap_256_t& bm = bm_mut(node, hs);
+        if (!bm.has_bit(suffix)) return {tag_leaf(node), false, 0};
+
+        // Test predicate
+        if constexpr (VT::IS_BOOL) {
+            bool val = val_bm(node, hs).has_bit(suffix);
+            if (!fn(val)) return {tag_leaf(node), false, h->entries()};
+        } else {
+            int slot = bm.find_slot<slot_mode::UNFILTERED>(suffix);
+            const VST* vd = bl_vals(node, hs);
+            if (!fn(*VT::as_ptr(vd[slot]))) return {tag_leaf(node), false, h->entries()};
+        }
+
+        return bitmap_erase(node, suffix, bld);
+    }
+
+    // ==================================================================
     // Bitmap256 leaf: make from sorted suffixes
     // ==================================================================
 

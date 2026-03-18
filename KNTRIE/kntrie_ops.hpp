@@ -1010,6 +1010,147 @@ struct kntrie_ops {
         }
     }
 
+    // ==================================================================
+    // Conditional erase — same descent as erase_node, predicate gate
+    // at the leaf. fn is bool(const VALUE&), erase only if true.
+    // ==================================================================
+
+    template<typename F>
+    static erase_result_t erase_when_node(uint64_t ptr, uint64_t ik,
+                                           uint64_t shifted, uint8_t depth,
+                                           F&& fn, BLD& bld) {
+        if (ptr == BO::SENTINEL_TAGGED) [[unlikely]]
+            return {ptr, false, 0};
+
+        // LEAF
+        if (ptr & LEAF_BIT) [[unlikely]] {
+            uint64_t* node = untag_leaf_mut(ptr);
+            auto* hdr = get_header(node);
+            uint8_t skip = hdr->skip();
+
+            uint64_t pfx_shifted = leaf_prefix(node) << (CHAR_BIT * depth);
+            for (uint8_t pos = 0; pos < skip; ++pos) {
+                uint8_t expected = static_cast<uint8_t>(shifted >> U64_TOP_BYTE_SHIFT);
+                uint8_t actual = static_cast<uint8_t>(pfx_shifted >> U64_TOP_BYTE_SHIFT);
+                if (expected != actual) [[unlikely]]
+                    return {tag_leaf(node), false, 0};
+                shifted <<= CHAR_BIT;
+                pfx_shifted <<= CHAR_BIT;
+                depth++;
+            }
+
+            return depth_switch(depth, [&]<int BITS>() {
+                return leaf_erase_when<BITS>(node, hdr, ik,
+                                             std::forward<F>(fn), bld);
+            });
+        }
+
+        // BITMASK — identical to erase_node
+        uint64_t* node = bm_to_node(ptr);
+        auto* hdr = get_header(node);
+        uint8_t sc = hdr->skip();
+
+        for (uint8_t pos = 0; pos < sc; ++pos) {
+            uint8_t expected = static_cast<uint8_t>(shifted >> U64_TOP_BYTE_SHIFT);
+            uint8_t actual = BO::skip_byte(node, pos);
+            if (expected != actual) [[unlikely]]
+                return {tag_bitmask(node), false, 0};
+            shifted <<= CHAR_BIT;
+            depth++;
+        }
+
+        uint8_t ti = static_cast<uint8_t>(shifted >> U64_TOP_BYTE_SHIFT);
+
+        typename BO::child_lookup cl;
+        if (sc > 0) [[unlikely]]
+            cl = BO::chain_lookup(node, sc, ti);
+        else
+            cl = BO::lookup(node, ti);
+
+        if (!cl.found) [[unlikely]]
+            return {tag_bitmask(node), false, 0};
+
+        auto cr = erase_when_node(cl.child, ik, shifted << CHAR_BIT,
+                                   depth + 1, std::forward<F>(fn), bld);
+
+        if (!cr.erased) [[unlikely]]
+            return {tag_bitmask(node), false, 0};
+
+        if (cr.tagged_ptr) [[likely]] {
+            if (cr.tagged_ptr != cl.child) [[unlikely]] {
+                if (sc > 0) [[unlikely]]
+                    BO::chain_set_child(node, sc, cl.slot, cr.tagged_ptr);
+                else
+                    BO::set_child(node, cl.slot, cr.tagged_ptr);
+            }
+            uint64_t exact = dec_descendants(node, hdr);
+            if (exact <= COMPACT_MAX) [[unlikely]] {
+                return depth_switch(depth, [&]<int BITS>() {
+                    return do_coalesce<BITS>(node, hdr, bld);
+                });
+            }
+            return {tag_bitmask(node), true, exact};
+        }
+
+        // Child fully erased
+        uint64_t* nn;
+        if (sc > 0) [[unlikely]]
+            nn = BO::chain_remove_child(node, hdr, sc, cl.slot, ti, bld);
+        else
+            nn = BO::remove_child(node, hdr, cl.slot, ti, bld);
+        if (!nn) [[unlikely]] return {0, true, 0};
+
+        hdr = get_header(nn);
+        unsigned nc = hdr->entries();
+        uint64_t exact = dec_descendants(nn, hdr);
+
+        if (nc == 1) [[unlikely]] {
+            typename BO::collapse_info ci;
+            if (sc > 0) [[unlikely]]
+                ci = BO::chain_collapse_info(nn, sc);
+            else
+                ci = BO::standalone_collapse_info(nn);
+            size_t nn_au64 = hdr->alloc_u64();
+
+            if (ci.sole_child & LEAF_BIT) {
+                uint64_t* leaf = untag_leaf_mut(ci.sole_child);
+                leaf = depth_switch(depth, [&]<int BITS>() {
+                    return prepend_skip<BITS>(leaf, ci.total_skip,
+                               leaf_prefix(leaf), bld);
+                });
+                bld.dealloc_node(nn, nn_au64);
+                return {tag_leaf(leaf), true, exact};
+            }
+            uint64_t* child_node = bm_to_node(ci.sole_child);
+            bld.dealloc_node(nn, nn_au64);
+            return {BO::wrap_in_chain(child_node, ci.bytes, ci.total_skip, bld),
+                    true, exact};
+        }
+
+        if (exact <= COMPACT_MAX) [[unlikely]] {
+            return depth_switch(depth, [&]<int BITS>() {
+                return do_coalesce<BITS>(nn, get_header(nn), bld);
+            });
+        }
+        return {tag_bitmask(nn), true, exact};
+    }
+
+    template<int BITS, typename F>
+    static erase_result_t leaf_erase_when(uint64_t* node, node_header_t* hdr,
+                                           uint64_t ik, F&& fn, BLD& bld) {
+        using NK = nk_for_bits_t<BITS>;
+        NK suffix = leaf_ops_t<BITS>::template to_suffix<BITS>(ik);
+
+        if constexpr (sizeof(NK) == sizeof(uint8_t)) {
+            return BO::bitmap_erase_when(node, static_cast<uint8_t>(suffix),
+                                         std::forward<F>(fn), bld);
+        } else {
+            using CO = compact_ops<NK, VALUE, ALLOC>;
+            return CO::erase_when(node, hdr, suffix,
+                                  std::forward<F>(fn), bld);
+        }
+    }
+
 
     // ==================================================================
     // Collect entries — all use typed NK, narrow at leaf
