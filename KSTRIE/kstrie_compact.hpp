@@ -269,6 +269,38 @@ struct kstrie_compact {
     }
 
     // ------------------------------------------------------------------
+    // modify_existing -- find key, apply fn(VALUE&) in place
+    // ------------------------------------------------------------------
+
+    template<typename F>
+    static bool modify_existing(uint64_t* node, const hdr_type& h,
+                                const uint8_t* suffix, uint32_t suffix_len,
+                                F&& fn) {
+        auto [found, pos] = find_pos(node, h, suffix, suffix_len);
+        if (!found) return false;
+        auto* sb = h.get_compact_slots(node);
+        VALUE* vp = slots::load_value(sb, pos);
+        fn(*vp);
+        return true;
+    }
+
+    // ------------------------------------------------------------------
+    // erase_when_pos -- find key, test predicate, return pos if true
+    // Returns {found_and_passed, pos}
+    // ------------------------------------------------------------------
+
+    template<typename F>
+    static find_result erase_when_pos(const uint64_t* node, const hdr_type& h,
+                                      const uint8_t* suffix, uint32_t suffix_len,
+                                      F&& fn) {
+        auto [found, pos] = find_pos(node, h, suffix, suffix_len);
+        if (!found) return {false, pos};
+        const VALUE* vp = slots::load_value(h.get_compact_slots(node), pos);
+        if (!fn(*vp)) return {false, pos};
+        return {true, pos};
+    }
+
+    // ------------------------------------------------------------------
     // collect_entries -- walk parallel arrays into build_entry[].
     // key_buf must be at least N * 256 bytes.
     // ------------------------------------------------------------------

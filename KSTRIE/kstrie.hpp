@@ -75,6 +75,33 @@ public:
     bool insert(std::string_view key, const VALUE& value) { return impl_.insert(key, value); }
     bool insert_or_assign(std::string_view key, const VALUE& value) { return impl_.insert_or_assign(key, value); }
     bool assign(std::string_view key, const VALUE& value) { return impl_.assign(key, value); }
+
+    // Single-walk read-modify-write in place.
+    // fn is void(VALUE&). Returns true if key existed and was modified.
+    template<typename F>
+    bool modify(std::string_view key, F&& fn) {
+        return impl_.modify_dispatch(key, std::forward<F>(fn));
+    }
+
+    // With default: if key exists, apply fn(value&), return true.
+    // If missing, insert default_val as-is, return false.
+    // Two walks on miss (modify miss + insert).
+    template<typename F>
+    bool modify(std::string_view key, F&& fn, const VALUE& default_val) {
+        if (impl_.modify_dispatch(key, std::forward<F>(fn)))
+            return true;
+        impl_.insert(key, default_val);
+        return false;
+    }
+
+    // Single-walk conditional erase: find key, test fn(const VALUE&),
+    // erase only if predicate returns true.
+    // Returns true if erased, false if not found or predicate failed.
+    template<typename F>
+    bool erase_when(std::string_view key, F&& fn) {
+        return impl_.erase_when(key, std::forward<F>(fn));
+    }
+
     void clear() noexcept { impl_.clear(); }
 
     // ------------------------------------------------------------------

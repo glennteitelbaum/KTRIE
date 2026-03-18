@@ -119,6 +119,58 @@ private:
         }
     }
 
+    // ------------------------------------------------------------------
+    // modify_inner -- mutable version of find_inner, applies fn at leaf
+    // ------------------------------------------------------------------
+
+    template<typename F>
+    bool modify_inner(const uint8_t* mapped, uint32_t key_len, F&& fn) {
+        uint64_t* node = root_;
+        uint32_t consumed = 0;
+        hdr_type h;
+
+        for (;;) {
+            h = hdr_type::from_node(node);
+            if (h.has_skip()) [[unlikely]] {
+                if (!skip_type::match_skip_unchecked(node, h, mapped, key_len, consumed))
+                    [[unlikely]] return false;
+            }
+            if (!h.is_bitmap()) [[unlikely]] break;
+            if (consumed == key_len) [[unlikely]] {
+                node = bitmask_type::eos_child(node, h);
+                if (node == compact_type::sentinel()) return false;
+                h = hdr_type::from_node(node);
+                break;
+            }
+            node = bitmask_type::dispatch(node, h, mapped[consumed++]);
+            if (node == compact_type::sentinel()) return false;
+        }
+        return compact_type::modify_existing(
+            node, h, mapped + consumed, key_len - consumed,
+            std::forward<F>(fn));
+    }
+
+    // ------------------------------------------------------------------
+    // modify_dispatch -- wrapper: mapping + heap ownership
+    // ------------------------------------------------------------------
+
+    template<typename F>
+    bool modify_dispatch(std::string_view key, F&& fn) {
+        if (root_ == compact_type::sentinel()) return false;
+        const uint8_t* raw = reinterpret_cast<const uint8_t*>(key.data());
+        uint32_t len = static_cast<uint32_t>(key.size());
+        if constexpr (CHARMAP::IS_IDENTITY) {
+            return modify_inner(raw, len, std::forward<F>(fn));
+        } else {
+            uint8_t stack_buf[256];
+            auto [mapped, heap_buf] = get_mapped<CHARMAP>(raw, len,
+                                                  stack_buf, sizeof(stack_buf));
+            bool result = modify_inner(mapped, len, std::forward<F>(fn));
+            delete[] heap_buf;
+            return result;
+        }
+    }
+
 public:
     // ------------------------------------------------------------------
     // Construction / destruction
@@ -284,6 +336,44 @@ public:
         }
         size_--;
         return 1;
+    }
+
+    // Conditional erase: find key, test fn(const VALUE&), erase if true.
+    // Returns true if erased, false if not found or predicate failed.
+    template<typename F>
+    bool erase_when(std::string_view key, F&& fn) {
+        if (root_ == compact_type::sentinel()) return false;
+
+        const uint8_t* raw = reinterpret_cast<const uint8_t*>(key.data());
+        uint32_t len = static_cast<uint32_t>(key.size());
+
+        uint8_t stack_buf[256];
+        auto [mapped, heap_buf] = get_mapped<CHARMAP>(raw, len,
+                                              stack_buf, sizeof(stack_buf));
+
+        erase_info r = erase_when_node(root_, mapped, len, 0,
+                                       std::forward<F>(fn));
+        delete[] heap_buf;
+
+        if (r.status == erase_status::MISSING)
+            return false;
+
+        if (r.status == erase_status::DONE) {
+            root_ = r.leaf;
+            size_--;
+            return true;
+        }
+
+        // PENDING from compact root
+        do_leaf_erase(r.leaf, r.pos);
+        if (r.desc == 0) {
+            mem_.free_node(r.leaf);
+            root_ = compact_type::sentinel();
+        } else {
+            root_ = r.leaf;
+        }
+        size_--;
+        return true;
     }
 
     void clear() noexcept {
@@ -802,6 +892,139 @@ private:
             return {0, erase_status::DONE, compact_type::sentinel(), 0};
         }
         // Try collapse
+        if (node[NODE_TOTAL_TAIL] <= COMPACT_KEYSUFFIX_LIMIT) {
+            uint64_t* collapsed = collapse_to_compact(node);
+            if (collapsed != node)
+                return {0, erase_status::DONE, collapsed, 0};
+        }
+        return {0, erase_status::DONE, node, 0};
+    }
+
+    // ------------------------------------------------------------------
+    // erase_when_node -- same as erase_node but tests predicate at leaf
+    // ------------------------------------------------------------------
+
+    template<typename F>
+    erase_info erase_when_node(uint64_t* node, const uint8_t* key,
+                               uint32_t key_len, uint32_t consumed, F&& fn) {
+        hdr_type h = hdr_type::from_node(node);
+
+        auto mr = skip_type::match_prefix(node, h, key, key_len, consumed);
+        if (mr.status != skip_type::match_status::MATCHED)
+            return {0, erase_status::MISSING, nullptr, 0};
+        consumed = mr.consumed;
+
+        // COMPACT: find key, test predicate, return PENDING only if passes
+        if (h.is_compact()) {
+            auto [passed, pos] = compact_type::erase_when_pos(
+                node, h, key + consumed, key_len - consumed,
+                std::forward<F>(fn));
+            if (!passed)
+                return {0, erase_status::MISSING, nullptr, 0};
+            return {static_cast<uint32_t>(h.count - 1),
+                    erase_status::PENDING, node, pos};
+        }
+
+        // BITMASK — EOS case
+        if (consumed == key_len) {
+            uint64_t* eos = bitmask_type::eos_child(node, h);
+            if (eos == compact_type::sentinel()) return {0, erase_status::MISSING, nullptr, 0};
+            uint64_t old_eos_tail = node_tail_total(eos);
+            erase_info r = erase_when_node(eos, key, key_len, consumed,
+                                           std::forward<F>(fn));
+            if (r.status == erase_status::MISSING) return r;
+            uint64_t* new_eos = eos;
+            if (r.status == erase_status::PENDING) {
+                do_leaf_erase(r.leaf, r.pos);
+                hdr_type eh = hdr_type::from_node(r.leaf);
+                if (eh.count == 0) {
+                    mem_.free_node(r.leaf);
+                    bitmask_type::set_eos_child(node, h, compact_type::sentinel());
+                    new_eos = compact_type::sentinel();
+                } else {
+                    bitmask_type::set_eos_child(node, h, r.leaf);
+                    new_eos = r.leaf;
+                }
+            } else {
+                new_eos = r.leaf;
+                if (r.leaf != eos)
+                    bitmask_type::set_eos_child(node, h, r.leaf);
+            }
+            node[NODE_TOTAL_TAIL] -= old_eos_tail - node_tail_total(new_eos)
+                                  + h.skip_bytes();
+            if (h.count == 0 && !bitmask_type::has_eos(node, h)) {
+                mem_.free_node(node);
+                return {0, erase_status::DONE, compact_type::sentinel(), 0};
+            }
+            if (node[NODE_TOTAL_TAIL] <= COMPACT_KEYSUFFIX_LIMIT) {
+                uint64_t* collapsed = collapse_to_compact(node);
+                if (collapsed != node)
+                    return {0, erase_status::DONE, collapsed, 0};
+            }
+            return {0, erase_status::DONE, node, 0};
+        }
+
+        // Child lookup
+        uint8_t byte = key[consumed++];
+        uint64_t* child = bitmask_type::dispatch(node, h, byte);
+        if (child == compact_type::sentinel()) return {0, erase_status::MISSING, nullptr, 0};
+
+        uint64_t old_child_tail = node_tail_total(child);
+        erase_info r = erase_when_node(child, key, key_len, consumed,
+                                       std::forward<F>(fn));
+
+        if (r.status == erase_status::MISSING)
+            return r;
+
+        if (r.status == erase_status::DONE) {
+            uint64_t* new_child = r.leaf;
+            if (new_child != child) {
+                if (new_child != compact_type::sentinel())
+                    bitmask_type::replace_child(node, h, byte, new_child);
+                else
+                    node = bitmask_type::remove_child(node, h, byte);
+            }
+            node[NODE_TOTAL_TAIL] -= old_child_tail - node_tail_total(new_child)
+                                  + h.skip_bytes();
+            h = hdr_type::from_node(node);
+            if (h.count == 0 && !bitmask_type::has_eos(node, h)) {
+                mem_.free_node(node);
+                return {0, erase_status::DONE, compact_type::sentinel(), 0};
+            }
+            if (node[NODE_TOTAL_TAIL] <= COMPACT_KEYSUFFIX_LIMIT) {
+                uint64_t* collapsed = collapse_to_compact(node);
+                if (collapsed != node)
+                    return {0, erase_status::DONE, collapsed, 0};
+            }
+            return {0, erase_status::DONE, node, 0};
+        }
+
+        // PENDING from child — same as erase_node
+        if (hdr_type::from_node(node).is_compact()) {
+            if (h.count == 1) {
+                return {0, erase_status::PENDING, r.leaf, r.pos};
+            }
+        }
+
+        uint64_t old_leaf_tail = node_tail_total(r.leaf);
+        do_leaf_erase(r.leaf, r.pos);
+        uint64_t new_leaf_tail = node_tail_total(r.leaf);
+
+        hdr_type ch = hdr_type::from_node(r.leaf);
+        if (ch.count == 0) {
+            mem_.free_node(r.leaf);
+            node = bitmask_type::remove_child(node, h, byte);
+        } else if (r.leaf != child) {
+            bitmask_type::replace_child(node, h, byte, r.leaf);
+        }
+        node[NODE_TOTAL_TAIL] -= old_leaf_tail - new_leaf_tail
+                              + h.skip_bytes();
+
+        h = hdr_type::from_node(node);
+        if (h.count == 0 && !bitmask_type::has_eos(node, h)) {
+            mem_.free_node(node);
+            return {0, erase_status::DONE, compact_type::sentinel(), 0};
+        }
         if (node[NODE_TOTAL_TAIL] <= COMPACT_KEYSUFFIX_LIMIT) {
             uint64_t* collapsed = collapse_to_compact(node);
             if (collapsed != node)
