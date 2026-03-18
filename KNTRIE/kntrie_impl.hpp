@@ -533,6 +533,8 @@ private:
 
     // ==================================================================
     // Modify — single-walk read-modify-write
+    // fn is void(VALUE&). modify_existing is hit-only.
+    // modify_or_insert handles miss by inserting fn(default_val).
     // ==================================================================
 public:
     template<typename F>
@@ -544,7 +546,53 @@ public:
             if (diff) [[unlikely]] return false;
         }
         return OPS::modify_node(root_ptr_v, ik, ik << root_skip_bits_v,
-                                root_skip_bytes(), std::forward<F>(fn), bld_v);
+                                root_skip_bytes(), std::forward<F>(fn));
+    }
+
+    template<typename F>
+    bool modify_or_insert(const KEY& key, F&& fn, const VALUE& default_val) {
+        uint64_t ik = key_to_u64(key);
+
+        // Convert default to normalized slot
+        NVST sv;
+        if constexpr (std::is_same_v<VALUE, NORM_V>) {
+            sv = bld_v.store_value(default_val);
+        } else {
+            static_assert(sizeof(VALUE) <= sizeof(NVST));
+            sv = NVST{};
+            std::memcpy(&sv, &default_val, sizeof(VALUE));
+        }
+
+        // First insert: root at skip=0
+        if (size_v == 0) [[unlikely]]
+            set_root(0);
+
+        if (root_skip_bits_v > 0) [[unlikely]] {
+            uint64_t diff = (ik ^ root_prefix_v) & root_prefix_mask();
+            if (diff) [[unlikely]] {
+                int clz = std::countl_zero(diff);
+                uint8_t div_pos = static_cast<uint8_t>(clz / CHAR_BIT);
+                reduce_root_skip(div_pos);
+            }
+        }
+
+        uint64_t old_root_ptr = root_ptr_v;
+        auto r = OPS::modify_or_insert_node(
+            root_ptr_v, ik, ik << root_skip_bits_v, root_skip_bytes(),
+            std::forward<F>(fn), sv, bld_v);
+        if (r.tagged_ptr != root_ptr_v) [[unlikely]] root_ptr_v = r.tagged_ptr;
+
+        if (r.inserted) [[unlikely]] {
+            ++size_v;
+            if (root_ptr_v != old_root_ptr) [[unlikely]] {
+                normalize_root();
+                if (size_v <= COMPACT_MAX && !(root_ptr_v & LEAF_BIT)) [[unlikely]]
+                    coalesce_bm_to_leaf();
+            }
+            return false;  // inserted, not updated
+        }
+        bld_v.destroy_value(sv);  // default_sv unused on hit
+        return true;  // updated existing
     }
 private:
 

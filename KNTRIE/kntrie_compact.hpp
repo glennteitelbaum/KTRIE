@@ -362,14 +362,17 @@ struct compact_ops {
     // ==================================================================
     // Modify existing value in-place with dup propagation
     //
-    // Single-walk read-modify-write: finds the key, applies fn(old_val)
-    // to get new_val, writes it to the primary slot and all dup copies.
-    // Returns true if key was found and modified, false if not found.
+    // fn is void(VALUE&) — modifies the value through a reference.
+    // For inline types: saves old value, applies fn, propagates to dup
+    //   copies only if the value actually changed.
+    // For heap types: all dups share the same pointer, fn modifies
+    //   through it directly. No propagation needed.
+    // Returns true if key was found, false if not found.
     // ==================================================================
 
     template<typename F>
     static bool modify_existing(uint64_t* node, node_header_t* h,
-                                K suffix, F&& fn, BLD& bld) {
+                                K suffix, F&& fn) {
         unsigned ts = h->total_slots();
         constexpr size_t hs = LEAF_HEADER_U64;
         K* kd = keys(node, hs);
@@ -378,21 +381,34 @@ struct compact_ops {
         if (*base != suffix) return false;
 
         int idx = static_cast<int>(base - kd);
-        const K* fb = adaptive_search<K>::find_base_first(kd, ts, suffix);
-        int first = static_cast<int>(fb - kd) + (*fb != suffix);
 
         if constexpr (VT::IS_BOOL) {
             auto bv = bool_vals_mut(node, ts, hs);
-            VST new_val = fn(bv.get(idx));
-            for (int i = first; i <= idx; ++i)
-                bv.set(i, new_val);
-        } else {
+            bool old_val = bv.get(idx);
+            bool tmp = old_val;
+            fn(tmp);
+            if (tmp != old_val) {
+                const K* fb = adaptive_search<K>::find_base_first(kd, ts, suffix);
+                int first = static_cast<int>(fb - kd) + (*fb != suffix);
+                for (int i = first; i <= idx; ++i)
+                    bv.set(i, tmp);
+            }
+        } else if constexpr (VT::HAS_DESTRUCTOR) {
+            // Heap type: all dups share the same pointer. Modify in place.
             VST* vd = vals_mut(node, ts, hs);
-            VST new_val = fn(vd[idx]);
-            bld.destroy_value(vd[idx]);
-            VT::init_slot(&vd[idx], new_val);
-            for (int i = first; i < idx; ++i)
-                VT::write_slot(&vd[i], new_val);
+            VALUE* ptr = reinterpret_cast<VALUE*>(vd[idx]);
+            fn(*ptr);
+        } else {
+            // Inline trivial: apply fn, propagate to dups only if changed.
+            VST* vd = vals_mut(node, ts, hs);
+            VST old_val = vd[idx];
+            fn(vd[idx]);
+            if (vd[idx] != old_val) {
+                const K* fb = adaptive_search<K>::find_base_first(kd, ts, suffix);
+                int first = static_cast<int>(fb - kd) + (*fb != suffix);
+                for (int i = first; i < idx; ++i)
+                    VT::write_slot(&vd[i], vd[idx]);
+            }
         }
         return true;
     }

@@ -706,24 +706,26 @@ struct bitmask_ops {
     // ==================================================================
 
     template<typename F>
-    static bool bitmap_modify(uint64_t* node, uint8_t suffix,
-                              F&& fn, BLD& bld) {
+    static bool bitmap_modify(uint64_t* node, uint8_t suffix, F&& fn) {
         auto* h = get_header(node);
         constexpr size_t hs = LEAF_HEADER_U64;
         bitmap_256_t& bm = bm_mut(node, hs);
         if (!bm.has_bit(suffix)) return false;
 
         if constexpr (VT::IS_BOOL) {
-            bool old_val = val_bm(node, hs).has_bit(suffix);
-            bool new_val = fn(old_val);
-            if (new_val) val_bm_mut(node, hs).set_bit(suffix);
-            else         val_bm_mut(node, hs).clear_bit(suffix);
+            bool tmp = val_bm(node, hs).has_bit(suffix);
+            fn(tmp);
+            if (tmp) val_bm_mut(node, hs).set_bit(suffix);
+            else     val_bm_mut(node, hs).clear_bit(suffix);
+        } else if constexpr (VT::HAS_DESTRUCTOR) {
+            int slot = bm.find_slot<slot_mode::UNFILTERED>(suffix);
+            VST* vd = bl_vals_mut(node, hs);
+            VALUE* ptr = reinterpret_cast<VALUE*>(vd[slot]);
+            fn(*ptr);
         } else {
             int slot = bm.find_slot<slot_mode::UNFILTERED>(suffix);
             VST* vd = bl_vals_mut(node, hs);
-            VST new_val = fn(vd[slot]);
-            bld.destroy_value(vd[slot]);
-            VT::write_slot(&vd[slot], new_val);
+            fn(vd[slot]);
         }
         return true;
     }

@@ -188,21 +188,23 @@ public:
     }
 
     // Single-walk read-modify-write with dup propagation.
-    // fn is VALUE(VALUE) — takes old value, returns new value.
+    // fn is void(VALUE&) — modifies the value in place.
     // Returns true if key existed and was modified.
     template<typename F>
     bool modify(const KEY& key, F&& fn) {
-        return impl_.modify_existing(to_unsigned(key), std::forward<F>(fn));
+        return impl_.modify_existing(to_unsigned(key), [&fn](auto& slot) {
+            fn(reinterpret_cast<VALUE&>(slot));
+        });
     }
 
-    // With default: if key is missing, inserts fn(default_val).
-    // Returns true if key existed (update), false if inserted.
+    // With default: if key exists, apply fn(value&), return true.
+    // If missing, insert default_val as-is, return false.
+    // Single walk — fn is never called on the default.
     template<typename F>
     bool modify(const KEY& key, F&& fn, const VALUE& default_val) {
-        if (impl_.modify_existing(to_unsigned(key), std::forward<F>(fn)))
-            return true;
-        impl_.insert(to_unsigned(key), fn(default_val));
-        return false;
+        return impl_.modify_or_insert(to_unsigned(key), [&fn](auto& slot) {
+            fn(reinterpret_cast<VALUE&>(slot));
+        }, default_val);
     }
 
     template<typename... Args>
