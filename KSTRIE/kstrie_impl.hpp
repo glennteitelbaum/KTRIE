@@ -37,10 +37,6 @@ private:
     size_type size_{};
     mem_type  mem_{};
 
-public:
-    [[nodiscard]] uint64_t* get_sentinel() const noexcept { return compact_type::sentinel(); }
-private:
-
     void init_empty_root() {
         root_ = compact_type::sentinel();
     }
@@ -150,27 +146,6 @@ private:
             std::forward<F>(fn));
     }
 
-    // ------------------------------------------------------------------
-    // modify_dispatch -- wrapper: mapping + heap ownership
-    // ------------------------------------------------------------------
-
-    template<typename F>
-    bool modify_dispatch(std::string_view key, F&& fn) {
-        if (root_ == compact_type::sentinel()) return false;
-        const uint8_t* raw = reinterpret_cast<const uint8_t*>(key.data());
-        uint32_t len = static_cast<uint32_t>(key.size());
-        if constexpr (CHARMAP::IS_IDENTITY) {
-            return modify_inner(raw, len, std::forward<F>(fn));
-        } else {
-            uint8_t stack_buf[256];
-            auto [mapped, heap_buf] = get_mapped<CHARMAP>(raw, len,
-                                                  stack_buf, sizeof(stack_buf));
-            bool result = modify_inner(mapped, len, std::forward<F>(fn));
-            delete[] heap_buf;
-            return result;
-        }
-    }
-
 public:
     // ------------------------------------------------------------------
     // Construction / destruction
@@ -265,6 +240,7 @@ public:
     // ------------------------------------------------------------------
 
     [[nodiscard]] const uint64_t* get_root() const noexcept { return root_; }
+    [[nodiscard]] uint64_t* get_sentinel() const noexcept { return compact_type::sentinel(); }
 
     // ------------------------------------------------------------------
     // Lookup
@@ -298,6 +274,24 @@ public:
 
     bool assign(std::string_view key, const VALUE& value) {
         return modify_impl(key, value, insert_mode::ASSIGN);
+    }
+
+    // Single-walk modify: find key, apply fn(VALUE&) in place.
+    template<typename F>
+    bool modify_dispatch(std::string_view key, F&& fn) {
+        if (root_ == compact_type::sentinel()) return false;
+        const uint8_t* raw = reinterpret_cast<const uint8_t*>(key.data());
+        uint32_t len = static_cast<uint32_t>(key.size());
+        if constexpr (CHARMAP::IS_IDENTITY) {
+            return modify_inner(raw, len, std::forward<F>(fn));
+        } else {
+            uint8_t stack_buf[256];
+            auto [mapped, heap_buf] = get_mapped<CHARMAP>(raw, len,
+                                                  stack_buf, sizeof(stack_buf));
+            bool result = modify_inner(mapped, len, std::forward<F>(fn));
+            delete[] heap_buf;
+            return result;
+        }
     }
 
     size_type erase(std::string_view key) {
