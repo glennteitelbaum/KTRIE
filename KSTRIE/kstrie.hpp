@@ -8,6 +8,16 @@
 
 namespace gteitelbaum {
 
+// Public trait types for kstrie template parameters
+namespace kstrie_traits {
+    using identity_char_map      = kstrie_detail::identity_char_map;
+    using upper_char_map         = kstrie_detail::upper_char_map;
+    using reverse_lower_char_map = kstrie_detail::reverse_lower_char_map;
+
+    template <std::array<uint8_t, 256> M>
+    using char_map = kstrie_detail::char_map<M>;
+} // namespace kstrie_traits
+
 // ============================================================================
 // kstrie -- user-facing trie class
 //
@@ -24,10 +34,10 @@ namespace gteitelbaum {
 // ============================================================================
 
 template <typename VALUE,
-          typename CHARMAP = identity_char_map,
+          typename CHARMAP = kstrie_traits::identity_char_map,
           typename ALLOC   = std::allocator<uint64_t>>
 class kstrie {
-    using impl_t       = kstrie_impl<VALUE, CHARMAP, ALLOC>;
+    using impl_t       = kstrie_detail::kstrie_impl<VALUE, CHARMAP, ALLOC>;
     using hdr_type     = typename impl_t::hdr_type;
     using slots_type   = typename impl_t::slots_type;
     using bitmask_type = typename impl_t::bitmask_type;
@@ -354,7 +364,7 @@ private:
             if (h.count == 0) [[unlikely]] return nullptr;
             const uint8_t*  L = compact_type::lengths(node, h);
             const uint8_t*  F = compact_type::firsts(node, h);
-            const ks_offset_type* O = compact_type::offsets(node, h);
+            const kstrie_detail::ks_offset_type* O = compact_type::offsets(node, h);
             const uint8_t*  B = compact_type::keysuffix(node, h);
             uint8_t klen = L[0];
             if (klen > 0) [[likely]] {
@@ -391,7 +401,7 @@ private:
             if (h.count == 0) [[unlikely]] return nullptr;
             const uint8_t*  L = compact_type::lengths(node, h);
             const uint8_t*  F = compact_type::firsts(node, h);
-            const ks_offset_type* O = compact_type::offsets(node, h);
+            const kstrie_detail::ks_offset_type* O = compact_type::offsets(node, h);
             const uint8_t*  B = compact_type::keysuffix(node, h);
             int last = h.count - 1;
             uint8_t klen = L[last];
@@ -433,7 +443,7 @@ private:
         uint32_t len = static_cast<uint32_t>(current.size());
 
         uint8_t stack_buf[256];
-        auto [mapped, heap_buf] = get_mapped<CHARMAP>(raw, len,
+        auto [mapped, heap_buf] = kstrie_detail::get_mapped<CHARMAP>(raw, len,
                                               stack_buf, sizeof(stack_buf));
 
         std::string result;
@@ -463,7 +473,7 @@ private:
             if (next >= h.count) [[unlikely]] return nullptr;
             const uint8_t*  L = compact_type::lengths(node, h);
             const uint8_t*  F = compact_type::firsts(node, h);
-            const ks_offset_type* O = compact_type::offsets(node, h);
+            const kstrie_detail::ks_offset_type* O = compact_type::offsets(node, h);
             const uint8_t*  B = compact_type::keysuffix(node, h);
             uint8_t klen = L[next];
             if (klen > 0) [[likely]] {
@@ -518,7 +528,7 @@ private:
         uint32_t len = static_cast<uint32_t>(current.size());
 
         uint8_t stack_buf[256];
-        auto [mapped, heap_buf] = get_mapped<CHARMAP>(raw, len,
+        auto [mapped, heap_buf] = kstrie_detail::get_mapped<CHARMAP>(raw, len,
                                               stack_buf, sizeof(stack_buf));
 
         std::string result;
@@ -548,7 +558,7 @@ private:
             if (prev < 0) [[unlikely]] return nullptr;
             const uint8_t*  L = compact_type::lengths(node, h);
             const uint8_t*  F = compact_type::firsts(node, h);
-            const ks_offset_type* O = compact_type::offsets(node, h);
+            const kstrie_detail::ks_offset_type* O = compact_type::offsets(node, h);
             const uint8_t*  B = compact_type::keysuffix(node, h);
             uint8_t klen = L[prev];
             if (klen > 0) [[likely]] {
@@ -601,7 +611,7 @@ private:
         uint32_t len = static_cast<uint32_t>(key.size());
 
         uint8_t stack_buf[256];
-        auto [mapped, heap_buf] = get_mapped<CHARMAP>(raw, len,
+        auto [mapped, heap_buf] = kstrie_detail::get_mapped<CHARMAP>(raw, len,
                                               stack_buf, sizeof(stack_buf));
 
         std::string result;
@@ -651,7 +661,7 @@ private:
             if (pos >= h.count) [[unlikely]] return nullptr;
             const uint8_t*  L = compact_type::lengths(node, h);
             const uint8_t*  F = compact_type::firsts(node, h);
-            const ks_offset_type* O = compact_type::offsets(node, h);
+            const kstrie_detail::ks_offset_type* O = compact_type::offsets(node, h);
             const uint8_t*  B = compact_type::keysuffix(node, h);
             uint8_t klen = L[pos];
             if (klen > 0) [[likely]] {
@@ -693,7 +703,7 @@ private:
             if (h.count == 0) [[unlikely]] return nullptr;
             const uint8_t*  L = compact_type::lengths(node, h);
             const uint8_t*  F = compact_type::firsts(node, h);
-            const ks_offset_type* O = compact_type::offsets(node, h);
+            const kstrie_detail::ks_offset_type* O = compact_type::offsets(node, h);
             const uint8_t*  B = compact_type::keysuffix(node, h);
             uint8_t klen = L[0];
             if (klen > 0) [[likely]] {
@@ -746,7 +756,7 @@ private:
         uint32_t len = static_cast<uint32_t>(pfx.size());
 
         uint8_t stack_buf[256];
-        auto [mapped, heap_buf] = get_mapped<CHARMAP>(raw, len,
+        auto [mapped, heap_buf] = kstrie_detail::get_mapped<CHARMAP>(raw, len,
                                               stack_buf, sizeof(stack_buf));
 
         struct right_turn {
@@ -874,7 +884,7 @@ private:
             std::string& out) const {
         const uint8_t*  L  = compact_type::lengths(node, h);
         const uint8_t*  F  = compact_type::firsts(node, h);
-        const ks_offset_type* O = compact_type::offsets(node, h);
+        const kstrie_detail::ks_offset_type* O = compact_type::offsets(node, h);
         const uint8_t*  B  = compact_type::keysuffix(node, h);
         for (int i = 0; i < h.count; ++i) {
             uint8_t klen = L[i];
@@ -906,7 +916,7 @@ private:
             std::string& out) const {
         const uint8_t*  L  = compact_type::lengths(node, h);
         const uint8_t*  F  = compact_type::firsts(node, h);
-        const ks_offset_type* O = compact_type::offsets(node, h);
+        const kstrie_detail::ks_offset_type* O = compact_type::offsets(node, h);
         const uint8_t*  B  = compact_type::keysuffix(node, h);
         bool in_prefix = false;
         for (int i = 0; i < h.count; ++i) {
@@ -938,7 +948,7 @@ private:
             if (h.count == 0) [[unlikely]] return nullptr;
             const uint8_t*  L = compact_type::lengths(node, h);
             const uint8_t*  F = compact_type::firsts(node, h);
-            const ks_offset_type* O = compact_type::offsets(node, h);
+            const kstrie_detail::ks_offset_type* O = compact_type::offsets(node, h);
             const uint8_t*  B = compact_type::keysuffix(node, h);
             uint8_t klen = L[0];
             if (klen > 0) [[likely]] {

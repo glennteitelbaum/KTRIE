@@ -12,7 +12,7 @@
 #include <type_traits>
 #include <utility>
 
-namespace gteitelbaum {
+namespace gteitelbaum::kstrie_detail {
 
 // ============================================================================
 // Arithmetic helpers
@@ -781,6 +781,6 @@ get_mapped(const uint8_t* raw, uint32_t len,
     }
 }
 
-} // namespace gteitelbaum
+} // namespace gteitelbaum::kstrie_detail
 
 #endif // KSTRIE_SUPPORT_HPP
