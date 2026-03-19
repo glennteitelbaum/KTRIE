@@ -18,16 +18,17 @@ public class KNTrie<V> extends AbstractMap<Long, V>
     static abstract sealed class Node permits BitmaskNode, CompactNode {
         BitmaskNode parent;
         int parentByte = PARENT_ROOT;
-        int depth;
-        byte[] skip;
-        int skipLen() { return skip == null ? 0 : skip.length; }
-        int effectiveDepth() { return depth + skipLen(); }
+        int depth;      // key bytes consumed BEFORE this node
     }
 
     static final class BitmaskNode extends Node {
+        byte[] skip;    // prefix bytes shared by all entries in subtree (null if none)
         long b0, b1, b2, b3;
         Node[] children;
         int descendantCount;
+
+        int skipLen() { return skip == null ? 0 : skip.length; }
+        int effectiveDepth() { return depth + skipLen(); }
 
         long word(int w) {
             return switch (w) { case 0 -> b0; case 1 -> b1; case 2 -> b2; default -> b3; };
@@ -194,18 +195,17 @@ public class KNTrie<V> extends AbstractMap<Long, V>
         return s;
     }
 
-    static boolean matchSkip(Node node, long ikey) {
-        if (node.skip == null) return true;
-        for (int i = 0; i < node.skip.length; i++)
-            if (byteAt(ikey, node.depth + i) != (node.skip[i] & 0xFF)) return false;
+    static boolean matchSkip(BitmaskNode bm, long ikey) {
+        if (bm.skip == null) return true;
+        for (int i = 0; i < bm.skip.length; i++)
+            if (byteAt(ikey, bm.depth + i) != (bm.skip[i] & 0xFF)) return false;
         return true;
     }
 
-    // Returns mismatch index, or -1 if fully matched
-    static int skipMismatch(Node node, long ikey) {
-        if (node.skip == null) return -1;
-        for (int i = 0; i < node.skip.length; i++)
-            if (byteAt(ikey, node.depth + i) != (node.skip[i] & 0xFF)) return i;
+    static int skipMismatch(BitmaskNode bm, long ikey) {
+        if (bm.skip == null) return -1;
+        for (int i = 0; i < bm.skip.length; i++)
+            if (byteAt(ikey, bm.depth + i) != (bm.skip[i] & 0xFF)) return i;
         return -1;
     }
 
@@ -213,14 +213,14 @@ public class KNTrie<V> extends AbstractMap<Long, V>
     @SuppressWarnings("unchecked")
     private V findImpl(long ikey) {
         Node node = root;
-        while (node != CompactNode.SENTINEL) {
-            if (!matchSkip(node, ikey)) return null;
-            if (node instanceof CompactNode c) {
-                int pos = c.bsearch(ikey);
-                return pos >= 0 ? (V) c.values[pos] : null;
-            }
-            BitmaskNode bm = (BitmaskNode) node;
+        while (node instanceof BitmaskNode bm) {
+            if (!matchSkip(bm, ikey)) return null;
             node = bm.dispatch(byteAt(ikey, bm.effectiveDepth()));
+        }
+        if (node != CompactNode.SENTINEL) {
+            CompactNode c = (CompactNode) node;
+            int pos = c.bsearch(ikey);
+            return pos >= 0 ? (V) c.values[pos] : null;
         }
         return null;
     }
@@ -231,47 +231,26 @@ public class KNTrie<V> extends AbstractMap<Long, V>
         if (root == CompactNode.SENTINEL) {
             CompactNode c = new CompactNode(MIN_CAPACITY);
             c.depth = 0;
-            c.skip = extractSkip(ikey, 0, KEY_BYTES);
             c.keys[0] = ikey; c.values[0] = value; c.count = 1;
             c.fillDups();
             root = c;
             size++; modCount++;
             return null;
         }
+
+        // Descend through bitmask nodes
         Node node = root;
-        for (;;) {
-            int mm = skipMismatch(node, ikey);
+        while (node instanceof BitmaskNode bm) {
+            int mm = skipMismatch(bm, ikey);
             if (mm >= 0) {
-                splitSkip(node, ikey, value, mm);
+                splitSkip(bm, ikey, value, mm);
                 size++; modCount++;
                 return null;
             }
-            if (node instanceof CompactNode c) {
-                int pos = c.bsearch(ikey);
-                if (pos >= 0) {
-                    if (onlyIfAbsent) return (V) c.values[pos];
-                    V old = (V) c.values[pos];
-                    updateDups(c, pos, value);
-                    modCount++;
-                    return old;
-                }
-                int ins = -(pos + 1);
-                if (c.count >= c.keys.length) c.grow();
-                System.arraycopy(c.keys, ins, c.keys, ins + 1, c.count - ins);
-                System.arraycopy(c.values, ins, c.values, ins + 1, c.count - ins);
-                c.keys[ins] = ikey; c.values[ins] = value; c.count++;
-                c.fillDups();
-                for (BitmaskNode p = c.parent; p != null; p = p.parent) p.descendantCount++;
-                if (c.count > COMPACT_MAX) split(c);
-                size++; modCount++;
-                return null;
-            }
-            BitmaskNode bm = (BitmaskNode) node;
             int b = byteAt(ikey, bm.effectiveDepth());
             if (!bm.hasBit(b)) {
                 CompactNode child = new CompactNode(MIN_CAPACITY);
                 child.depth = bm.effectiveDepth() + 1;
-                child.skip = extractSkip(ikey, child.depth, KEY_BYTES - child.depth);
                 child.keys[0] = ikey; child.values[0] = value; child.count = 1;
                 child.fillDups();
                 bm.insertChild(b, child);
@@ -282,6 +261,27 @@ public class KNTrie<V> extends AbstractMap<Long, V>
             }
             node = bm.children[bm.slotOf(b)];
         }
+
+        // Landed at a compact leaf
+        CompactNode c = (CompactNode) node;
+        int pos = c.bsearch(ikey);
+        if (pos >= 0) {
+            if (onlyIfAbsent) return (V) c.values[pos];
+            V old = (V) c.values[pos];
+            updateDups(c, pos, value);
+            modCount++;
+            return old;
+        }
+        int ins = -(pos + 1);
+        if (c.count >= c.keys.length) c.grow();
+        System.arraycopy(c.keys, ins, c.keys, ins + 1, c.count - ins);
+        System.arraycopy(c.values, ins, c.values, ins + 1, c.count - ins);
+        c.keys[ins] = ikey; c.values[ins] = value; c.count++;
+        c.fillDups();
+        for (BitmaskNode p = c.parent; p != null; p = p.parent) p.descendantCount++;
+        if (c.count > COMPACT_MAX) split(c);
+        size++; modCount++;
+        return null;
     }
 
     private void updateDups(CompactNode c, int pos, Object value) {
@@ -295,28 +295,26 @@ public class KNTrie<V> extends AbstractMap<Long, V>
     @SuppressWarnings("unchecked")
     private V removeImpl(long ikey) {
         Node node = root;
-        while (node != CompactNode.SENTINEL) {
-            if (!matchSkip(node, ikey)) return null;
-            if (node instanceof CompactNode c) {
-                int pos = c.bsearch(ikey);
-                if (pos < 0) return null;
-                V old = (V) c.values[pos];
-                System.arraycopy(c.keys, pos + 1, c.keys, pos, c.count - pos - 1);
-                System.arraycopy(c.values, pos + 1, c.values, pos, c.count - pos - 1);
-                c.count--;
-                c.values[c.count] = null;
-                c.maybeShrink();
-                if (c.count > 0) c.fillDups();
-                for (BitmaskNode p = c.parent; p != null; p = p.parent) p.descendantCount--;
-                if (c.count == 0) removeEmptyLeaf(c);
-                else checkCoalesce(c.parent);
-                size--; modCount++;
-                return old;
-            }
-            BitmaskNode bm = (BitmaskNode) node;
+        while (node instanceof BitmaskNode bm) {
+            if (!matchSkip(bm, ikey)) return null;
             node = bm.dispatch(byteAt(ikey, bm.effectiveDepth()));
         }
-        return null;
+        if (node == CompactNode.SENTINEL) return null;
+        CompactNode c = (CompactNode) node;
+        int pos = c.bsearch(ikey);
+        if (pos < 0) return null;
+        V old = (V) c.values[pos];
+        System.arraycopy(c.keys, pos + 1, c.keys, pos, c.count - pos - 1);
+        System.arraycopy(c.values, pos + 1, c.values, pos, c.count - pos - 1);
+        c.count--;
+        c.values[c.count] = null;
+        c.maybeShrink();
+        if (c.count > 0) c.fillDups();
+        for (BitmaskNode p = c.parent; p != null; p = p.parent) p.descendantCount--;
+        if (c.count == 0) removeEmptyLeaf(c);
+        else checkCoalesce(c.parent);
+        size--; modCount++;
+        return old;
     }
 
     private void removeEmptyLeaf(CompactNode c) {
@@ -337,22 +335,32 @@ public class KNTrie<V> extends AbstractMap<Long, V>
 
     // === split: compact → bitmask ===
     private void split(CompactNode leaf) {
-        int d = leaf.effectiveDepth();
+        int d = leaf.depth;
         if (d >= KEY_BYTES) return;
 
-        // Group by byte at depth d
+        // Find common prefix among all entries starting at depth d
+        int common = KEY_BYTES - d;
+        for (int j = 1; j < leaf.count && common > 0; j++)
+            for (int k = 0; k < common; k++)
+                if (byteAt(leaf.keys[0], d + k) != byteAt(leaf.keys[j], d + k))
+                    { common = k; break; }
+
+        int dispatchDepth = d + common; // byte to branch on
+        if (dispatchDepth >= KEY_BYTES) return; // all keys identical prefix
+
+        // Group by byte at dispatchDepth
         int[] groupStart = new int[256];
         int[] groupCount = new int[256];
         Arrays.fill(groupStart, -1);
         for (int i = 0; i < leaf.count; i++) {
-            int b = byteAt(leaf.keys[i], d);
+            int b = byteAt(leaf.keys[i], dispatchDepth);
             if (groupStart[b] < 0) groupStart[b] = i;
             groupCount[b]++;
         }
 
         BitmaskNode bm = new BitmaskNode();
-        bm.depth = leaf.depth;
-        bm.skip = leaf.skip;
+        bm.depth = d;
+        bm.skip = common > 0 ? extractSkip(leaf.keys[0], d, common) : null;
         bm.descendantCount = leaf.count;
 
         int cc = 0;
@@ -367,104 +375,76 @@ public class KNTrie<V> extends AbstractMap<Long, V>
             bm.setBit(b);
             int gc = groupCount[b];
             CompactNode child = new CompactNode(gc);
-            child.depth = d + 1;
+            child.depth = dispatchDepth + 1;
             child.parent = bm;
             child.parentByte = b;
             int gs = groupStart[b];
             System.arraycopy(leaf.keys, gs, child.keys, 0, gc);
             System.arraycopy(leaf.values, gs, child.values, 0, gc);
             child.count = gc;
-            computeChildSkip(child);
             child.fillDups();
             bm.children[slot++] = child;
         }
         replaceNode(leaf, bm);
-        // Recurse for oversize children
         for (int i = 1; i < bm.children.length - 1; i++)
             if (bm.children[i] instanceof CompactNode c && c.count > COMPACT_MAX) split(c);
     }
 
-    private void computeChildSkip(CompactNode c) {
-        if (c.count <= 1) {
-            int maxSkip = KEY_BYTES - c.depth;
-            if (maxSkip > 0 && c.count == 1) c.skip = extractSkip(c.keys[0], c.depth, maxSkip);
-            return;
-        }
-        int maxSkip = KEY_BYTES - c.depth;
-        int common = maxSkip;
-        for (int j = 1; j < c.count && common > 0; j++)
-            for (int k = 0; k < common; k++)
-                if (byteAt(c.keys[0], c.depth + k) != byteAt(c.keys[j], c.depth + k)) { common = k; break; }
-        if (common > 0) c.skip = extractSkip(c.keys[0], c.depth, common);
-    }
-
-    // === splitSkip: key diverges within a node's skip prefix ===
-    private void splitSkip(Node node, long ikey, V value, int mm) {
-        // Save original parent linkage before we modify anything
-        BitmaskNode oldParent = node.parent;
-        int oldParentByte = node.parentByte;
-
-        int splitDepth = node.depth + mm;
+    // === splitSkip: key diverges within a bitmask node's skip prefix ===
+    private void splitSkip(BitmaskNode bmNode, long ikey, V value, int mm) {
+        BitmaskNode oldParent = bmNode.parent;
+        int oldParentByte = bmNode.parentByte;
+        int splitDepth = bmNode.depth + mm;
 
         // New bitmask at the mismatch point
         BitmaskNode bm = new BitmaskNode();
-        bm.depth = node.depth;
-        bm.skip = mm > 0 ? extractSkip(ikey, node.depth, mm) : null;
-        bm.descendantCount = countEntries(node) + 1;
+        bm.depth = bmNode.depth;
+        bm.skip = mm > 0 ? extractSkip(ikey, bmNode.depth, mm) : null;
+        bm.descendantCount = bmNode.descendantCount + 1;
 
-        // The two bytes that diverge
-        int existByte = node.skip[mm] & 0xFF;
+        int existByte = bmNode.skip[mm] & 0xFF;
         int newByte = byteAt(ikey, splitDepth);
 
-        // Trim existing node's skip: remove [0..mm] (prefix + mismatch byte)
-        int remaining = node.skip.length - mm - 1;
-        node.skip = remaining > 0
-            ? Arrays.copyOfRange(node.skip, mm + 1, node.skip.length) : null;
-        node.depth = splitDepth + 1;
+        // Trim existing bitmask's skip
+        int remaining = bmNode.skip.length - mm - 1;
+        bmNode.skip = remaining > 0
+            ? Arrays.copyOfRange(bmNode.skip, mm + 1, bmNode.skip.length) : null;
+        bmNode.depth = splitDepth + 1;
 
         // New leaf for the new key
         CompactNode nl = new CompactNode(MIN_CAPACITY);
         nl.depth = splitDepth + 1;
-        int nlSkipLen = KEY_BYTES - nl.depth;
-        nl.skip = nlSkipLen > 0 ? extractSkip(ikey, nl.depth, nlSkipLen) : null;
         nl.keys[0] = ikey;
         nl.values[0] = value;
         nl.count = 1;
         nl.fillDups();
 
-        // Build bitmask children: [sentinel, child_lo, child_hi, eos=sentinel]
-        bm.children = new Node[4]; // sentinel + 2 children + eos
+        // Build children: [sentinel, child_lo, child_hi, eos=sentinel]
+        bm.children = new Node[4];
         bm.children[0] = CompactNode.SENTINEL;
-        bm.children[3] = CompactNode.SENTINEL; // eos
+        bm.children[3] = CompactNode.SENTINEL;
         bm.setBit(existByte);
         bm.setBit(newByte);
 
-        // Insert in bitmap order
         if (existByte < newByte) {
-            bm.children[1] = node;
+            bm.children[1] = bmNode;
             bm.children[2] = nl;
         } else {
             bm.children[1] = nl;
-            bm.children[2] = node;
+            bm.children[2] = bmNode;
         }
 
-        // Set parent pointers for children → bm
-        node.parent = bm;
-        node.parentByte = existByte;
-        nl.parent = bm;
-        nl.parentByte = newByte;
+        bmNode.parent = bm; bmNode.parentByte = existByte;
+        nl.parent = bm; nl.parentByte = newByte;
 
-        // Link bm into the tree at node's old position
+        // Link into tree at old position
         bm.parent = oldParent;
         bm.parentByte = oldParentByte;
         if (oldParent == null) {
             root = bm;
         } else {
-            if (oldParentByte == PARENT_EOS) {
-                oldParent.setEosChild(bm);
-            } else {
-                oldParent.replaceChild(oldParentByte, bm);
-            }
+            if (oldParentByte == PARENT_EOS) oldParent.setEosChild(bm);
+            else oldParent.replaceChild(oldParentByte, bm);
         }
     }
 
@@ -476,8 +456,7 @@ public class KNTrie<V> extends AbstractMap<Long, V>
         int total = ak.size();
         if (total == 0) { replaceNode(bm, CompactNode.SENTINEL); return; }
         CompactNode c = new CompactNode(total);
-        c.depth = bm.depth;
-        c.skip = bm.skip;
+        c.depth = bm.depth;  // no skip on compact
         for (int i = 0; i < total; i++) { c.keys[i] = ak.get(i)[0]; c.values[i] = av.get(i)[0]; }
         c.count = total;
         c.fillDups();
@@ -506,17 +485,25 @@ public class KNTrie<V> extends AbstractMap<Long, V>
         else if (!bm.hasEos() && bm.childCount() == 1) { int bit = bm.findNextSet(0); child = bm.children[bm.slotOf(bit)]; db = bit; }
         else return;
 
-        int bmSk = bm.skipLen(), chSk = child.skipLen(), dispB = db >= 0 ? 1 : 0;
-        int newLen = bmSk + dispB + chSk;
-        byte[] ns = null;
-        if (newLen > 0) {
-            ns = new byte[newLen]; int off = 0;
-            if (bm.skip != null) { System.arraycopy(bm.skip, 0, ns, 0, bmSk); off = bmSk; }
-            if (db >= 0) ns[off++] = (byte) db;
-            if (child.skip != null) System.arraycopy(child.skip, 0, ns, off, chSk);
+        if (child instanceof CompactNode) {
+            // Compact has no skip — just inherit position
+            child.depth = bm.depth;
+        } else {
+            // Bitmask child: merge bm.skip + dispatch byte + child.skip
+            BitmaskNode bmChild = (BitmaskNode) child;
+            int bmSk = bm.skipLen(), chSk = bmChild.skipLen();
+            int dispB = db >= 0 ? 1 : 0;
+            int newLen = bmSk + dispB + chSk;
+            byte[] ns = null;
+            if (newLen > 0) {
+                ns = new byte[newLen]; int off = 0;
+                if (bm.skip != null) { System.arraycopy(bm.skip, 0, ns, 0, bmSk); off = bmSk; }
+                if (db >= 0) ns[off++] = (byte) db;
+                if (bmChild.skip != null) System.arraycopy(bmChild.skip, 0, ns, off, chSk);
+            }
+            bmChild.depth = bm.depth;
+            bmChild.skip = ns;
         }
-        child.depth = bm.depth;
-        child.skip = ns;
         replaceNode(bm, child);
     }
 
@@ -696,34 +683,26 @@ public class KNTrie<V> extends AbstractMap<Long, V>
 
     // === Main — smoke test ===
     public static void main(String[] args) {
-        System.out.println("Starting smoke test..."); System.out.flush();
+         
         KNTrie<String> t = new KNTrie<>();
 
         // Basic CRUD
-        System.out.println("  put 10..."); System.out.flush();
         t.put(10L, "ten");
-        System.out.println("  put 20..."); System.out.flush();
         t.put(20L, "twenty");
-        System.out.println("  put 5..."); System.out.flush();
         t.put(5L, "five");
-        System.out.println("  put -1..."); System.out.flush();
         t.put(-1L, "minus_one");
-        System.out.println("  size=" + t.size()); System.out.flush();
         assert t.size() == 4 : "size=" + t.size();
         assert "ten".equals(t.get(10L)) : "get(10)=" + t.get(10L);
         assert t.containsKey(5L);
         assert !t.containsKey(99L);
-        System.out.println("  CRUD ok"); System.out.flush();
 
         // Overwrite
         assert "ten".equals(t.put(10L, "TEN"));
         assert "TEN".equals(t.get(10L));
-        System.out.println("  Overwrite ok"); System.out.flush();
 
         // Remove
         assert "five".equals(t.remove(5L));
         assert t.size() == 3;
-        System.out.println("  Remove ok"); System.out.flush();
 
         // Ordered iteration
         TreeMap<Long, String> ref = new TreeMap<>();
@@ -733,30 +712,25 @@ public class KNTrie<V> extends AbstractMap<Long, V>
         int checked = 0;
         while (ti.hasNext() && ri.hasNext()) {
             var e = ti.next(); var r = ri.next();
-            System.out.println("    iter: " + e.getKey() + "=" + e.getValue() + " vs " + r.getKey() + "=" + r.getValue()); System.out.flush();
             assert e.getKey().equals(r.getKey()) : e.getKey() + " != " + r.getKey();
             assert e.getValue().equals(r.getValue()) : e.getValue() + " != " + r.getValue();
             checked++;
         }
         assert !ti.hasNext() && !ri.hasNext() && checked == 3;
-        System.out.println("Basic: PASS (" + checked + " entries verified)"); System.out.flush();
+        System.out.println("Basic: PASS (" + checked + " entries verified)"); 
 
         // NavigableMap
-        System.out.println("  firstKey=" + t.firstKey() + " lastKey=" + t.lastKey()); System.out.flush();
         assert t.firstKey() == -1L;
         assert t.lastKey() == 20L;
-        System.out.println("NavigableMap basics: PASS"); System.out.flush();
+        System.out.println("NavigableMap basics: PASS"); 
 
         // Bulk
         t.clear();
         TreeMap<Long, Integer> ref2 = new TreeMap<>();
         var rng = new java.util.Random(42);
-        System.out.println("  Inserting 10K..."); System.out.flush();
         for (int i = 0; i < 10000; i++) { long k = rng.nextLong(); t.put(k, "v" + i); ref2.put(k, i); }
-        System.out.println("  trie.size=" + t.size() + " ref.size=" + ref2.size()); System.out.flush();
         assert t.size() == ref2.size() : "size " + t.size() + " != " + ref2.size();
 
-        System.out.println("  Verifying iteration order..."); System.out.flush();
         var tit = t.entrySet().iterator();
         var rit2 = ref2.keySet().iterator();
         checked = 0;
@@ -766,26 +740,25 @@ public class KNTrie<V> extends AbstractMap<Long, V>
             checked++;
         }
         assert !tit.hasNext() && !rit2.hasNext();
-        System.out.println("Bulk 10K: PASS (" + checked + " entries verified)"); System.out.flush();
+        System.out.println("Bulk 10K: PASS (" + checked + " entries verified)"); 
 
         // insertIfAbsent
         t.clear();
         assert t.insertIfAbsent(42, "first");
         assert !t.insertIfAbsent(42, "second");
         assert "first".equals(t.get(42L));
-        System.out.println("insertIfAbsent: PASS"); System.out.flush();
+        System.out.println("insertIfAbsent: PASS"); 
 
         // Iterator remove
         t.clear();
         for (int i = 0; i < 100; i++) t.put((long) i, "v" + i);
-        System.out.println("  Iterator.remove on 100 entries..."); System.out.flush();
         var it = t.entrySet().iterator();
         while (it.hasNext()) { var e = it.next(); if (e.getKey() % 2 == 0) it.remove(); }
         assert t.size() == 50;
         assert !t.containsKey(0L);
         assert t.containsKey(1L);
-        System.out.println("Iterator.remove: PASS (size=" + t.size() + ")"); System.out.flush();
+        System.out.println("Iterator.remove: PASS (size=" + t.size() + ")"); 
 
-        System.out.println("\nALL PASS"); System.out.flush();
+        System.out.println("\nALL PASS"); 
     }
 }
