@@ -178,67 +178,117 @@ public class KNTrie<V> extends AbstractMap<Long, V>
             return j;
         }
 
-        // --- Erase O(1): overwrite key's range with neighbor ---
+        // --- Find nearest dup slot: keys[i] == keys[i+1], scanning outward from ins ---
+        // Returns the position of the LEFT element of the dup pair.
+        // For small arrays, linear scan. For large, banded outward scan.
+        private static final int DUP_SCAN_MAX = 128;
+
+        int findDupPos(int ins) {
+            int total = keys.length;
+            if (total <= DUP_SCAN_MAX) {
+                for (int i = ins; i < total - 1; i++)
+                    if (keys[i] == keys[i + 1]) return i;
+                for (int i = ins - 1; i >= 1; i--)
+                    if (keys[i] == keys[i - 1]) return i;
+                return -1;
+            }
+            // Banded outward scan
+            int dups = total - count;
+            int band = count / (dups + 1) + 1;
+            int rLo = ins, lHi = ins - 1;
+            while (true) {
+                int rHi = Math.min(rLo + band, total - 1);
+                for (int i = rLo; i < rHi; i++)
+                    if (keys[i] == keys[i + 1]) return i;
+                rLo = rHi;
+
+                int lLo = Math.max(1, lHi - band + 1);
+                for (int i = lLo; i <= lHi; i++)
+                    if (keys[i] == keys[i - 1]) return i;
+                lHi = lLo - 1;
+            }
+        }
+
+        // --- Insert by consuming one dup slot ---
+        // findBase gives position; compute insertion point; find nearest dup;
+        // shift small range; write. O(distance_to_nearest_dup).
+        boolean insertKey(long ikey, Object val) {
+            if (count == 0 && keys.length > 0) {
+                // Empty leaf — fill entire array with this entry
+                Arrays.fill(keys, ikey);
+                Arrays.fill(values, val);
+                count = 1;
+                return true;
+            }
+
+            int pos = findBase(ikey);
+            if (keys[pos] == ikey) return false; // duplicate
+
+            // Insertion point: first slot > ikey
+            int ins = Long.compareUnsigned(keys[pos], ikey) < 0 ? pos + 1 : pos;
+
+            // Need room? Grow and re-spread to create dups
+            if (count >= keys.length) {
+                long[] uk = new long[count];
+                Object[] uv = new Object[count];
+                extractUniques(uk, uv);
+                int newSlots = keys.length * 2;
+                keys = new long[newSlots];
+                values = new Object[newSlots];
+                spread(uk, uv, count);
+                // Recompute insertion point in new spread
+                pos = findBase(ikey);
+                ins = Long.compareUnsigned(keys[pos], ikey) < 0 ? pos + 1 : pos;
+            }
+
+            // Find nearest expendable dup and shift
+            int dp = findDupPos(ins);
+            if (dp < ins) {
+                // Dup is to the left: shift [dp+1..ins-1] left by 1, write at ins-1
+                int sc = ins - 1 - dp;
+                if (sc > 0) {
+                    System.arraycopy(keys, dp + 1, keys, dp, sc);
+                    System.arraycopy(values, dp + 1, values, dp, sc);
+                }
+                keys[ins - 1] = ikey;
+                values[ins - 1] = val;
+            } else {
+                // Dup is to the right: shift [ins..dp-1] right by 1, write at ins
+                int sc = dp - ins;
+                if (sc > 0) {
+                    System.arraycopy(keys, ins, keys, ins + 1, sc);
+                    System.arraycopy(values, ins, values, ins + 1, sc);
+                }
+                keys[ins] = ikey;
+                values[ins] = val;
+            }
+            count++;
+            return true;
+        }
+
+        // --- Erase: overwrite key's range with neighbor, creating a dup ---
+        // O(range_size) — typically small.
         Object eraseKey(long target) {
             int pos = findBase(target);
             if (keys[pos] != target) return null;
             Object old = values[pos];
-            // Find range of this key
-            int lo = pos, hi = pos;
-            while (lo > 0 && keys[lo - 1] == target) lo--;
-            while (hi < keys.length - 1 && keys[hi + 1] == target) hi++;
-            // Overwrite with neighbor
-            if (lo > 0) {
-                long nk = keys[lo - 1]; Object nv = values[lo - 1];
-                for (int i = lo; i <= hi; i++) { keys[i] = nk; values[i] = nv; }
-            } else if (hi < keys.length - 1) {
-                long nk = keys[hi + 1]; Object nv = values[hi + 1];
-                for (int i = lo; i <= hi; i++) { keys[i] = nk; values[i] = nv; }
-            }
-            // else: sole entry, caller handles count==0
+
+            // Find first occurrence of this key
+            int first = pos;
+            while (first > 0 && keys[first - 1] == target) first--;
+            // Find last occurrence
+            int last = pos;
+            while (last < keys.length - 1 && keys[last + 1] == target) last++;
+
+            // Pick neighbor to fill the gap
+            long nk; Object nv;
+            if (first > 0) { nk = keys[first - 1]; nv = values[first - 1]; }
+            else if (last < keys.length - 1) { nk = keys[last + 1]; nv = values[last + 1]; }
+            else { count--; return old; } // sole entry
+
+            for (int i = first; i <= last; i++) { keys[i] = nk; values[i] = nv; }
             count--;
             return old;
-        }
-
-        // --- Insert in-place: compact left → insert → spread backward ---
-        // No temp arrays allocated. O(slots) total.
-        boolean insertKey(long ikey, Object val) {
-            // Step 1: compact uniques to positions 0..count-1
-            int n = 0;
-            for (int i = 0; i < keys.length; i++) {
-                if (i == 0 || keys[i] != keys[i - 1]) {
-                    keys[n] = keys[i];
-                    values[n] = values[i];
-                    n++;
-                }
-            }
-            // Step 2: binary search in compacted uniques for insertion point
-            int lo = 0, hi = n;
-            while (lo < hi) {
-                int mid = (lo + hi) >>> 1;
-                if (Long.compareUnsigned(keys[mid], ikey) < 0) lo = mid + 1;
-                else hi = mid;
-            }
-            if (lo < n && keys[lo] == ikey) {
-                // Duplicate — re-spread without inserting
-                spread(keys, values, n);
-                return false;
-            }
-            // Step 3: grow if full
-            if (n >= keys.length) {
-                int newSlots = keys.length * 2;
-                keys = Arrays.copyOf(keys, newSlots);
-                values = Arrays.copyOf(values, newSlots);
-            }
-            // Step 4: shift right to make room at lo
-            System.arraycopy(keys, lo, keys, lo + 1, n - lo);
-            System.arraycopy(values, lo, values, lo + 1, n - lo);
-            keys[lo] = ikey;
-            values[lo] = val;
-            n++;
-            // Step 5: spread backward in-place (src indices <= dest, safe)
-            spread(keys, values, n);
-            return true;
         }
 
         // --- Overwrite all dups of a key with new value ---
