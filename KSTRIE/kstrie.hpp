@@ -256,6 +256,88 @@ public:
     }
 
     // ------------------------------------------------------------------
+    // Prefix operations — bulk subtree queries
+    // ------------------------------------------------------------------
+
+    size_t prefix_count(std::string_view pfx) const {
+        const uint8_t* raw = reinterpret_cast<const uint8_t*>(pfx.data());
+        uint32_t len = static_cast<uint32_t>(pfx.size());
+        uint8_t stack_buf[256];
+        auto [mapped, heap_buf] = kstrie_detail::get_mapped<CHARMAP>(
+            raw, len, stack_buf, sizeof(stack_buf));
+        size_t result = impl_.prefix_count_impl(mapped, len);
+        delete[] heap_buf;
+        return result;
+    }
+
+    template<typename F>
+    void prefix_walk(std::string_view pfx, F&& fn) const {
+        const uint8_t* raw = reinterpret_cast<const uint8_t*>(pfx.data());
+        uint32_t len = static_cast<uint32_t>(pfx.size());
+        uint8_t stack_buf[256];
+        auto [mapped, heap_buf] = kstrie_detail::get_mapped<CHARMAP>(
+            raw, len, stack_buf, sizeof(stack_buf));
+        impl_.prefix_walk_impl(mapped, len, pfx, std::forward<F>(fn));
+        delete[] heap_buf;
+    }
+
+    std::vector<std::pair<std::string, VALUE>>
+    prefix_vector(std::string_view pfx) const {
+        std::vector<std::pair<std::string, VALUE>> result;
+        prefix_walk(pfx, [&](std::string_view key, const VALUE& val) {
+            result.emplace_back(std::string(key), val);
+        });
+        return result;
+    }
+
+    kstrie prefix_copy(std::string_view pfx) const {
+        const uint8_t* raw = reinterpret_cast<const uint8_t*>(pfx.data());
+        uint32_t len = static_cast<uint32_t>(pfx.size());
+        uint8_t stack_buf[256];
+        auto [mapped, heap_buf] = kstrie_detail::get_mapped<CHARMAP>(
+            raw, len, stack_buf, sizeof(stack_buf));
+        kstrie result;
+        auto r = impl_.prefix_clone(mapped, len, result.impl_.get_mem());
+        if (r.cloned != impl_.get_sentinel()) {
+            if (r.path_len > 0)
+                r.cloned = result.impl_.reskip_with_prefix(
+                    r.cloned, mapped, r.path_len);
+            result.impl_.set_root(r.cloned, r.count);
+        }
+        delete[] heap_buf;
+        return result;
+    }
+
+    size_t prefix_erase(std::string_view pfx) {
+        const uint8_t* raw = reinterpret_cast<const uint8_t*>(pfx.data());
+        uint32_t len = static_cast<uint32_t>(pfx.size());
+        uint8_t stack_buf[256];
+        auto [mapped, heap_buf] = kstrie_detail::get_mapped<CHARMAP>(
+            raw, len, stack_buf, sizeof(stack_buf));
+        size_t result = impl_.prefix_erase(mapped, len);
+        delete[] heap_buf;
+        return result;
+    }
+
+    kstrie prefix_split(std::string_view pfx) {
+        const uint8_t* raw = reinterpret_cast<const uint8_t*>(pfx.data());
+        uint32_t len = static_cast<uint32_t>(pfx.size());
+        uint8_t stack_buf[256];
+        auto [mapped, heap_buf] = kstrie_detail::get_mapped<CHARMAP>(
+            raw, len, stack_buf, sizeof(stack_buf));
+        auto r = impl_.prefix_split_impl(mapped, len);
+        kstrie result;
+        if (r.stolen != impl_.get_sentinel()) {
+            if (r.path_len > 0)
+                r.stolen = impl_.reskip_with_prefix(
+                    r.stolen, mapped, r.path_len);
+            result.impl_.set_root(r.stolen, r.count);
+        }
+        delete[] heap_buf;
+        return result;
+    }
+
+    // ------------------------------------------------------------------
     // Iterator-based modifiers
     // ------------------------------------------------------------------
 
@@ -329,8 +411,7 @@ private:
 
     static void append_unmapped(std::string& out, const uint8_t* data,
                                 uint32_t len) {
-        for (uint32_t i = 0; i < len; ++i)
-            out.push_back(static_cast<char>(CHARMAP::from_index(data[i])));
+        impl_t::append_unmapped(out, data, len);
     }
 
     // ------------------------------------------------------------------

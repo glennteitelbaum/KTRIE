@@ -626,6 +626,9 @@ inline constexpr uint32_t COMPACT_KEYSUFFIX_LIMIT = 4096;  // max keysuffix byte
 inline constexpr uint8_t  COMPACT_SUFFIX_LEN_MAX = 255;    // max suffix length per entry (uint8_t L[])
 using ks_offset_type = std::conditional_t<COMPACT_KEYSUFFIX_LIMIT <= 256, uint8_t, uint16_t>;
 
+// Max suffix bytes per compact entry (same as COMPACT_SUFFIX_LEN_MAX but uint32_t for sizing)
+inline constexpr uint32_t COMPACT_ENTRY_KEY_MAX = COMPACT_SUFFIX_LEN_MAX;
+
 enum class insert_mode : uint8_t { INSERT, UPSERT, ASSIGN };
 enum class insert_outcome : uint8_t { INSERTED, UPDATED, FOUND };
 
@@ -645,6 +648,24 @@ struct erase_info {
     erase_status status;
     uint64_t*    leaf;   // PENDING: node containing the entry. DONE: replacement node.
     int          pos;    // PENDING: position in leaf (-1 = eos)
+};
+
+struct prefix_erase_result {
+    uint64_t* node;     // replacement node (may be sentinel)
+    size_t    erased;   // entries erased
+};
+
+struct prefix_clone_result {
+    uint64_t* cloned;   // cloned subtree root (needs reskip at caller)
+    size_t    count;    // entries in clone
+    uint32_t  path_len; // mapped bytes consumed before clone root
+};
+
+struct prefix_split_result {
+    uint64_t* source;   // updated source node
+    uint64_t* stolen;   // stolen subtree root (needs reskip at caller)
+    size_t    count;    // entries stolen
+    uint32_t  path_len; // mapped bytes consumed before stolen root
 };
 
 // Collapse: when bitmask total_tail <= COMPACT_KEYSUFFIX_LIMIT, try collapse to compact

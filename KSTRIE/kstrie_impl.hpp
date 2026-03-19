@@ -5,6 +5,7 @@
 #include "kstrie_compact.hpp"
 #include "kstrie_support.hpp"
 #include <limits>
+#include <memory>
 #include <string>
 #include <string_view>
 
@@ -69,6 +70,552 @@ private:
         }
         // compact: leaf-only, no recursion
         return total;
+    }
+
+    // ------------------------------------------------------------------
+    // count_subtree — recursive entry count
+    // ------------------------------------------------------------------
+
+    size_t count_subtree(const uint64_t* node) const {
+        if (!node || node == compact_type::sentinel()) return 0;
+        hdr_type h = hdr_type::from_node(node);
+        if (h.is_compact()) return h.count;
+        size_t n = 0;
+        const uint64_t* cs = bitmask_type::child_slots(node);
+        for (uint16_t i = 0; i < h.count; ++i)
+            n += count_subtree(slots_type::load_child(cs, i));
+        n += count_subtree(bitmask_type::eos_child(node, h));
+        return n;
+    }
+
+    // ------------------------------------------------------------------
+    // clone_tree_into — allocates through dest mem
+    // ------------------------------------------------------------------
+
+    static uint64_t* clone_tree_into(const uint64_t* node, mem_type& dest) {
+        if (!node || node == compact_type::sentinel())
+            return const_cast<uint64_t*>(node);
+        hdr_type h = hdr_type::from_node(node);
+        size_t nu = h.alloc_u64;
+        uint64_t* copy = dest.alloc_node(nu);
+        std::memcpy(copy, node, nu * U64_BYTES);
+        if (h.is_compact()) {
+            auto* dsb = hdr_type::from_node(copy).get_compact_slots(copy);
+            const auto* ssb = h.get_compact_slots(node);
+            for (uint16_t i = 0; i < h.count; ++i) {
+                const VALUE* vp = slots_type::load_value(ssb, i);
+                dsb[i] = {};
+                slots_type::store_value(dsb, i, *vp, dest.alloc_);
+            }
+        } else {
+            uint64_t* new_cs = bitmask_type::child_slots(copy);
+            const uint64_t* old_cs = bitmask_type::child_slots(node);
+            for (uint16_t i = 0; i < h.count; ++i) {
+                uint64_t* child = slots_type::load_child(old_cs, i);
+                slots_type::store_child(new_cs, i,
+                    clone_tree_into(child, dest));
+            }
+            hdr_type& ch = hdr_type::from_node(copy);
+            uint64_t* old_eos = bitmask_type::eos_child(node, h);
+            bitmask_type::set_eos_child(copy, ch,
+                clone_tree_into(old_eos, dest));
+        }
+        return copy;
+    }
+
+    // ------------------------------------------------------------------
+    // reskip_with_prefix — prepend prefix bytes to node's existing skip
+    // ------------------------------------------------------------------
+
+    uint64_t* reskip_with_prefix(uint64_t* node,
+                                  const uint8_t* prefix,
+                                  uint32_t prefix_len) {
+        hdr_type h = hdr_type::from_node(node);
+        uint32_t old_skip = h.skip_bytes();
+        uint32_t new_skip = prefix_len + old_skip;
+        uint8_t buf[hdr_type::SKIP_MAX];
+        std::memcpy(buf, prefix, prefix_len);
+        if (old_skip > 0)
+            std::memcpy(buf + prefix_len,
+                        hdr_type::get_skip(node, h), old_skip);
+        if (h.is_compact())
+            return compact_type::reskip(node, h, mem_,
+                static_cast<uint8_t>(new_skip), buf);
+        else
+            return bitmask_type::reskip(node, h, mem_,
+                static_cast<uint8_t>(new_skip), buf);
+    }
+
+    // ------------------------------------------------------------------
+    // append_unmapped — reconstruct user-facing key bytes from mapped
+    // ------------------------------------------------------------------
+
+    static void append_unmapped(std::string& out,
+                                const uint8_t* data, uint32_t len) {
+        for (uint32_t i = 0; i < len; ++i)
+            out.push_back(static_cast<char>(CHARMAP::from_index(data[i])));
+    }
+
+    // ------------------------------------------------------------------
+    // unwind_child — shared by prefix_erase and prefix_split
+    // ------------------------------------------------------------------
+
+    prefix_erase_result unwind_child(
+            uint64_t* node, hdr_type h, uint8_t byte,
+            uint64_t* child, uint64_t* new_child,
+            uint64_t old_child_tail, size_t N) {
+
+        if (new_child != child) {
+            if (new_child != compact_type::sentinel())
+                bitmask_type::replace_child(node, h, byte, new_child);
+            else
+                node = bitmask_type::remove_child(node, h, byte);
+        }
+        node[NODE_TOTAL_TAIL] -= old_child_tail
+                               - node_tail_total(new_child)
+                               + N * h.skip_bytes();
+        h = hdr_type::from_node(node);
+        if (h.count == 0 && !bitmask_type::has_eos(node, h)) {
+            mem_.free_node(node);
+            return {compact_type::sentinel(), N};
+        }
+        if (node[NODE_TOTAL_TAIL] <= COMPACT_KEYSUFFIX_LIMIT) {
+            uint64_t* collapsed = collapse_to_compact(node);
+            if (collapsed != node) return {collapsed, N};
+        }
+        return {node, N};
+    }
+
+    // ------------------------------------------------------------------
+    // prefix_walk_subtree — recursive walk, reconstructs keys
+    // ------------------------------------------------------------------
+
+    template<typename F>
+    void prefix_walk_subtree(const uint64_t* node,
+                             std::string& path, F&& fn) const {
+        if (!node || node == compact_type::sentinel()) return;
+        hdr_type h = hdr_type::from_node(node);
+        size_t base = path.size();
+
+        if (h.has_skip()) [[unlikely]] {
+            uint32_t sb = h.skip_bytes();
+            append_unmapped(path, hdr_type::get_skip(node, h), sb);
+        }
+
+        if (h.is_compact()) [[unlikely]] {
+            const uint8_t* L  = compact_type::lengths(node, h);
+            const uint8_t* Fb = compact_type::firsts(node, h);
+            const ks_offset_type* O = compact_type::offsets(node, h);
+            const uint8_t* B  = compact_type::keysuffix(node, h);
+            const auto*    sb = h.get_compact_slots(node);
+            for (uint16_t i = 0; i < h.count; ++i) {
+                size_t eb = path.size();
+                uint8_t klen = L[i];
+                if (klen > 0) [[likely]] {
+                    append_unmapped(path, &Fb[i], 1);
+                    if (klen > 1) [[likely]]
+                        append_unmapped(path, B + O[i], klen - 1);
+                }
+                fn(std::string_view(path),
+                   *slots_type::load_value(sb, i));
+                path.resize(eb);
+            }
+            path.resize(base);
+            return;
+        }
+
+        uint64_t* eos = bitmask_type::eos_child(node, h);
+        if (eos != compact_type::sentinel())
+            prefix_walk_subtree(eos, path, fn);
+
+        const auto* bm = bitmask_type::get_bitmap(node, h);
+        int idx = bm->find_next_set(0);
+        while (idx >= 0) {
+            path.push_back(static_cast<char>(
+                CHARMAP::from_index(static_cast<uint8_t>(idx))));
+            int slot = bm->count_below(static_cast<uint8_t>(idx));
+            prefix_walk_subtree(
+                bitmask_type::child_by_slot(node, h, slot),
+                path, fn);
+            path.pop_back();
+            idx = bm->find_next_set(idx + 1);
+        }
+        path.resize(base);
+    }
+
+    // ------------------------------------------------------------------
+    // prefix_walk_filtered — compact entries matching remaining prefix
+    // ------------------------------------------------------------------
+
+    template<typename F>
+    void prefix_walk_filtered(const uint64_t* node, const hdr_type& h,
+                              const uint8_t* rem, uint32_t rlen,
+                              std::string& path, F&& fn) const {
+        const uint8_t* L  = compact_type::lengths(node, h);
+        const uint8_t* Fb = compact_type::firsts(node, h);
+        const ks_offset_type* O = compact_type::offsets(node, h);
+        const uint8_t* B  = compact_type::keysuffix(node, h);
+        const auto*    sb = h.get_compact_slots(node);
+        for (uint16_t i = 0; i < h.count; ++i) {
+            if (L[i] < rlen) continue;
+            if (Fb[i] > rem[0]) break;
+            if (Fb[i] < rem[0]) continue;
+            if (rlen > 1 &&
+                std::memcmp(B + O[i], rem + 1, rlen - 1) != 0) continue;
+            size_t eb = path.size();
+            uint8_t klen = L[i];
+            if (klen > 0) [[likely]] {
+                append_unmapped(path, &Fb[i], 1);
+                if (klen > 1) [[likely]]
+                    append_unmapped(path, B + O[i], klen - 1);
+            }
+            fn(std::string_view(path),
+               *slots_type::load_value(sb, i));
+            path.resize(eb);
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // prefix_erase_node — recursive
+    // ------------------------------------------------------------------
+
+    prefix_erase_result prefix_erase_node(
+            uint64_t* node, const uint8_t* pfx,
+            uint32_t pfx_len, uint32_t consumed) {
+        hdr_type h = hdr_type::from_node(node);
+
+        if (h.has_skip()) [[unlikely]] {
+            uint32_t sb = h.skip_bytes();
+            const uint8_t* skip = hdr_type::get_skip(node, h);
+            uint32_t remaining = pfx_len - consumed;
+            if (remaining <= sb) {
+                if (std::memcmp(skip, pfx + consumed, remaining) != 0)
+                    return {node, 0};
+                size_t n = count_subtree(node);
+                destroy_tree(node);
+                return {compact_type::sentinel(), n};
+            }
+            if (std::memcmp(skip, pfx + consumed, sb) != 0)
+                return {node, 0};
+            consumed += sb;
+            h = hdr_type::from_node(node);
+        }
+
+        if (consumed >= pfx_len) {
+            size_t n = count_subtree(node);
+            destroy_tree(node);
+            return {compact_type::sentinel(), n};
+        }
+
+        if (h.is_compact()) [[unlikely]]
+            return prefix_erase_compact(node, h, pfx, pfx_len, consumed);
+
+        uint8_t byte = pfx[consumed++];
+        uint64_t* child = bitmask_type::dispatch(node, h, byte);
+        if (child == compact_type::sentinel()) return {node, 0};
+
+        uint64_t old_child_tail = node_tail_total(child);
+        auto r = prefix_erase_node(child, pfx, pfx_len, consumed);
+        if (r.erased == 0) return {node, 0};
+        return unwind_child(node, h, byte, child, r.node,
+                            old_child_tail, r.erased);
+    }
+
+    // ------------------------------------------------------------------
+    // prefix_erase_compact — filter compact leaf
+    // ------------------------------------------------------------------
+
+    prefix_erase_result prefix_erase_compact(
+            uint64_t* node, hdr_type h,
+            const uint8_t* pfx, uint32_t pfx_len,
+            uint32_t consumed) {
+
+        uint32_t rlen = pfx_len - consumed;
+        const uint8_t* rem = pfx + consumed;
+        const uint8_t* L  = compact_type::lengths(node, h);
+        const uint8_t* Fb = compact_type::firsts(node, h);
+        const ks_offset_type* O = compact_type::offsets(node, h);
+        const uint8_t* B  = compact_type::keysuffix(node, h);
+        auto* sb = h.get_compact_slots(node);
+
+        uint32_t skip_len = h.skip_bytes();
+        uint8_t skip_buf[hdr_type::SKIP_MAX];
+        if (skip_len > 0)
+            std::memcpy(skip_buf, hdr_type::get_skip(node, h), skip_len);
+
+        uint16_t entry_count = h.count;
+        auto kept = std::make_unique<build_entry[]>(entry_count);
+        auto kept_keys = std::make_unique<uint8_t[]>(
+            static_cast<size_t>(entry_count) * COMPACT_ENTRY_KEY_MAX);
+        size_t koff = 0;
+        uint16_t nkept = 0;
+        size_t nerased = 0;
+
+        for (uint16_t i = 0; i < entry_count; ++i) {
+            bool match = (L[i] >= rlen && Fb[i] == rem[0] &&
+                (rlen <= 1 ||
+                 std::memcmp(B + O[i], rem + 1, rlen - 1) == 0));
+
+            if (match) {
+                slots_type::destroy_value(sb, i, mem_.alloc_);
+                ++nerased;
+            } else {
+                uint8_t klen = L[i];
+                uint8_t* dst = kept_keys.get() + koff;
+                if (klen > 0) {
+                    dst[0] = Fb[i];
+                    if (klen > 1)
+                        std::memcpy(dst + 1, B + O[i], klen - 1);
+                }
+                kept[nkept] = {dst, klen, slots_type::load_raw(sb, i)};
+                koff += klen;
+                ++nkept;
+            }
+        }
+
+        if (nerased == 0) return {node, 0};
+        mem_.free_node(node);
+
+        if (nkept == 0) return {compact_type::sentinel(), nerased};
+
+        uint64_t* nn = compact_type::build_compact(
+            mem_, static_cast<uint8_t>(skip_len),
+            skip_len > 0 ? skip_buf : nullptr, kept.get(), nkept);
+        return {nn, nerased};
+    }
+
+    // ------------------------------------------------------------------
+    // prefix_clone_node — const, allocates into dest
+    // ------------------------------------------------------------------
+
+    prefix_clone_result prefix_clone_node(
+            const uint64_t* node, const uint8_t* pfx,
+            uint32_t pfx_len, uint32_t consumed,
+            mem_type& dest) const {
+
+        hdr_type h = hdr_type::from_node(node);
+
+        if (h.has_skip()) [[unlikely]] {
+            uint32_t sb = h.skip_bytes();
+            const uint8_t* skip = hdr_type::get_skip(node, h);
+            uint32_t remaining = pfx_len - consumed;
+            if (remaining <= sb) {
+                if (std::memcmp(skip, pfx + consumed, remaining) != 0)
+                    return {compact_type::sentinel(), 0, 0};
+                size_t n = count_subtree(node);
+                uint64_t* cloned = clone_tree_into(node, dest);
+                return {cloned, n, consumed};
+            }
+            if (std::memcmp(skip, pfx + consumed, sb) != 0)
+                return {compact_type::sentinel(), 0, 0};
+            consumed += sb;
+            h = hdr_type::from_node(node);
+        }
+
+        if (consumed >= pfx_len) {
+            size_t n = count_subtree(node);
+            uint64_t* cloned = clone_tree_into(node, dest);
+            return {cloned, n, consumed};
+        }
+
+        if (h.is_compact()) [[unlikely]]
+            return prefix_clone_compact(node, h, pfx, pfx_len,
+                                        consumed, dest);
+
+        uint8_t byte = pfx[consumed++];
+        const uint64_t* child = bitmask_type::dispatch(node, h, byte);
+        if (child == compact_type::sentinel())
+            return {compact_type::sentinel(), 0, 0};
+
+        return prefix_clone_node(child, pfx, pfx_len, consumed, dest);
+    }
+
+    // ------------------------------------------------------------------
+    // prefix_clone_compact
+    // ------------------------------------------------------------------
+
+    prefix_clone_result prefix_clone_compact(
+            const uint64_t* node, const hdr_type& h,
+            const uint8_t* pfx, uint32_t pfx_len,
+            uint32_t consumed, mem_type& dest) const {
+
+        uint32_t rlen = pfx_len - consumed;
+        const uint8_t* rem = pfx + consumed;
+        const uint8_t* L  = compact_type::lengths(node, h);
+        const uint8_t* Fb = compact_type::firsts(node, h);
+        const ks_offset_type* O = compact_type::offsets(node, h);
+        const uint8_t* B  = compact_type::keysuffix(node, h);
+        const auto* sb = h.get_compact_slots(node);
+
+        uint16_t entry_count = h.count;
+        auto matches = std::make_unique<build_entry[]>(entry_count);
+        auto match_keys = std::make_unique<uint8_t[]>(
+            static_cast<size_t>(entry_count) * COMPACT_ENTRY_KEY_MAX);
+        size_t moff = 0;
+        uint16_t nmatch = 0;
+
+        for (uint16_t i = 0; i < entry_count; ++i) {
+            if (L[i] < rlen) continue;
+            if (Fb[i] > rem[0]) break;
+            if (Fb[i] < rem[0]) continue;
+            if (rlen > 1 &&
+                std::memcmp(B + O[i], rem + 1, rlen - 1) != 0) continue;
+
+            uint8_t klen = L[i];
+            uint8_t* dst = match_keys.get() + moff;
+            if (klen > 0) {
+                dst[0] = Fb[i];
+                if (klen > 1)
+                    std::memcpy(dst + 1, B + O[i], klen - 1);
+            }
+            uint64_t raw = slots_type::load_raw(sb, i);
+            if constexpr (!slots_type::IS_TRIVIAL) {
+                const VALUE* vp = slots_type::load_value(sb, i);
+                raw = slots_type::make_raw(*vp, dest.alloc_);
+            }
+            matches[nmatch] = {dst, klen, raw};
+            moff += klen;
+            ++nmatch;
+        }
+
+        if (nmatch == 0) return {compact_type::sentinel(), 0, 0};
+
+        uint32_t skip_len = h.skip_bytes();
+        const uint8_t* skip_data = skip_len > 0
+            ? hdr_type::get_skip(node, h) : nullptr;
+
+        uint64_t* nn = compact_type::build_compact(
+            dest, static_cast<uint8_t>(skip_len), skip_data,
+            matches.get(), nmatch);
+        return {nn, nmatch, consumed};
+    }
+
+    // ------------------------------------------------------------------
+    // prefix_split_node — recursive, fused steal+erase
+    // ------------------------------------------------------------------
+
+    prefix_split_result prefix_split_node(
+            uint64_t* node, const uint8_t* pfx,
+            uint32_t pfx_len, uint32_t consumed) {
+        hdr_type h = hdr_type::from_node(node);
+
+        if (h.has_skip()) [[unlikely]] {
+            uint32_t sb = h.skip_bytes();
+            const uint8_t* skip = hdr_type::get_skip(node, h);
+            uint32_t remaining = pfx_len - consumed;
+            if (remaining <= sb) {
+                if (std::memcmp(skip, pfx + consumed, remaining) != 0)
+                    return {node, compact_type::sentinel(), 0, 0};
+                size_t n = count_subtree(node);
+                return {compact_type::sentinel(), node, n, consumed};
+            }
+            if (std::memcmp(skip, pfx + consumed, sb) != 0)
+                return {node, compact_type::sentinel(), 0, 0};
+            consumed += sb;
+            h = hdr_type::from_node(node);
+        }
+
+        if (consumed >= pfx_len) {
+            size_t n = count_subtree(node);
+            return {compact_type::sentinel(), node, n, consumed};
+        }
+
+        if (h.is_compact()) [[unlikely]]
+            return prefix_split_compact(node, h, pfx, pfx_len, consumed);
+
+        uint8_t byte = pfx[consumed++];
+        uint64_t* child = bitmask_type::dispatch(node, h, byte);
+        if (child == compact_type::sentinel())
+            return {node, compact_type::sentinel(), 0, 0};
+
+        uint64_t old_child_tail = node_tail_total(child);
+        auto r = prefix_split_node(child, pfx, pfx_len, consumed);
+        if (r.count == 0) return {node, compact_type::sentinel(), 0, 0};
+
+        auto er = unwind_child(node, h, byte, child, r.source,
+                               old_child_tail, r.count);
+        return {er.node, r.stolen, r.count, r.path_len};
+    }
+
+    // ------------------------------------------------------------------
+    // prefix_split_compact — zero-copy ownership transfer
+    // ------------------------------------------------------------------
+
+    prefix_split_result prefix_split_compact(
+            uint64_t* node, hdr_type h,
+            const uint8_t* pfx, uint32_t pfx_len,
+            uint32_t consumed) {
+
+        uint32_t rlen = pfx_len - consumed;
+        const uint8_t* rem = pfx + consumed;
+        const uint8_t* L  = compact_type::lengths(node, h);
+        const uint8_t* Fb = compact_type::firsts(node, h);
+        const ks_offset_type* O = compact_type::offsets(node, h);
+        const uint8_t* B  = compact_type::keysuffix(node, h);
+        const auto* sb = h.get_compact_slots(node);
+
+        uint32_t skip_len = h.skip_bytes();
+        uint8_t skip_buf[hdr_type::SKIP_MAX];
+        if (skip_len > 0)
+            std::memcpy(skip_buf, hdr_type::get_skip(node, h), skip_len);
+
+        uint16_t entry_count = h.count;
+        auto kept = std::make_unique<build_entry[]>(entry_count);
+        auto kept_keys = std::make_unique<uint8_t[]>(
+            static_cast<size_t>(entry_count) * COMPACT_ENTRY_KEY_MAX);
+        auto stolen = std::make_unique<build_entry[]>(entry_count);
+        auto stolen_keys = std::make_unique<uint8_t[]>(
+            static_cast<size_t>(entry_count) * COMPACT_ENTRY_KEY_MAX);
+        size_t koff = 0, soff = 0;
+        uint16_t nkept = 0, nstolen = 0;
+
+        for (uint16_t i = 0; i < entry_count; ++i) {
+            bool match = (L[i] >= rlen && Fb[i] == rem[0] &&
+                (rlen <= 1 ||
+                 std::memcmp(B + O[i], rem + 1, rlen - 1) == 0));
+
+            uint8_t klen = L[i];
+            uint64_t raw = slots_type::load_raw(sb, i);
+
+            if (match) {
+                uint8_t* dst = stolen_keys.get() + soff;
+                if (klen > 0) {
+                    dst[0] = Fb[i];
+                    if (klen > 1) std::memcpy(dst + 1, B + O[i], klen - 1);
+                }
+                stolen[nstolen] = {dst, klen, raw};
+                soff += klen;
+                ++nstolen;
+            } else {
+                uint8_t* dst = kept_keys.get() + koff;
+                if (klen > 0) {
+                    dst[0] = Fb[i];
+                    if (klen > 1) std::memcpy(dst + 1, B + O[i], klen - 1);
+                }
+                kept[nkept] = {dst, klen, raw};
+                koff += klen;
+                ++nkept;
+            }
+        }
+
+        if (nstolen == 0)
+            return {node, compact_type::sentinel(), 0, 0};
+
+        mem_.free_node(node);
+
+        uint64_t* stolen_node = compact_type::build_compact(
+            mem_, static_cast<uint8_t>(skip_len),
+            skip_len > 0 ? skip_buf : nullptr,
+            stolen.get(), nstolen);
+
+        uint64_t* source_node = compact_type::sentinel();
+        if (nkept > 0)
+            source_node = compact_type::build_compact(
+                mem_, static_cast<uint8_t>(skip_len),
+                skip_len > 0 ? skip_buf : nullptr,
+                kept.get(), nkept);
+
+        return {source_node, stolen_node, nstolen, consumed};
     }
 
     // ------------------------------------------------------------------
@@ -368,6 +915,209 @@ public:
         }
         size_--;
         return true;
+    }
+
+    mem_type& get_mem() noexcept { return mem_; }
+
+    void set_root(uint64_t* new_root, size_t new_size) {
+        root_ = new_root;
+        size_ = new_size;
+    }
+
+    // ------------------------------------------------------------------
+    // prefix_count_impl
+    // ------------------------------------------------------------------
+
+    size_t prefix_count_impl(const uint8_t* mapped, uint32_t len) const {
+        if (root_ == compact_type::sentinel()) return 0;
+        if (len == 0) return size_;
+        const uint64_t* node = root_;
+        uint32_t consumed = 0;
+        for (;;) {
+            hdr_type h = hdr_type::from_node(node);
+            if (h.has_skip()) [[unlikely]] {
+                uint32_t sb = h.skip_bytes();
+                const uint8_t* skip = hdr_type::get_skip(node, h);
+                uint32_t remaining = len - consumed;
+                if (remaining <= sb)
+                    return std::memcmp(skip, mapped + consumed, remaining) == 0
+                           ? count_subtree(node) : 0;
+                if (std::memcmp(skip, mapped + consumed, sb) != 0) return 0;
+                consumed += sb;
+            }
+            if (consumed >= len) return count_subtree(node);
+            h = hdr_type::from_node(node);
+            if (h.is_compact()) [[unlikely]] {
+                const uint8_t* L  = compact_type::lengths(node, h);
+                const uint8_t* Fb = compact_type::firsts(node, h);
+                const ks_offset_type* O = compact_type::offsets(node, h);
+                const uint8_t* B  = compact_type::keysuffix(node, h);
+                uint32_t rlen = len - consumed;
+                const uint8_t* rem = mapped + consumed;
+                size_t count = 0;
+                for (uint16_t i = 0; i < h.count; ++i) {
+                    if (L[i] < rlen) continue;
+                    if (Fb[i] > rem[0]) break;
+                    if (Fb[i] < rem[0]) continue;
+                    if (rlen > 1 &&
+                        std::memcmp(B + O[i], rem + 1, rlen - 1) != 0)
+                        continue;
+                    ++count;
+                }
+                return count;
+            }
+            uint8_t byte = mapped[consumed++];
+            node = bitmask_type::dispatch(node, h, byte);
+            if (node == compact_type::sentinel()) return 0;
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // prefix_walk_impl
+    // ------------------------------------------------------------------
+
+    template<typename F>
+    void prefix_walk_impl(const uint8_t* mapped, uint32_t len,
+                          std::string_view original_prefix, F&& fn) const {
+        if (root_ == compact_type::sentinel()) return;
+        std::string path(original_prefix);
+
+        if (len == 0) {
+            prefix_walk_subtree(root_, path, std::forward<F>(fn));
+            return;
+        }
+
+        const uint64_t* node = root_;
+        uint32_t consumed = 0;
+        for (;;) {
+            hdr_type h = hdr_type::from_node(node);
+            if (h.has_skip()) [[unlikely]] {
+                uint32_t sb = h.skip_bytes();
+                const uint8_t* skip = hdr_type::get_skip(node, h);
+                uint32_t remaining = len - consumed;
+                if (remaining <= sb) {
+                    if (std::memcmp(skip, mapped + consumed, remaining) != 0)
+                        return;
+                    for (uint32_t j = remaining; j < sb; ++j)
+                        path.push_back(static_cast<char>(
+                            CHARMAP::from_index(skip[j])));
+                    consumed += sb;
+                    h = hdr_type::from_node(node);
+                    if (h.is_compact()) {
+                        const uint8_t* L  = compact_type::lengths(node, h);
+                        const uint8_t* Fb = compact_type::firsts(node, h);
+                        const ks_offset_type* O =
+                            compact_type::offsets(node, h);
+                        const uint8_t* B  = compact_type::keysuffix(node, h);
+                        const auto* s = h.get_compact_slots(node);
+                        for (uint16_t i = 0; i < h.count; ++i) {
+                            size_t eb = path.size();
+                            uint8_t klen = L[i];
+                            if (klen > 0) [[likely]] {
+                                append_unmapped(path, &Fb[i], 1);
+                                if (klen > 1) [[likely]]
+                                    append_unmapped(path, B + O[i], klen - 1);
+                            }
+                            fn(std::string_view(path),
+                               *slots_type::load_value(s, i));
+                            path.resize(eb);
+                        }
+                    } else {
+                        uint64_t* eos = bitmask_type::eos_child(node, h);
+                        if (eos != compact_type::sentinel())
+                            prefix_walk_subtree(eos, path, fn);
+                        const auto* bm = bitmask_type::get_bitmap(node, h);
+                        int idx = bm->find_next_set(0);
+                        while (idx >= 0) {
+                            path.push_back(static_cast<char>(
+                                CHARMAP::from_index(
+                                    static_cast<uint8_t>(idx))));
+                            int slot = bm->count_below(
+                                static_cast<uint8_t>(idx));
+                            prefix_walk_subtree(
+                                bitmask_type::child_by_slot(node, h, slot),
+                                path, fn);
+                            path.pop_back();
+                            idx = bm->find_next_set(idx + 1);
+                        }
+                    }
+                    return;
+                }
+                if (std::memcmp(skip, mapped + consumed, sb) != 0) return;
+                consumed += sb;
+            }
+            h = hdr_type::from_node(node);
+            if (consumed >= len) {
+                prefix_walk_subtree(node, path, std::forward<F>(fn));
+                return;
+            }
+            if (h.is_compact()) [[unlikely]] {
+                prefix_walk_filtered(node, h,
+                    mapped + consumed, len - consumed,
+                    path, std::forward<F>(fn));
+                return;
+            }
+            uint8_t byte = mapped[consumed++];
+            node = bitmask_type::dispatch(node, h, byte);
+            if (node == compact_type::sentinel()) return;
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // prefix_erase — public entry
+    // ------------------------------------------------------------------
+
+    size_t prefix_erase(const uint8_t* mapped, uint32_t len) {
+        if (root_ == compact_type::sentinel()) return 0;
+        if (len == 0) {
+            size_t n = size_;
+            destroy_tree(root_);
+            init_empty_root();
+            size_ = 0;
+            return n;
+        }
+        auto r = prefix_erase_node(root_, mapped, len, 0);
+        root_ = r.node;
+        size_ -= r.erased;
+        return r.erased;
+    }
+
+    // ------------------------------------------------------------------
+    // prefix_clone — const, allocates into dest_mem
+    // ------------------------------------------------------------------
+
+    prefix_clone_result prefix_clone(
+            const uint8_t* mapped, uint32_t len,
+            mem_type& dest) const {
+        if (root_ == compact_type::sentinel())
+            return {compact_type::sentinel(), 0, 0};
+        if (len == 0) {
+            size_t n = size_;
+            uint64_t* cloned = clone_tree_into(root_, dest);
+            return {cloned, n, 0};
+        }
+        return prefix_clone_node(root_, mapped, len, 0, dest);
+    }
+
+    // ------------------------------------------------------------------
+    // prefix_split_impl — steals subtree, fixes source
+    // ------------------------------------------------------------------
+
+    prefix_split_result prefix_split_impl(
+            const uint8_t* mapped, uint32_t len) {
+        if (root_ == compact_type::sentinel())
+            return {root_, compact_type::sentinel(), 0, 0};
+        if (len == 0) {
+            uint64_t* stolen = root_;
+            size_t n = size_;
+            init_empty_root();
+            size_ = 0;
+            return {root_, stolen, n, 0};
+        }
+        auto r = prefix_split_node(root_, mapped, len, 0);
+        root_ = r.source;
+        size_ -= r.count;
+        return r;
     }
 
     void clear() noexcept {
