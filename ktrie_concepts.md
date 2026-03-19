@@ -13,6 +13,12 @@ This document describes the data structures, algorithms, and shared design conce
   - [2.1 Sentinel](#21-sentinel)
   - [2.2 Bitmaps](#22-bitmaps)
   - [2.3 Value Storage](#23-value-storage)
+- [3 Comparisons with Other Structures](#3-comparisons-with-other-structures)
+  - [3.1 HAT-trie / Burst Trie](#31-hat-trie--burst-trie)
+  - [3.2 ART (Adaptive Radix Tree)](#32-art-adaptive-radix-tree)
+  - [3.3 Sorted Flat Array](#33-sorted-flat-array)
+  - [3.4 absl::flat_hash_map](#34-abslflat_hash_map)
+  - [3.5 Positioning](#35-positioning)
 
 ## 1 Data Structures and Algorithms
 
@@ -92,14 +98,14 @@ The result is a structure whose depth and memory usage adapt to the actual key d
 
 ### 2.1 Sentinel
 
-The sentinel is a statically-allocated node that represents "not found." It is a valid node that satisfies the same structural contract as a real node, but contains zero entries and returns not-found for all operations. Because it is a real node, no special-casing is needed: the same dispatch mechanism that reaches a real leaf also reaches the sentinel, and the result is a uniform not-found response.
+The sentinel is a distinguished value that represents "not found" or "empty." It is not a real entry. When a branch node has no child for a given byte, the child slot holds the sentinel. When the container is empty, the root is the sentinel.
 
 The sentinel appears in two roles:
 
-- **Empty root.** When the container has no entries, the root points to the sentinel. Find reaches it and returns not-found through the normal dispatch path.
-- **Branch node miss target.** Branch nodes reference the sentinel for absent children. When a bitmap lookup misses, the dispatch resolves to the sentinel rather than requiring a conditional branch to check for absence.
+- **Empty root.** When the container has no entries, the root equals the sentinel. All operations check this before descent.
+- **Branch node miss target.** When a branch lookup misses, the result is the sentinel. The caller recognizes it and returns not-found without further traversal.
 
-The sentinel is per-template-instantiation (one for each value type) because the dispatch types differ. It is initialized as a static local and never deallocated. Because it is a single instance per type, repeated misses all hit the same cache lines, which stay hot.
+The concrete representation of the sentinel differs between KNTRIE and KSTRIE; see their respective concept documents.
 
 ### 2.2 Bitmaps
 
@@ -162,4 +168,76 @@ Values are handled through a compile-time trait that selects one of three storag
 | Destroy node | nothing | nothing | destroy + dealloc all live slots |
 
 All dispatch is `if constexpr`; dead branches are eliminated at compile time. The slot movement strategy is uniform: non-overlapping transfers (realloc, new node, split) use `std::copy` (optimized to `memcpy` for trivial types); overlapping transfers (in-place insert gap, erase compaction) use `std::move` / `std::move_backward` (optimized to `memmove`).
+
+## 3 Comparisons with Other Structures
+
+This section compares the KTRIE family against other indexed structures that serve similar use cases. The goal is honest positioning: where KTRIE wins, where it doesn't, and why.
+
+### 3.1 HAT-trie / Burst Trie
+
+A HAT-trie (Hash Array Mapped Trie) uses trie routing at upper levels and hash containers at the leaves. When a leaf's hash container exceeds a threshold, it "bursts" into trie nodes. The C++ implementations (hat-trie by Tessil, cedar) are well-regarded for string-keyed workloads.
+
+**Point lookup.** HAT-trie leaves use hash lookup — O(1) expected per leaf access. KSTRIE compact leaves use binary search on first bytes plus suffix comparison — O(log E) where E is entries per leaf. For the common case of small leaves (< 100 entries), the difference is negligible. For large leaves, HAT-trie has an edge.
+
+**Ordered iteration.** HAT-trie hash containers are unordered. Iterating in sorted order requires sorting leaf contents on the fly or maintaining a separate sorted index. KSTRIE compact leaves are always sorted; iteration is a single in-order walk with no post-sort.
+
+**Prefix queries.** HAT-trie supports prefix search by walking trie nodes to the prefix point, then collecting from hash containers below. But the collection step requires visiting every hash entry (no ordering guarantee within containers). KSTRIE's `prefix_walk` produces entries in sorted order, and `prefix_split` can detach entire subtrees in O(1) at bitmask boundaries — operations that have no HAT-trie equivalent.
+
+**Memory.** HAT-trie hash containers store full suffix keys per entry. KSTRIE's keysuffix sharing stores shared tail bytes once per chain, reducing suffix storage for keys with common structure (URLs, file paths, hierarchical identifiers). For random strings with no shared structure, the two are comparable.
+
+**Write performance.** HAT-trie's hash containers have amortized O(1) insert. KSTRIE's sorted compact leaves require shifting entries on insert — O(E) per leaf insert. For write-heavy workloads with large leaves, HAT-trie wins. The KSTRIE is optimized for read-heavy workloads where the compact sorted layout pays back on every subsequent lookup and iteration.
+
+### 3.2 ART (Adaptive Radix Tree)
+
+ART uses four node sizes (Node4, Node16, Node48, Node256) that adapt to the fan-out at each level. Each level consumes one byte. There is no leaf compression: a 10-byte key traverses at least 10 nodes. The C++ implementation (libart, adaptive_radix_tree) is well-known for high-performance in-memory indexing.
+
+**Point lookup.** ART's dispatch at each level is simple: Node4 uses linear scan, Node16 uses SIMD comparison, Node48 uses a 256-byte index array, Node256 uses direct indexing. No binary search, no suffix comparison. For point lookups, ART is faster per-level than KSTRIE's compact leaf binary search. However, ART traverses more levels because it has no leaf compression — every byte of the key is a separate level.
+
+**Memory.** ART stores no key suffixes in leaves; the path through the trie reconstructs the key. But ART creates a node for every divergent byte. For keys with long shared prefixes, ART uses path compression (similar to KTRIE skip prefixes) but still creates one node per divergent byte after the shared prefix. KSTRIE's compact leaves absorb all remaining suffixes into one allocation with keysuffix sharing. For URL-like keys where many entries share long prefixes and diverge in the last few bytes, KSTRIE uses significantly less memory.
+
+**Prefix queries.** ART supports prefix search by walking to the prefix node and collecting below. The traversal is natural (trie walk). KSTRIE adds node-level operations on top: `prefix_copy` via `clone_tree`, `prefix_split` via pointer steal, `prefix_erase` via subtree detach. These are structural operations that ART's node layout doesn't support without reconstruction.
+
+**Concurrency.** ART has well-studied concurrent variants (ART-OLC, ART-ROWEX). The KTRIE family currently requires external synchronization for concurrent writes; concurrent reads are safe.
+
+### 3.3 Sorted Flat Array
+
+A sorted `std::vector<std::pair<Key, Value>>` with `std::lower_bound` for lookup. Simple, cache-friendly, and surprisingly competitive for small to medium datasets.
+
+**Point lookup.** Binary search: O(log N) comparisons, each O(K) for string keys. For N < 1000, excellent cache behavior — the entire array fits in L2. For N > 100K, the O(K log N) cost and random access pattern make it slower than both trie structures and hash tables.
+
+**Insert/erase.** O(N) element shift. Unacceptable for large N. Fine for build-once-read-many workloads where the data is sorted once and queried repeatedly.
+
+**Memory.** Minimal overhead: just the key-value pairs plus vector bookkeeping. No pointers, no tree structure. For small trivial types, this is the densest possible representation. However, no key compression: every entry stores the full key.
+
+**Prefix queries.** `lower_bound` on the prefix, then linear scan while the prefix matches. O(log N + M) where M is the match count. Same asymptotic as KSTRIE's iterator-pair `prefix()`, but KSTRIE's `prefix_walk` subtree traversal avoids the O(log N) initial binary search by descending directly to the subtree root.
+
+**When to use.** The sorted flat array dominates for small N (< ~1000) where the array fits in cache and the simplicity of the data layout wins. It also dominates for build-once workloads where O(N) insert cost is paid once. For larger N with ongoing mutations, the O(N) insert/erase cost makes it impractical.
+
+### 3.4 absl::flat_hash_map
+
+Google's open-addressing hash table with SIMD-probed control bytes. The fastest general-purpose hash table widely available in C++. Uses Swiss Table layout: a flat array of slots plus a parallel array of 1-byte control tags, probed in 16-byte groups via SSE/AVX.
+
+**Point lookup.** O(1) expected. The SIMD probe checks 16 control bytes in one instruction, achieving extremely low collision overhead. For pure point-lookup workloads, `flat_hash_map` is faster than any tree or trie structure.
+
+**Memory.** Flat slot array with ~1 byte control overhead per slot. At the default 87.5% max load factor, ~14% of slots are empty. Keys are stored in full — no compression. For small keys (`int64_t`), the overhead is minimal. For string keys, each entry stores the complete string plus the `std::string` object overhead. A million URLs sharing a 20-byte prefix store that prefix a million times.
+
+**No ordering.** No sorted iteration, no range queries, no prefix queries. These are fundamentally impossible with hash-based storage. If you need any ordered access, `flat_hash_map` cannot help.
+
+**Rehashing.** When load factor exceeds the threshold, the entire table is reallocated and every entry is re-inserted. This causes latency spikes proportional to N.
+
+**When to use.** When the workload is exclusively point lookups and point mutations (insert/erase/update by exact key), and no ordered access or prefix queries are ever needed. `flat_hash_map` wins this workload by a significant margin.
+
+### 3.5 Positioning
+
+The KTRIE family is not trying to beat hash tables on unordered point lookups. Its positioning is:
+
+**vs. hash tables (flat_hash_map, unordered_map):** KTRIE provides ordered iteration, range queries, and prefix operations that hash tables cannot. For string keys, KTRIE compresses shared prefixes and suffixes — a million URL keys with common structure use a fraction of the memory. The trade-off is slower point lookups (O(K) trie descent vs O(1) hash probe).
+
+**vs. ordered trees (std::map, B-tree):** KTRIE's O(K) lookup is independent of N, while tree lookup is O(K log N) for strings or O(log N) for integers. KTRIE's compact leaves provide better cache behavior than per-node tree allocations. Memory compression through prefix capture and suffix sharing further widens the gap.
+
+**vs. trie variants (HAT-trie, ART):** KTRIE's compact leaves with keysuffix sharing provide better memory density for keys with shared structure. The B-tree-style sorted leaf layout gives ordered iteration without post-sorting. Node-level prefix operations (clone, steal, detach) are structural advantages unique to KTRIE.
+
+**vs. sorted arrays:** KTRIE scales to large N with O(K) lookup and O(K + E) insert, where sorted arrays degrade to O(K log N) lookup and O(N) insert. For small N, the sorted array wins on simplicity and cache density.
+
+The sweet spot: read-heavy workloads with ordered access requirements, prefix queries, and key populations that share common structure. The more your keys look like URLs, file paths, or hierarchical identifiers, the more KTRIE's compression pays off.
 

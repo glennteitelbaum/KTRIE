@@ -27,7 +27,9 @@ This document describes the KNTRIE, the integer-key instantiation of the KTRIE. 
   - [4.4 find next / find prev](#44-find-next--find-prev)
   - [4.5 insert](#45-insert)
   - [4.6 erase](#46-erase)
-  - [4.7 Iterators are Snapshots](#47-iterators-are-snapshots)
+  - [4.7 modify](#47-modify)
+  - [4.8 erase_when](#48-erase_when)
+  - [4.9 Iterators are Snapshots](#49-iterators-are-snapshots)
 - [5 Performance](#5-performance)
   - [5.1 std::map](#51-stdmap)
   - [5.2 std::unordered_map](#52-stdunordered_map)
@@ -409,7 +411,29 @@ The interesting logic is on the unwind path:
 
 For compact leaves, erase converts the removed entry into a dup by overwriting it with a copy of its neighbor, an O(1) operation with no memmove. For bitmap256 leaves, erase clears the presence bit and shifts subsequent values down by one slot, an O(N) operation bounded by 256. If the leaf becomes empty, it is deallocated and the parent removes the child from its bitmap.
 
-### 4.7 Iterators are Snapshots
+### 4.7 modify
+
+`modify(key, fn)` applies a user function to the value at `key` in place, without find+erase+insert overhead. The function signature is `void fn(VALUE&)` — it receives a mutable reference to the stored value.
+
+The implementation walks the trie once to locate the key. At the compact leaf, it calls `fn` directly on the slot. For inline types (Category A), this modifies the u64 slot in place. For heap types (Category C), all dup slots share the same pointer, so the modification is visible through all of them. No reallocation, no value copy, no destroy/reconstruct cycle.
+
+A two-argument overload `modify(key, fn, default_val)` handles the miss case: if the key exists, apply `fn`; if not, insert `default_val` as-is (fn is not called on the default). This enables atomic accumulator patterns:
+
+```cpp
+trie.modify(key, [](int64_t& v) { v++; }, 1);  // increment or insert 1
+```
+
+For inline types, the public API handles the VALUE/slot_type mismatch (e.g. `int64_t` stored as `uint64_t`) via `reinterpret_cast<VALUE&>(slot)` in a wrapper lambda. This is transparent to the caller.
+
+### 4.8 erase_when
+
+`erase_when(key, fn)` is a single-walk conditional erase. The function signature is `bool fn(const VALUE&)`. The trie descends to the key, tests the predicate on the value, and erases only if the predicate returns true. Returns `true` if the entry was erased, `false` if not found or predicate failed.
+
+The implementation reuses the full erase unwind path (descendant check, single-child collapse, root normalization) but gates entry into that path on the predicate result at the leaf level. If the predicate fails, the trie is untouched — no wasted unwind work.
+
+This avoids the find-then-erase two-walk pattern and the risk of the key being modified or erased between the two walks.
+
+### 4.9 Iterators are Snapshots
 
 The kntrie iterator is a snapshot: it stores a copy of the current key and value, not a pointer into the trie. Each `operator++` and `operator--` re-descends the trie from the root via `iter_next` or `iter_prev` to find the next or previous entry.
 
@@ -417,7 +441,7 @@ This design has two consequences:
 
 **Stability.** Iterators are never invalidated by mutations to other keys. Inserting or erasing a different key does not affect an existing iterator's stored key/value pair. The iterator will find the correct next/previous entry on its next advance, even if the trie's internal structure has been reorganized by splits, coalesces, or reallocation.
 
-**No auto-update.** If the value at the iterator's current key is modified (via `insert_or_assign` or `assign`), the iterator still holds the old value. Dereferencing returns the snapshot, not the live data. To see the updated value, the caller must re-find the key or advance and return.
+**No auto-update.** If the value at the iterator's current key is modified (via `insert_or_assign`, `assign`, or `modify`), the iterator still holds the old value. Dereferencing returns the snapshot, not the live data. To see the updated value, the caller must re-find the key or advance and return. This is a deliberate trade-off: `modify` changes the live data in place, but existing iterators see the value as it was when they were created or last advanced. The snapshot design means `modify` never invalidates iterators — it just doesn't update them.
 
 The cost of this approach is that each iterator increment performs a full root-to-leaf descent rather than following a stored pointer. In practice this cost is low: most increments resolve within a single compact leaf (the hot path in `find_next_fn`), and the descent through internal nodes is the same tight loop as find. The benefit is simplicity: no iterator bookkeeping, no invalidation tracking, and no dangling pointer risk.
 

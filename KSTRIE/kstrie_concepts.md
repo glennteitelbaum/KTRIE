@@ -23,7 +23,10 @@ This document describes the KSTRIE, the variable-length string key instantiation
   - [4.3 erase](#43-erase)
   - [4.4 find first / find last](#44-find-first--find-last)
   - [4.5 find next / find prev](#45-find-next--find-prev)
-  - [4.6 Iterators are Snapshots](#46-iterators-are-snapshots)
+  - [4.6 modify](#46-modify)
+  - [4.7 erase_when](#47-erase_when)
+  - [4.8 Prefix Operations](#48-prefix-operations)
+  - [4.9 Iterators are Snapshots](#49-iterators-are-snapshots)
 - [5 Performance](#5-performance)
   - [5.1 std::map](#51-stdmap)
   - [5.2 std::unordered_map](#52-stdunordered_map)
@@ -415,7 +418,47 @@ Iterator advancement is the second-hottest path after find. `iter_next` finds th
 
 The key is reconstructed during descent. Each skip prefix and dispatch byte is tracked so that the full key is available when the target entry is reached.
 
-### 4.6 Iterators are Snapshots
+### 4.6 modify
+
+`modify(key, fn)` applies a user function to the value at `key` in place. The function signature is `void fn(VALUE&)`. Returns true if the key existed and was modified, false if not found.
+
+The implementation uses an iterative descent (like `find_inner` but mutable) through bitmask nodes, then calls `fn` directly on the value slot in the compact leaf. For inline types (Category A), this modifies the slot in place. For heap types (Category C), the heap-allocated object is modified through its pointer. No reallocation, no value copy, no destroy/reconstruct cycle.
+
+A two-argument overload `modify(key, fn, default_val)` handles the miss case: if the key exists, apply `fn`; if not, insert `default_val` as-is (fn is not called on the default). This uses two walks on miss (modify miss + insert) because the iterative descent path cannot insert. The miss path is cold — the common case for accumulator patterns is that most keys already exist after the first pass.
+
+```cpp
+trie.modify(key, [](int64_t& v) { v++; }, 1);  // increment or insert 1
+```
+
+### 4.7 erase_when
+
+`erase_when(key, fn)` is a single-walk conditional erase. The function signature is `bool fn(const VALUE&)`. The trie descends recursively to the key, tests the predicate on the value at the compact leaf, and only proceeds with the erase if the predicate returns true. Returns `true` if erased, `false` if not found or predicate failed.
+
+The implementation reuses the full erase unwind path (total_tail fixup, empty check, collapse check) but gates entry into that path on the predicate result at the leaf level. If the predicate fails, the trie is untouched — no wasted unwind work.
+
+### 4.8 Prefix Operations
+
+The kstrie provides six prefix operations that exploit the trie structure for efficient subtree access. All share a recursive descent that matches prefix bytes through skip comparisons and bitmask dispatch, landing at one of three outcomes: SUBTREE (entire node matches), COMPACT_FILTERED (prefix lands mid-compact-leaf, partial entries match), or NO_MATCH.
+
+**Read-only:**
+
+`prefix_count(pfx)` counts matching entries. For SUBTREE, it recursively sums compact leaf `count` fields — no key reconstruction, no allocation. For COMPACT_FILTERED, it scans the sorted suffix array for entries whose suffix starts with the remaining prefix bytes, exploiting sort order for early exit.
+
+`prefix_walk(pfx, fn)` calls `fn(string_view key, const VALUE& val)` for each matching entry in sorted order. The subtree walker reconstructs keys by accumulating skip bytes and dispatch bytes via a push/pop string pattern. For COMPACT_FILTERED, only the suffix bytes beyond the remaining prefix are appended.
+
+`prefix_vector(pfx)` materializes all matches into a `vector<pair<string, VALUE>>`. Built on `prefix_walk`.
+
+**Copy:**
+
+`prefix_copy(pfx)` returns a new kstrie containing all matching entries. Uses node-level cloning via `clone_tree_into` — each node is memcpy'd and values are deep-copied through the destination trie's allocator. The cloned subtree root gets the consumed prefix bytes prepended to its skip via `reskip_with_prefix` (one node realloc). For COMPACT_FILTERED, a new compact leaf is built from matching entries only. O(total_node_bytes), not O(N × key_len).
+
+**Mutating:**
+
+`prefix_erase(pfx)` removes all matching entries. For SUBTREE at a bitmask child, the recursive descent detaches the child via `remove_child` and destroys the subtree via `destroy_tree`. The unwind path fixes `total_tail`, checks for empty nodes, and tries collapse — identical to the single-entry erase unwind but with N entries removed at once. For COMPACT_FILTERED, a single pass separates matching and non-matching entries: matching values are destroyed, the old node is freed, and a new compact leaf is built from the non-matching entries.
+
+`prefix_split(pfx)` extracts matching entries into a new kstrie, removing them from the source. A fused single-walk operation: for SUBTREE, the subtree pointer is stolen from the source (detach, not clone) and the stolen root gets the prefix prepended via `reskip_with_prefix`. For COMPACT_FILTERED, a single pass separates entries — matching raw_slots transfer ownership to the new node (no value copy, no destroy), non-matching raw_slots go to the rebuilt source node. The old node memory is freed once. The source's unwind path is identical to `prefix_erase`. O(1) at bitmask boundaries for the steal itself, plus O(subtree_nodes) for `count_subtree`.
+
+### 4.9 Iterators are Snapshots
 
 The kstrie iterator is a snapshot: it stores a copy of the current key (as `std::string`) and a copy of the current value, not a pointer into the trie. Each `operator++` and `operator--` re-descends the trie from the root via `iter_next` or `iter_prev` to find the next or previous entry.
 
@@ -423,7 +466,7 @@ This design has two consequences:
 
 **Stability.** Iterators are never invalidated by mutations to other keys. Inserting or erasing a different key does not affect an existing iterator's stored key/value pair. The iterator will find the correct next/previous entry on its next advance, even if the trie's internal structure has been reorganized by splits, collapses, or reallocation.
 
-**No auto-update.** If the value at the iterator's current key is modified (via `insert_or_assign`), the iterator still holds the old value. Dereferencing returns the snapshot, not the live data. To see the updated value, the caller must re-find the key or advance and return.
+**No auto-update.** If the value at the iterator's current key is modified (via `insert_or_assign` or `modify`), the iterator still holds the old value. Dereferencing returns the snapshot, not the live data. To see the updated value, the caller must re-find the key or advance and return. This is a deliberate trade-off: `modify` changes the live data in place, but existing iterators see the value as it was when they were created or last advanced.
 
 The cost of this approach is that each iterator increment performs a full root-to-leaf descent rather than following a stored pointer. In practice this cost is low: most increments resolve within a single compact leaf, and the descent through bitmask nodes is the same tight loop as find. The benefit is simplicity: no iterator bookkeeping, no invalidation tracking, and no dangling pointer risk.
 
