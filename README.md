@@ -6,12 +6,13 @@
 
 Concepts that apply to both implementations
 
-## Implemenations
+## Directories
 
-|Implemenation|Keys|Concepts|README (includes benchmark results)|
+|Directory|What|Concepts|README (includes benchmark results)|
 |-------------|----|--------|------|
-|KNTRIE|Numeric|[KNTRIE Concepts](KNTRIE/kntrie_concepts.md)|[KNTRIE](KNTRIE/README.md)|
-|KSTRIE|String|[KSTRIE Concepts](KSTRIE/kstrie_concepts.md)|[KSTRIE](KSTRIE/README.md)|
+|KNTRIE|Numeric Keyed KTRIE|[KNTRIE Concepts](KNTRIE/kntrie_concepts.md)|[KNTRIE](KNTRIE/README.md)|
+|KSTRIE|String Keyed KTRIE|[KSTRIE Concepts](KSTRIE/kstrie_concepts.md)|[KSTRIE](KSTRIE/README.md)|
+|KTOKEN|BPE tokenizer - KTRIE Usage Example|[KTOKEN Concepts](KTOKEN/ktoken.md)|[KTOKEN](KTOKEN/README.md)|
 
 ## [ABSTRACT](./ktrie_abstract.md)
 
