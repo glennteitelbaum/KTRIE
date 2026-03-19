@@ -127,22 +127,21 @@ public class KNTrie<V> extends AbstractMap<Long, V>
 
     @SuppressWarnings("rawtypes")
     static final class CompactNode extends Node {
-        long[] keys;
-        Object[] values;
-        int count;
+        long[] keys;        // power-of-two, fully populated with spread dups
+        Object[] values;    // parallel, dups share same object reference
+        int count;          // unique entries
 
         static final CompactNode SENTINEL = new CompactNode();
         private CompactNode() { keys = new long[0]; values = new Object[0]; count = 0; }
 
-        CompactNode(int capacity) {
-            capacity = Math.max(MIN_CAPACITY, Integer.highestOneBit(Math.max(capacity - 1, 1)) << 1);
-            keys = new long[capacity];
-            values = new Object[capacity];
+        CompactNode(int slots) {
+            slots = Math.max(MIN_CAPACITY, Integer.highestOneBit(Math.max(slots - 1, 1)) << 1);
+            keys = new long[slots];
+            values = new Object[slots];
             count = 0;
         }
 
-        // Branchless binary search: returns index of last key <= target.
-        // Requires keys.length is power of 2 with dup fill.
+        // --- Branchless binary search on full spread array ---
         int findBase(long target) {
             int base = 0, n = keys.length;
             while (n > 1) {
@@ -152,32 +151,115 @@ public class KNTrie<V> extends AbstractMap<Long, V>
             return base;
         }
 
-        // Insertion point from findBase result: first position > target, clamped to count.
-        int insertionPoint(long target, int fbPos) {
-            return Math.min(
-                Long.compareUnsigned(keys[fbPos], target) < 0 ? fbPos + 1 : fbPos,
-                count);
-        }
-
-        void fillDups() {
-            if (count > 0 && count < keys.length) {
-                Arrays.fill(keys, count, keys.length, keys[count - 1]);
-                Arrays.fill(values, count, keys.length, values[count - 1]);
+        // --- Spread: distribute n unique entries across keys.length slots ---
+        // Slot i maps to unique entry (i * n / slots).
+        // 5 entries in 8 slots → [A A B B C D D E]
+        void spread(long[] uk, Object[] uv, int n) {
+            count = n;
+            int slots = keys.length;
+            if (n == 0) return;
+            for (int i = slots - 1; i >= 0; i--) {
+                int src = (int)((long)i * n / slots);
+                keys[i] = uk[src];
+                values[i] = uv[src];
             }
         }
 
-        void grow() {
-            int nc = Math.max(MIN_CAPACITY, keys.length * 2);
-            keys = Arrays.copyOf(keys, nc);
-            values = Arrays.copyOf(values, nc);
+        // --- Extract unique entries from spread array ---
+        int extractUniques(long[] outK, Object[] outV) {
+            int j = 0;
+            for (int i = 0; i < keys.length; i++) {
+                if (i == 0 || keys[i] != keys[i - 1]) {
+                    outK[j] = keys[i];
+                    outV[j] = values[i];
+                    j++;
+                }
+            }
+            return j;
         }
 
+        // --- Erase O(1): overwrite key's range with neighbor ---
+        Object eraseKey(long target) {
+            int pos = findBase(target);
+            if (keys[pos] != target) return null;
+            Object old = values[pos];
+            // Find range of this key
+            int lo = pos, hi = pos;
+            while (lo > 0 && keys[lo - 1] == target) lo--;
+            while (hi < keys.length - 1 && keys[hi + 1] == target) hi++;
+            // Overwrite with neighbor
+            if (lo > 0) {
+                long nk = keys[lo - 1]; Object nv = values[lo - 1];
+                for (int i = lo; i <= hi; i++) { keys[i] = nk; values[i] = nv; }
+            } else if (hi < keys.length - 1) {
+                long nk = keys[hi + 1]; Object nv = values[hi + 1];
+                for (int i = lo; i <= hi; i++) { keys[i] = nk; values[i] = nv; }
+            }
+            // else: sole entry, caller handles count==0
+            count--;
+            return old;
+        }
+
+        // --- Insert in-place: compact left → insert → spread backward ---
+        // No temp arrays allocated. O(slots) total.
+        boolean insertKey(long ikey, Object val) {
+            // Step 1: compact uniques to positions 0..count-1
+            int n = 0;
+            for (int i = 0; i < keys.length; i++) {
+                if (i == 0 || keys[i] != keys[i - 1]) {
+                    keys[n] = keys[i];
+                    values[n] = values[i];
+                    n++;
+                }
+            }
+            // Step 2: binary search in compacted uniques for insertion point
+            int lo = 0, hi = n;
+            while (lo < hi) {
+                int mid = (lo + hi) >>> 1;
+                if (Long.compareUnsigned(keys[mid], ikey) < 0) lo = mid + 1;
+                else hi = mid;
+            }
+            if (lo < n && keys[lo] == ikey) {
+                // Duplicate — re-spread without inserting
+                spread(keys, values, n);
+                return false;
+            }
+            // Step 3: grow if full
+            if (n >= keys.length) {
+                int newSlots = keys.length * 2;
+                keys = Arrays.copyOf(keys, newSlots);
+                values = Arrays.copyOf(values, newSlots);
+            }
+            // Step 4: shift right to make room at lo
+            System.arraycopy(keys, lo, keys, lo + 1, n - lo);
+            System.arraycopy(values, lo, values, lo + 1, n - lo);
+            keys[lo] = ikey;
+            values[lo] = val;
+            n++;
+            // Step 5: spread backward in-place (src indices <= dest, safe)
+            spread(keys, values, n);
+            return true;
+        }
+
+        // --- Overwrite all dups of a key with new value ---
+        void updateValue(long target, Object newVal) {
+            for (int i = 0; i < keys.length; i++)
+                if (keys[i] == target) values[i] = newVal;
+        }
+
+        // --- Shrink if way under-utilized ---
         void maybeShrink() {
             if (count > 0 && keys.length > MIN_CAPACITY && count <= keys.length / 4) {
-                int nc = Math.max(MIN_CAPACITY, Integer.highestOneBit(count) << 1);
-                if (nc < keys.length) {
-                    keys = Arrays.copyOf(keys, nc);
-                    values = Arrays.copyOf(values, nc);
+                int newSlots = Math.max(MIN_CAPACITY, Integer.highestOneBit(count) << 1);
+                if (newSlots < keys.length) {
+                    // Compact left, then truncate and spread
+                    int n = 0;
+                    for (int i = 0; i < keys.length; i++)
+                        if (i == 0 || keys[i] != keys[i - 1])
+                            { keys[n] = keys[i]; values[n] = values[i]; n++; }
+                    keys = Arrays.copyOf(keys, newSlots);
+                    values = Arrays.copyOf(values, newSlots);
+                    spread(keys, values, n);
                 }
             }
         }
@@ -224,6 +306,7 @@ public class KNTrie<V> extends AbstractMap<Long, V>
         }
         if (node != CompactNode.SENTINEL) {
             CompactNode c = (CompactNode) node;
+            if (c.count == 0) return null;
             int pos = c.findBase(ikey);
             return c.keys[pos] == ikey ? (V) c.values[pos] : null;
         }
@@ -236,8 +319,7 @@ public class KNTrie<V> extends AbstractMap<Long, V>
         if (root == CompactNode.SENTINEL) {
             CompactNode c = new CompactNode(MIN_CAPACITY);
             c.depth = 0;
-            c.keys[0] = ikey; c.values[0] = value; c.count = 1;
-            c.fillDups();
+            c.spread(new long[]{ikey}, new Object[]{value}, 1);
             root = c;
             size++; modCount++;
             return null;
@@ -256,8 +338,7 @@ public class KNTrie<V> extends AbstractMap<Long, V>
             if (!bm.hasBit(b)) {
                 CompactNode child = new CompactNode(MIN_CAPACITY);
                 child.depth = bm.effectiveDepth() + 1;
-                child.keys[0] = ikey; child.values[0] = value; child.count = 1;
-                child.fillDups();
+                child.spread(new long[]{ikey}, new Object[]{value}, 1);
                 bm.insertChild(b, child);
                 bm.descendantCount++;
                 for (BitmaskNode p = bm.parent; p != null; p = p.parent) p.descendantCount++;
@@ -271,29 +352,19 @@ public class KNTrie<V> extends AbstractMap<Long, V>
         CompactNode c = (CompactNode) node;
         int pos = c.findBase(ikey);
         if (c.keys[pos] == ikey) {
+            // Found — overwrite or reject
             if (onlyIfAbsent) return (V) c.values[pos];
             V old = (V) c.values[pos];
-            updateDups(c, pos, value);
+            c.updateValue(ikey, value);
             modCount++;
             return old;
         }
-        int ins = c.insertionPoint(ikey, pos);
-        if (c.count >= c.keys.length) c.grow();
-        System.arraycopy(c.keys, ins, c.keys, ins + 1, c.count - ins);
-        System.arraycopy(c.values, ins, c.values, ins + 1, c.count - ins);
-        c.keys[ins] = ikey; c.values[ins] = value; c.count++;
-        c.fillDups();
+        // Miss — insert
+        c.insertKey(ikey, value);
         for (BitmaskNode p = c.parent; p != null; p = p.parent) p.descendantCount++;
         if (c.count > COMPACT_MAX) split(c);
         size++; modCount++;
         return null;
-    }
-
-    private void updateDups(CompactNode c, int pos, Object value) {
-        long k = c.keys[pos];
-        c.values[pos] = value;
-        for (int j = pos - 1; j >= 0 && c.keys[j] == k; j--) c.values[j] = value;
-        for (int j = pos + 1; j < c.keys.length && c.keys[j] == k; j++) c.values[j] = value;
     }
 
     // === remove ===
@@ -306,20 +377,15 @@ public class KNTrie<V> extends AbstractMap<Long, V>
         }
         if (node == CompactNode.SENTINEL) return null;
         CompactNode c = (CompactNode) node;
-        int pos = c.findBase(ikey);
-        if (c.keys[pos] != ikey) return null;
-        V old = (V) c.values[pos];
-        System.arraycopy(c.keys, pos + 1, c.keys, pos, c.count - pos - 1);
-        System.arraycopy(c.values, pos + 1, c.values, pos, c.count - pos - 1);
-        c.count--;
-        c.values[c.count] = null;
+        if (c.count == 0) return null;
+        Object old = c.eraseKey(ikey);
+        if (old == null) return null;
         c.maybeShrink();
-        if (c.count > 0) c.fillDups();
         for (BitmaskNode p = c.parent; p != null; p = p.parent) p.descendantCount--;
         if (c.count == 0) removeEmptyLeaf(c);
         else checkCoalesce(c.parent);
         size--; modCount++;
-        return old;
+        return (V) old;
     }
 
     private void removeEmptyLeaf(CompactNode c) {
@@ -343,30 +409,30 @@ public class KNTrie<V> extends AbstractMap<Long, V>
         int d = leaf.depth;
         if (d >= KEY_BYTES) return;
 
-        // Find common prefix among all entries starting at depth d
+        // Extract unique entries from spread array
+        long[] uk = new long[leaf.count];
+        Object[] uv = new Object[leaf.count];
+        int n = leaf.extractUniques(uk, uv);
+
+        // Find common prefix among unique entries
         int common = KEY_BYTES - d;
-        for (int j = 1; j < leaf.count && common > 0; j++)
+        for (int j = 1; j < n && common > 0; j++)
             for (int k = 0; k < common; k++)
-                if (byteAt(leaf.keys[0], d + k) != byteAt(leaf.keys[j], d + k))
+                if (byteAt(uk[0], d + k) != byteAt(uk[j], d + k))
                     { common = k; break; }
 
-        int dispatchDepth = d + common; // byte to branch on
-        if (dispatchDepth >= KEY_BYTES) return; // all keys identical prefix
+        int dispatchDepth = d + common;
+        if (dispatchDepth >= KEY_BYTES) return;
 
-        // Group by byte at dispatchDepth
-        int[] groupStart = new int[256];
+        // Group unique entries by byte at dispatchDepth
         int[] groupCount = new int[256];
-        Arrays.fill(groupStart, -1);
-        for (int i = 0; i < leaf.count; i++) {
-            int b = byteAt(leaf.keys[i], dispatchDepth);
-            if (groupStart[b] < 0) groupStart[b] = i;
-            groupCount[b]++;
-        }
+        for (int i = 0; i < n; i++)
+            groupCount[byteAt(uk[i], dispatchDepth)]++;
 
         BitmaskNode bm = new BitmaskNode();
         bm.depth = d;
-        bm.skip = common > 0 ? extractSkip(leaf.keys[0], d, common) : null;
-        bm.descendantCount = leaf.count;
+        bm.skip = common > 0 ? extractSkip(uk[0], d, common) : null;
+        bm.descendantCount = n;
 
         int cc = 0;
         for (int b = 0; b < 256; b++) if (groupCount[b] > 0) cc++;
@@ -375,6 +441,7 @@ public class KNTrie<V> extends AbstractMap<Long, V>
         bm.children[cc + 1] = CompactNode.SENTINEL;
 
         int slot = 1;
+        int upos = 0; // position in unique arrays (sorted, so groups are contiguous)
         for (int b = 0; b < 256; b++) {
             if (groupCount[b] == 0) continue;
             bm.setBit(b);
@@ -383,12 +450,10 @@ public class KNTrie<V> extends AbstractMap<Long, V>
             child.depth = dispatchDepth + 1;
             child.parent = bm;
             child.parentByte = b;
-            int gs = groupStart[b];
-            System.arraycopy(leaf.keys, gs, child.keys, 0, gc);
-            System.arraycopy(leaf.values, gs, child.values, 0, gc);
-            child.count = gc;
-            child.fillDups();
+            child.spread(Arrays.copyOfRange(uk, upos, upos + gc),
+                         Arrays.copyOfRange(uv, upos, upos + gc), gc);
             bm.children[slot++] = child;
+            upos += gc;
         }
         replaceNode(leaf, bm);
         for (int i = 1; i < bm.children.length - 1; i++)
@@ -419,10 +484,7 @@ public class KNTrie<V> extends AbstractMap<Long, V>
         // New leaf for the new key
         CompactNode nl = new CompactNode(MIN_CAPACITY);
         nl.depth = splitDepth + 1;
-        nl.keys[0] = ikey;
-        nl.values[0] = value;
-        nl.count = 1;
-        nl.fillDups();
+        nl.spread(new long[]{ikey}, new Object[]{value}, 1);
 
         // Build children: [sentinel, child_lo, child_hi, eos=sentinel]
         bm.children = new Node[4];
@@ -460,20 +522,24 @@ public class KNTrie<V> extends AbstractMap<Long, V>
         collectEntries(bm, ak, av);
         int total = ak.size();
         if (total == 0) { replaceNode(bm, CompactNode.SENTINEL); return; }
+        long[] uk = new long[total];
+        Object[] uv = new Object[total];
+        for (int i = 0; i < total; i++) { uk[i] = ak.get(i)[0]; uv[i] = av.get(i)[0]; }
         CompactNode c = new CompactNode(total);
-        c.depth = bm.depth;  // no skip on compact
-        for (int i = 0; i < total; i++) { c.keys[i] = ak.get(i)[0]; c.values[i] = av.get(i)[0]; }
-        c.count = total;
-        c.fillDups();
+        c.depth = bm.depth;
+        c.spread(uk, uv, total);
         replaceNode(bm, c);
     }
 
     private void collectEntries(Node node, List<long[]> keys, List<Object[]> vals) {
         if (node == CompactNode.SENTINEL) return;
         if (node instanceof CompactNode c) {
-            for (int i = 0; i < c.count; i++) {
-                keys.add(new long[]{c.keys[i]});
-                vals.add(new Object[]{c.values[i]});
+            // Extract uniques from spread array
+            for (int i = 0; i < c.keys.length; i++) {
+                if (i == 0 || c.keys[i] != c.keys[i - 1]) {
+                    keys.add(new long[]{c.keys[i]});
+                    vals.add(new Object[]{c.values[i]});
+                }
             }
             return;
         }
@@ -569,16 +635,16 @@ public class KNTrie<V> extends AbstractMap<Long, V>
 
     @SuppressWarnings("unchecked")
     private SimpleImmutableEntry<Long, V> entryAt(CompactNode c, int i) {
-        if (c == null || i < 0 || i >= c.count) return null;
+        if (c == null || c.count == 0 || i < 0 || i >= c.keys.length) return null;
         return new SimpleImmutableEntry<>(fromInternal(c.keys[i]), (V) c.values[i]);
     }
 
     // === NavigableMap ===
     @Override public Comparator<? super Long> comparator() { return null; }
     @Override public Long firstKey() { CompactNode c = descendFirst(root); if (c == null) throw new NoSuchElementException(); return fromInternal(c.keys[0]); }
-    @Override public Long lastKey() { CompactNode c = descendLast(root); if (c == null) throw new NoSuchElementException(); return fromInternal(c.keys[c.count - 1]); }
+    @Override public Long lastKey() { CompactNode c = descendLast(root); if (c == null) throw new NoSuchElementException(); return fromInternal(c.keys[c.keys.length - 1]); }
     @Override public Entry<Long, V> firstEntry() { return entryAt(descendFirst(root), 0); }
-    @Override public Entry<Long, V> lastEntry() { CompactNode c = descendLast(root); return c == null ? null : entryAt(c, c.count - 1); }
+    @Override public Entry<Long, V> lastEntry() { CompactNode c = descendLast(root); return c == null ? null : entryAt(c, c.keys.length - 1); }
     @Override public Entry<Long, V> pollFirstEntry() { var e = firstEntry(); if (e != null) remove(e.getKey()); return e; }
     @Override public Entry<Long, V> pollLastEntry() { var e = lastEntry(); if (e != null) remove(e.getKey()); return e; }
 
@@ -630,7 +696,7 @@ public class KNTrie<V> extends AbstractMap<Long, V>
             index = 0;
         }
 
-        @Override public boolean hasNext() { return leaf != null && index < leaf.count; }
+        @Override public boolean hasNext() { return leaf != null && index < leaf.keys.length; }
 
         @Override @SuppressWarnings("unchecked")
         public Entry<Long, V> next() {
@@ -645,11 +711,12 @@ public class KNTrie<V> extends AbstractMap<Long, V>
         }
 
         private void advance() {
-            long curKey = leaf.keys[index];
+            // Skip past all dups of current key
             index++;
-            while (index < leaf.count && leaf.keys[index] == curKey) index++;
-            if (index < leaf.count) return;
+            while (index < leaf.keys.length && leaf.keys[index] == leaf.keys[index - 1]) index++;
+            if (index < leaf.keys.length) return;
 
+            // Walk up to next leaf
             Node node = leaf;
             while (node.parent != null) {
                 BitmaskNode bm = node.parent;
@@ -669,12 +736,19 @@ public class KNTrie<V> extends AbstractMap<Long, V>
             removeImpl(lastKey);
             expectedModCount = modCount;
             // Re-find position: first entry > lastKey
+            refindAfter(lastKey);
+        }
+
+        private void refindAfter(long afterKey) {
             leaf = descendFirst(root);
             index = 0;
             if (leaf == null) return;
             while (leaf != null) {
-                for (; index < leaf.count; index++)
-                    if (Long.compareUnsigned(leaf.keys[index], lastKey) > 0) return;
+                for (; index < leaf.keys.length; index++) {
+                    // Skip dups
+                    if (index > 0 && leaf.keys[index] == leaf.keys[index - 1]) continue;
+                    if (Long.compareUnsigned(leaf.keys[index], afterKey) > 0) return;
+                }
                 Node node = leaf; leaf = null;
                 while (node.parent != null) {
                     BitmaskNode bm = node.parent;
