@@ -40,28 +40,27 @@ public class KNTrie<V> extends AbstractMap<Long, V>
         void setBit(int idx) { int w = idx >> 6; setWord(w, word(w) | (1L << (idx & 63))); }
         void clearBit(int idx) { int w = idx >> 6; setWord(w, word(w) & ~(1L << (idx & 63))); }
 
-        int countBelow(int idx) {
-            int w = idx >> 6, b = idx & 63;
-            long mask = (b == 0) ? 0 : ((-1L) >>> (64 - b));
-            int n = Long.bitCount(word(w) & mask);
-            if (w > 0) n += Long.bitCount(b0);
-            if (w > 1) n += Long.bitCount(b1);
-            if (w > 2) n += Long.bitCount(b2);
-            return n;
-        }
-
-        int slotOf(int idx) { return countBelow(idx) + 1; }
-
-        Node dispatch(int idx) {
+        // 1-based slot for a known-present bit
+        int slotOf(int idx) {
             int w = idx >> 6, b = idx & 63;
             long shifted = word(w) << (63 - b);
-            boolean hit = (shifted & Long.MIN_VALUE) != 0;
-            if (!hit) return children[0];
             int slot = Long.bitCount(shifted);
             if (w > 0) slot += Long.bitCount(b0);
             if (w > 1) slot += Long.bitCount(b1);
             if (w > 2) slot += Long.bitCount(b2);
-            return children[slot];
+            return slot;
+        }
+
+        // Branchless dispatch: returns child on hit, sentinel on miss
+        Node dispatch(int idx) {
+            int w = idx >> 6, b = idx & 63;
+            long shifted = word(w) << (63 - b);
+            int slot = Long.bitCount(shifted);
+            if (w > 0) slot += Long.bitCount(b0);
+            if (w > 1) slot += Long.bitCount(b1);
+            if (w > 2) slot += Long.bitCount(b2);
+            boolean hit = (shifted & Long.MIN_VALUE) != 0;
+            return children[hit ? slot : 0];
         }
 
         int childCount() {
