@@ -124,16 +124,6 @@ private:
     }
 
     // ------------------------------------------------------------------
-    // append_unmapped — reconstruct user-facing key bytes from mapped
-    // ------------------------------------------------------------------
-
-    static void append_unmapped(std::string& out,
-                                const uint8_t* data, uint32_t len) {
-        for (uint32_t i = 0; i < len; ++i)
-            out.push_back(static_cast<char>(CHARMAP::from_index(data[i])));
-    }
-
-    // ------------------------------------------------------------------
     // unwind_child — shared by prefix_erase and prefix_split
     // ------------------------------------------------------------------
 
@@ -896,6 +886,12 @@ public:
         }
         size_--;
         return true;
+    }
+
+    static void append_unmapped(std::string& out,
+                                const uint8_t* data, uint32_t len) {
+        for (uint32_t i = 0; i < len; ++i)
+            out.push_back(static_cast<char>(CHARMAP::from_index(data[i])));
     }
 
     uint64_t* reskip_with_prefix(uint64_t* node,
