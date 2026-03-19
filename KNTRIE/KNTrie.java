@@ -398,40 +398,74 @@ public class KNTrie<V> extends AbstractMap<Long, V>
         if (common > 0) c.skip = extractSkip(c.keys[0], c.depth, common);
     }
 
-    // === splitSkip ===
+    // === splitSkip: key diverges within a node's skip prefix ===
     private void splitSkip(Node node, long ikey, V value, int mm) {
+        // Save original parent linkage before we modify anything
+        BitmaskNode oldParent = node.parent;
+        int oldParentByte = node.parentByte;
+
         int splitDepth = node.depth + mm;
+
+        // New bitmask at the mismatch point
         BitmaskNode bm = new BitmaskNode();
         bm.depth = node.depth;
         bm.skip = mm > 0 ? extractSkip(ikey, node.depth, mm) : null;
         bm.descendantCount = countEntries(node) + 1;
 
+        // The two bytes that diverge
         int existByte = node.skip[mm] & 0xFF;
         int newByte = byteAt(ikey, splitDepth);
 
-        // Fix existing node's skip
+        // Trim existing node's skip: remove [0..mm] (prefix + mismatch byte)
         int remaining = node.skip.length - mm - 1;
-        node.skip = remaining > 0 ? Arrays.copyOfRange(node.skip, mm + 1, node.skip.length) : null;
+        node.skip = remaining > 0
+            ? Arrays.copyOfRange(node.skip, mm + 1, node.skip.length) : null;
         node.depth = splitDepth + 1;
 
-        // New leaf
+        // New leaf for the new key
         CompactNode nl = new CompactNode(MIN_CAPACITY);
         nl.depth = splitDepth + 1;
-        nl.skip = extractSkip(ikey, nl.depth, KEY_BYTES - nl.depth);
-        nl.keys[0] = ikey; nl.values[0] = value; nl.count = 1;
+        int nlSkipLen = KEY_BYTES - nl.depth;
+        nl.skip = nlSkipLen > 0 ? extractSkip(ikey, nl.depth, nlSkipLen) : null;
+        nl.keys[0] = ikey;
+        nl.values[0] = value;
+        nl.count = 1;
         nl.fillDups();
 
-        int cc = 2;
-        bm.children = new Node[cc + 2];
+        // Build bitmask children: [sentinel, child_lo, child_hi, eos=sentinel]
+        bm.children = new Node[4]; // sentinel + 2 children + eos
         bm.children[0] = CompactNode.SENTINEL;
-        bm.children[cc + 1] = CompactNode.SENTINEL;
+        bm.children[3] = CompactNode.SENTINEL; // eos
         bm.setBit(existByte);
         bm.setBit(newByte);
-        if (existByte < newByte) { bm.children[1] = node; bm.children[2] = nl; }
-        else { bm.children[1] = nl; bm.children[2] = node; }
-        node.parent = bm; node.parentByte = existByte;
-        nl.parent = bm; nl.parentByte = newByte;
-        replaceNode(node, bm);
+
+        // Insert in bitmap order
+        if (existByte < newByte) {
+            bm.children[1] = node;
+            bm.children[2] = nl;
+        } else {
+            bm.children[1] = nl;
+            bm.children[2] = node;
+        }
+
+        // Set parent pointers for children → bm
+        node.parent = bm;
+        node.parentByte = existByte;
+        nl.parent = bm;
+        nl.parentByte = newByte;
+
+        // Link bm into the tree at node's old position
+        bm.parent = oldParent;
+        bm.parentByte = oldParentByte;
+        if (oldParent == null) {
+            root = bm;
+        } else {
+            if (oldParentByte == PARENT_EOS) {
+                oldParent.setEosChild(bm);
+            } else {
+                oldParent.replaceChild(oldParentByte, bm);
+            }
+        }
     }
 
     // === coalesce: bitmask → compact ===
@@ -662,25 +696,34 @@ public class KNTrie<V> extends AbstractMap<Long, V>
 
     // === Main — smoke test ===
     public static void main(String[] args) {
+        System.out.println("Starting smoke test..."); System.out.flush();
         KNTrie<String> t = new KNTrie<>();
 
         // Basic CRUD
+        System.out.println("  put 10..."); System.out.flush();
         t.put(10L, "ten");
+        System.out.println("  put 20..."); System.out.flush();
         t.put(20L, "twenty");
+        System.out.println("  put 5..."); System.out.flush();
         t.put(5L, "five");
+        System.out.println("  put -1..."); System.out.flush();
         t.put(-1L, "minus_one");
+        System.out.println("  size=" + t.size()); System.out.flush();
         assert t.size() == 4 : "size=" + t.size();
-        assert "ten".equals(t.get(10L));
+        assert "ten".equals(t.get(10L)) : "get(10)=" + t.get(10L);
         assert t.containsKey(5L);
         assert !t.containsKey(99L);
+        System.out.println("  CRUD ok"); System.out.flush();
 
         // Overwrite
         assert "ten".equals(t.put(10L, "TEN"));
         assert "TEN".equals(t.get(10L));
+        System.out.println("  Overwrite ok"); System.out.flush();
 
         // Remove
         assert "five".equals(t.remove(5L));
         assert t.size() == 3;
+        System.out.println("  Remove ok"); System.out.flush();
 
         // Ordered iteration
         TreeMap<Long, String> ref = new TreeMap<>();
@@ -690,25 +733,30 @@ public class KNTrie<V> extends AbstractMap<Long, V>
         int checked = 0;
         while (ti.hasNext() && ri.hasNext()) {
             var e = ti.next(); var r = ri.next();
+            System.out.println("    iter: " + e.getKey() + "=" + e.getValue() + " vs " + r.getKey() + "=" + r.getValue()); System.out.flush();
             assert e.getKey().equals(r.getKey()) : e.getKey() + " != " + r.getKey();
             assert e.getValue().equals(r.getValue()) : e.getValue() + " != " + r.getValue();
             checked++;
         }
         assert !ti.hasNext() && !ri.hasNext() && checked == 3;
-        System.out.println("Basic: PASS (" + checked + " entries verified)");
+        System.out.println("Basic: PASS (" + checked + " entries verified)"); System.out.flush();
 
         // NavigableMap
+        System.out.println("  firstKey=" + t.firstKey() + " lastKey=" + t.lastKey()); System.out.flush();
         assert t.firstKey() == -1L;
         assert t.lastKey() == 20L;
-        System.out.println("NavigableMap basics: PASS");
+        System.out.println("NavigableMap basics: PASS"); System.out.flush();
 
         // Bulk
         t.clear();
         TreeMap<Long, Integer> ref2 = new TreeMap<>();
         var rng = new java.util.Random(42);
+        System.out.println("  Inserting 10K..."); System.out.flush();
         for (int i = 0; i < 10000; i++) { long k = rng.nextLong(); t.put(k, "v" + i); ref2.put(k, i); }
+        System.out.println("  trie.size=" + t.size() + " ref.size=" + ref2.size()); System.out.flush();
         assert t.size() == ref2.size() : "size " + t.size() + " != " + ref2.size();
 
+        System.out.println("  Verifying iteration order..."); System.out.flush();
         var tit = t.entrySet().iterator();
         var rit2 = ref2.keySet().iterator();
         checked = 0;
@@ -718,25 +766,26 @@ public class KNTrie<V> extends AbstractMap<Long, V>
             checked++;
         }
         assert !tit.hasNext() && !rit2.hasNext();
-        System.out.println("Bulk 10K: PASS (" + checked + " entries verified)");
+        System.out.println("Bulk 10K: PASS (" + checked + " entries verified)"); System.out.flush();
 
         // insertIfAbsent
         t.clear();
         assert t.insertIfAbsent(42, "first");
         assert !t.insertIfAbsent(42, "second");
         assert "first".equals(t.get(42L));
-        System.out.println("insertIfAbsent: PASS");
+        System.out.println("insertIfAbsent: PASS"); System.out.flush();
 
         // Iterator remove
         t.clear();
         for (int i = 0; i < 100; i++) t.put((long) i, "v" + i);
+        System.out.println("  Iterator.remove on 100 entries..."); System.out.flush();
         var it = t.entrySet().iterator();
         while (it.hasNext()) { var e = it.next(); if (e.getKey() % 2 == 0) it.remove(); }
         assert t.size() == 50;
         assert !t.containsKey(0L);
         assert t.containsKey(1L);
-        System.out.println("Iterator.remove: PASS (size=" + t.size() + ")");
+        System.out.println("Iterator.remove: PASS (size=" + t.size() + ")"); System.out.flush();
 
-        System.out.println("\nALL PASS");
+        System.out.println("\nALL PASS"); System.out.flush();
     }
 }
