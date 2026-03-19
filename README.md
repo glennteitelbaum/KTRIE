@@ -16,7 +16,7 @@ Concepts that apply to both implementations
 
 ## [ABSTRACT](./ktrie_abstract.md)
 
-- Each written in C++ using C++23
+- Each written in C++ using C++23, all benefit from at least -march=x86-64-v3
 
 - Each supports Python via a pybind11 wrapper
 
