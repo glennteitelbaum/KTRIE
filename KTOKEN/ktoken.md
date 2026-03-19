@@ -45,7 +45,7 @@ The category trie maps codepoints to 9 character classes: `LOWER`, `UPPER`, `OTH
 
 ## 2 C++ API
 
-`ktoken.hpp` is a single header-only library (~940 lines, depends only on `kntrie.hpp`).
+`ktoken.hpp` is a single header-only library (~940 lines, depends on `kntrie.hpp` and `kstrie.hpp`).
 
 ```cpp
 #include "ktoken.hpp"
@@ -173,22 +173,41 @@ Token-for-token identical to tiktoken. Zero divergences on both corpora.
 
 ## 5 Build and Distribution
 
-**C++ build:** CMake. C++23, `-O2 -march=x86-64-v4`. `kntrie.hpp` and `ktoken.hpp` are header-only.
+### Directory structure
 
-**Python bindings** (nanobind, wrapping the C++ template API):
+```
+ktrie/
+    kntrie/
+        kntrie.hpp  kntrie_impl.hpp  kntrie_support.hpp
+        kntrie_compact.hpp  kntrie_bitmask.hpp  kntrie_ops.hpp
+        kntrie_pyproject.toml  py_kntrie.cpp
+    kstrie/
+        kstrie.hpp  kstrie_impl.hpp  kstrie_support.hpp
+        kstrie_compact.hpp  kstrie_bitmask.hpp
+        kstrie_pyproject.toml  py_kstrie.cpp
+    ktoken/
+        ktoken.hpp  nlohmann_json.hpp
+        ktoken_pyproject.toml  py_ktoken.cpp
+```
+
+Each directory is flat — headers and source together. ktoken includes
+kntrie and kstrie headers via `../kntrie/` and `../kstrie/`.
+
+**C++ build:** C++23, `-O2 -march=x86-64-v4`. All headers are header-only.
+
+**Python bindings** (pybind11, wrapping the C++ template API):
 ```python
 import ktoken
 
-enc = ktoken.Encoder("cl100k_base")
-ids: list[int] = enc.encode("Hello, world!")
-text: bytes = enc.decode(ids)
-batch_ids: list[list[int]] = enc.encode_batch(texts, num_threads=8)
-trained = ktoken.train(corpus, vocab_size=100256, model="cl100k")
+tok = ktoken.tiktoken.Cl100k("cl100k_base.tiktoken")
+ids: list[int] = tok.encode("Hello, world!")
+text: bytes = tok.decode(ids)
+trained = ktoken.tiktoken.Cl100k.train(corpus=b"...", vocab_size=100256)
 ```
 
 **Wheels:** `manylinux_2_28_x86_64`, `macosx_14_0_arm64`, `win_amd64`.
 
-**Dependencies:** nanobind, numpy (build-time). No regex engine. No protobuf. kntrie + ktoken are header-only. Unicode character database embedded at build time (category trie builds in 40ms).
+**Dependencies:** pybind11 (build-time). No regex engine. No protobuf. All C++ is header-only. Unicode character database embedded at build time (category trie builds in 40ms).
 
 ## 6 Validation
 
