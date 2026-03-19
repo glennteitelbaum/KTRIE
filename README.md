@@ -16,5 +16,10 @@ Concepts that apply to both implementations
 
 ## [ABSTRACT](./ktrie_abstract.md)
 
+- Each written in C++ using C++23
+
+- Each supports Python via a pybind11 wrapper
+
+- Be aware that: KNTRIE/KSTRIE Use snapshot iterators, so a modify method is included
 
 *Note: This was done vibe coding with Claude Opus 4.6*
