@@ -142,16 +142,22 @@ public class KNTrie<V> extends AbstractMap<Long, V>
             count = 0;
         }
 
-        int bsearch(long target) {
-            int lo = 0, hi = count;
-            while (lo < hi) {
-                int mid = (lo + hi) >>> 1;
-                int cmp = Long.compareUnsigned(keys[mid], target);
-                if (cmp < 0) lo = mid + 1;
-                else if (cmp > 0) hi = mid;
-                else return mid;
+        // Branchless binary search: returns index of last key <= target.
+        // Requires keys.length is power of 2 with dup fill.
+        int findBase(long target) {
+            int base = 0, n = keys.length;
+            while (n > 1) {
+                n >>>= 1;
+                base += Long.compareUnsigned(keys[base + n], target) <= 0 ? n : 0;
             }
-            return -(lo + 1);
+            return base;
+        }
+
+        // Insertion point from findBase result: first position > target, clamped to count.
+        int insertionPoint(long target, int fbPos) {
+            return Math.min(
+                Long.compareUnsigned(keys[fbPos], target) < 0 ? fbPos + 1 : fbPos,
+                count);
         }
 
         void fillDups() {
@@ -219,8 +225,8 @@ public class KNTrie<V> extends AbstractMap<Long, V>
         }
         if (node != CompactNode.SENTINEL) {
             CompactNode c = (CompactNode) node;
-            int pos = c.bsearch(ikey);
-            return pos >= 0 ? (V) c.values[pos] : null;
+            int pos = c.findBase(ikey);
+            return c.keys[pos] == ikey ? (V) c.values[pos] : null;
         }
         return null;
     }
@@ -264,15 +270,15 @@ public class KNTrie<V> extends AbstractMap<Long, V>
 
         // Landed at a compact leaf
         CompactNode c = (CompactNode) node;
-        int pos = c.bsearch(ikey);
-        if (pos >= 0) {
+        int pos = c.findBase(ikey);
+        if (c.keys[pos] == ikey) {
             if (onlyIfAbsent) return (V) c.values[pos];
             V old = (V) c.values[pos];
             updateDups(c, pos, value);
             modCount++;
             return old;
         }
-        int ins = -(pos + 1);
+        int ins = c.insertionPoint(ikey, pos);
         if (c.count >= c.keys.length) c.grow();
         System.arraycopy(c.keys, ins, c.keys, ins + 1, c.count - ins);
         System.arraycopy(c.values, ins, c.values, ins + 1, c.count - ins);
@@ -301,8 +307,8 @@ public class KNTrie<V> extends AbstractMap<Long, V>
         }
         if (node == CompactNode.SENTINEL) return null;
         CompactNode c = (CompactNode) node;
-        int pos = c.bsearch(ikey);
-        if (pos < 0) return null;
+        int pos = c.findBase(ikey);
+        if (c.keys[pos] != ikey) return null;
         V old = (V) c.values[pos];
         System.arraycopy(c.keys, pos + 1, c.keys, pos, c.count - pos - 1);
         System.arraycopy(c.values, pos + 1, c.values, pos, c.count - pos - 1);
