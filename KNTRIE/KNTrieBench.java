@@ -6,8 +6,8 @@ import java.util.*;
 
 public class KNTrieBench {
 
-    static final int WARMUP = 3;
-    static final int RUNS = 5;
+    static final int WARMUP = 8;
+    static final int RUNS = 7;
     static final int[] SIZES = {1_000, 10_000, 100_000};
 
     static long[] randomKeys(int n, long seed) {
@@ -86,10 +86,14 @@ public class KNTrieBench {
             "Container", "put ns/op", "get ns/op", "miss ns/op", "iter ms", "rm ns/op", "MB");
 
         for (String name : new String[]{"KNTrie", "TreeMap", "HashMap"}) {
-            // Warmup
+            // Warm all paths: put, get, miss, iterate, remove
             for (int w = 0; w < WARMUP; w++) {
                 Map<Long, Integer> m = makeMap(name);
-                benchPut(m, keys); benchGet(m, keys); m.clear();
+                benchPut(m, keys);
+                benchGet(m, keys);
+                benchGetMiss(m, missKeys);
+                benchIterate(m);
+                benchRemove(m, keys);
             }
 
             // Memory: insert, measure, then benchmark
@@ -153,7 +157,9 @@ public class KNTrieBench {
         for (String name : new String[]{"KNTrie", "TreeMap", "HashMap"}) {
             for (int w = 0; w < WARMUP; w++) {
                 Map<Long, Integer> m = makeMap(name);
-                benchPut(m, keys); benchGet(m, keys); m.clear();
+                benchPut(m, keys);
+                benchGet(m, keys);
+                benchRemove(m, keys);
             }
 
             long memBefore = usedMemory();
