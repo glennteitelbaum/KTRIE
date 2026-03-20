@@ -6,8 +6,8 @@ import java.util.*;
 
 public class KSTrieBench {
 
-    static final int WARMUP = 3;
-    static final int RUNS = 5;
+    static final int WARMUP = 8;
+    static final int RUNS = 7;
     static final int[] SIZES = {1_000, 10_000, 100_000};
 
     // === Key generators ===
@@ -103,9 +103,14 @@ public class KSTrieBench {
             "Container", "put ns/op", "get ns/op", "miss ns/op", "iter ms", "rm ns/op", "MB");
 
         for (String name : new String[]{"KSTrie", "TreeMap", "HashMap"}) {
+            // Warm all paths: put, get, miss, iterate, remove
             for (int w = 0; w < WARMUP; w++) {
                 Map<String, Integer> m = makeMap(name);
-                benchPut(m, keys); benchGet(m, keys); m.clear();
+                benchPut(m, keys);
+                benchGet(m, keys);
+                benchGetMiss(m, missKeys);
+                benchIterate(m);
+                benchRemove(m, keys);
             }
 
             long memBefore = usedMemory();
