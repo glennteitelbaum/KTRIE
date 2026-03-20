@@ -689,6 +689,178 @@ public class KNTrie<V> extends AbstractMap<Long, V>
         return new SimpleImmutableEntry<>(fromInternal(c.keys[i]), (V) c.values[i]);
     }
 
+    // === Navigation helpers ===
+    // First/last entry within a subtree
+    @SuppressWarnings("unchecked")
+    private SimpleImmutableEntry<Long, V> firstEntryIn(Node node) {
+        CompactNode c = descendFirst(node);
+        return c != null ? entryAt(c, 0) : null;
+    }
+
+    @SuppressWarnings("unchecked")
+    private SimpleImmutableEntry<Long, V> lastEntryIn(Node node) {
+        CompactNode c = descendLast(node);
+        return c != null ? entryAt(c, c.keys.length - 1) : null;
+    }
+
+    // Next entry after entire subtree rooted at 'node' (walk up, find next sibling)
+    private SimpleImmutableEntry<Long, V> nextEntryAfter(Node node) {
+        while (node.parent != null) {
+            BitmaskNode bm = node.parent;
+            int nextBit = (node.parentByte == PARENT_EOS)
+                ? bm.findNextSet(0)
+                : bm.findNextSet(node.parentByte + 1);
+            if (nextBit >= 0) {
+                var e = firstEntryIn(bm.children[bm.slotOf(nextBit)]);
+                if (e != null) return e;
+            }
+            node = bm;
+        }
+        return null;
+    }
+
+    // Previous entry before entire subtree rooted at 'node' (walk up, find prev sibling)
+    private SimpleImmutableEntry<Long, V> prevEntryBefore(Node node) {
+        while (node.parent != null) {
+            BitmaskNode bm = node.parent;
+            if (node.parentByte == PARENT_EOS) {
+                // EOS is first in order — nothing before it at this level
+                node = bm;
+                continue;
+            }
+            int prevBit = bm.findPrevSet(node.parentByte - 1);
+            if (prevBit >= 0) {
+                var e = lastEntryIn(bm.children[bm.slotOf(prevBit)]);
+                if (e != null) return e;
+            }
+            // Check EOS (sorts before all byte children)
+            if (bm.hasEos()) {
+                var e = lastEntryIn(bm.eosChild());
+                if (e != null) return e;
+            }
+            node = bm;
+        }
+        return null;
+    }
+
+    // === ceilingImpl: first entry >= ikey ===
+    @SuppressWarnings("unchecked")
+    private SimpleImmutableEntry<Long, V> ceilingImpl(long ikey) {
+        Node node = root;
+        while (node instanceof BitmaskNode bm) {
+            int mm = skipMismatch(bm, ikey);
+            if (mm >= 0) {
+                int skipByte = bm.skip[mm] & 0xFF;
+                int keyByte = byteAt(ikey, bm.depth + mm);
+                if (keyByte < skipByte) return firstEntryIn(bm);
+                else return nextEntryAfter(bm);
+            }
+            int b = byteAt(ikey, bm.effectiveDepth());
+            Node child = bm.dispatch(b);
+            if (child == CompactNode.SENTINEL) {
+                // Bit not set — find next set bit
+                int next = bm.findNextSet(b + 1);
+                if (next >= 0) return firstEntryIn(bm.children[bm.slotOf(next)]);
+                return nextEntryAfter(bm);
+            }
+            node = child;
+        }
+        if (node == CompactNode.SENTINEL) return null;
+        CompactNode c = (CompactNode) node;
+        int pos = c.findBase(ikey);
+        if (c.keys[pos] == ikey) return entryAt(c, pos);
+        // findBase: keys[pos] <= ikey. If keys[pos] < ikey, ceiling is pos+1
+        if (Long.compareUnsigned(c.keys[pos], ikey) > 0) return entryAt(c, pos); // all entries > ikey, pos=0
+        if (pos + 1 < c.keys.length) return entryAt(c, pos + 1);
+        return nextEntryAfter(c);
+    }
+
+    // === floorImpl: last entry <= ikey ===
+    @SuppressWarnings("unchecked")
+    private SimpleImmutableEntry<Long, V> floorImpl(long ikey) {
+        Node node = root;
+        while (node instanceof BitmaskNode bm) {
+            int mm = skipMismatch(bm, ikey);
+            if (mm >= 0) {
+                int skipByte = bm.skip[mm] & 0xFF;
+                int keyByte = byteAt(ikey, bm.depth + mm);
+                if (keyByte > skipByte) return lastEntryIn(bm);
+                else return prevEntryBefore(bm);
+            }
+            int b = byteAt(ikey, bm.effectiveDepth());
+            Node child = bm.dispatch(b);
+            if (child == CompactNode.SENTINEL) {
+                // Bit not set — find prev set bit
+                int prev = bm.findPrevSet(b - 1);
+                if (prev >= 0) return lastEntryIn(bm.children[bm.slotOf(prev)]);
+                if (bm.hasEos()) return lastEntryIn(bm.eosChild());
+                return prevEntryBefore(bm);
+            }
+            node = child;
+        }
+        if (node == CompactNode.SENTINEL) return null;
+        CompactNode c = (CompactNode) node;
+        int pos = c.findBase(ikey);
+        // findBase: keys[pos] is last <= ikey. But if all entries > ikey, pos=0 and keys[0] > ikey
+        if (Long.compareUnsigned(c.keys[pos], ikey) > 0) return prevEntryBefore(c);
+        return entryAt(c, pos);
+    }
+
+    // === higherImpl: first entry > ikey ===
+    private SimpleImmutableEntry<Long, V> higherImpl(long ikey) {
+        // ceiling of ikey, skip if exact match
+        var e = ceilingImpl(ikey);
+        if (e != null && toInternal(e.getKey()) == ikey) {
+            // Exact match — need next distinct key
+            // Find the node, skip past all dups of ikey
+            return ceilingAfter(ikey);
+        }
+        return e;
+    }
+
+    // Find first entry with key > ikey (used by higherImpl when ceiling found exact match)
+    @SuppressWarnings("unchecked")
+    private SimpleImmutableEntry<Long, V> ceilingAfter(long ikey) {
+        // Descend to the leaf containing ikey, then advance past it
+        Node node = root;
+        while (node instanceof BitmaskNode bm) {
+            if (!matchSkip(bm, ikey)) return null; // shouldn't happen, key exists
+            node = bm.dispatch(byteAt(ikey, bm.effectiveDepth()));
+        }
+        if (node == CompactNode.SENTINEL) return null;
+        CompactNode c = (CompactNode) node;
+        int pos = c.findBase(ikey);
+        // Skip past all dups of ikey
+        while (pos < c.keys.length - 1 && c.keys[pos + 1] == ikey) pos++;
+        if (pos + 1 < c.keys.length) return entryAt(c, pos + 1);
+        return nextEntryAfter(c);
+    }
+
+    // === lowerImpl: last entry < ikey ===
+    private SimpleImmutableEntry<Long, V> lowerImpl(long ikey) {
+        var e = floorImpl(ikey);
+        if (e != null && toInternal(e.getKey()) == ikey) {
+            return floorBefore(ikey);
+        }
+        return e;
+    }
+
+    @SuppressWarnings("unchecked")
+    private SimpleImmutableEntry<Long, V> floorBefore(long ikey) {
+        Node node = root;
+        while (node instanceof BitmaskNode bm) {
+            if (!matchSkip(bm, ikey)) return null;
+            node = bm.dispatch(byteAt(ikey, bm.effectiveDepth()));
+        }
+        if (node == CompactNode.SENTINEL) return null;
+        CompactNode c = (CompactNode) node;
+        int pos = c.findBase(ikey);
+        // Skip backward past all dups of ikey
+        while (pos > 0 && c.keys[pos - 1] == ikey) pos--;
+        if (pos > 0) return entryAt(c, pos - 1);
+        return prevEntryBefore(c);
+    }
+
     // === NavigableMap ===
     @Override public Comparator<? super Long> comparator() { return null; }
     @Override public Long firstKey() { CompactNode c = descendFirst(root); if (c == null) throw new NoSuchElementException(); return fromInternal(c.keys[0]); }
@@ -698,32 +870,137 @@ public class KNTrie<V> extends AbstractMap<Long, V>
     @Override public Entry<Long, V> pollFirstEntry() { var e = firstEntry(); if (e != null) remove(e.getKey()); return e; }
     @Override public Entry<Long, V> pollLastEntry() { var e = lastEntry(); if (e != null) remove(e.getKey()); return e; }
 
-    // lowerEntry/higherEntry: O(N) scan for now — proper descent is follow-up
-    @Override public Entry<Long, V> lowerEntry(Long key) {
-        Entry<Long, V> r = null;
-        for (var e : entrySet()) { if (e.getKey() < key) r = e; else break; }
-        return r;
-    }
-    @Override public Entry<Long, V> higherEntry(Long key) {
-        for (var e : entrySet()) if (e.getKey() > key) return e;
-        return null;
-    }
-    @Override public Entry<Long, V> floorEntry(Long key) { V v = findImpl(toInternal(key)); return v != null ? new SimpleImmutableEntry<>(key, v) : lowerEntry(key); }
-    @Override public Entry<Long, V> ceilingEntry(Long key) { V v = findImpl(toInternal(key)); return v != null ? new SimpleImmutableEntry<>(key, v) : higherEntry(key); }
+    @Override public Entry<Long, V> ceilingEntry(Long key) { return ceilingImpl(toInternal(key)); }
+    @Override public Entry<Long, V> floorEntry(Long key) { return floorImpl(toInternal(key)); }
+    @Override public Entry<Long, V> higherEntry(Long key) { return higherImpl(toInternal(key)); }
+    @Override public Entry<Long, V> lowerEntry(Long key) { return lowerImpl(toInternal(key)); }
     @Override public Long floorKey(Long k) { var e = floorEntry(k); return e == null ? null : e.getKey(); }
     @Override public Long ceilingKey(Long k) { var e = ceilingEntry(k); return e == null ? null : e.getKey(); }
     @Override public Long lowerKey(Long k) { var e = lowerEntry(k); return e == null ? null : e.getKey(); }
     @Override public Long higherKey(Long k) { var e = higherEntry(k); return e == null ? null : e.getKey(); }
 
-    @Override public NavigableMap<Long, V> descendingMap() { throw new UnsupportedOperationException("TODO"); }
+    // === NavigableMap views ===
     @Override public NavigableSet<Long> navigableKeySet() { throw new UnsupportedOperationException("TODO"); }
     @Override public NavigableSet<Long> descendingKeySet() { throw new UnsupportedOperationException("TODO"); }
-    @Override public NavigableMap<Long, V> subMap(Long a, boolean ai, Long b, boolean bi) { throw new UnsupportedOperationException("TODO"); }
-    @Override public NavigableMap<Long, V> headMap(Long t, boolean i) { throw new UnsupportedOperationException("TODO"); }
-    @Override public NavigableMap<Long, V> tailMap(Long f, boolean i) { throw new UnsupportedOperationException("TODO"); }
+    @Override public NavigableMap<Long, V> descendingMap() { throw new UnsupportedOperationException("TODO"); }
+
+    @Override public NavigableMap<Long, V> subMap(Long fromKey, boolean fromInclusive, Long toKey, boolean toInclusive) {
+        return new SubMap(fromKey, fromInclusive, toKey, toInclusive);
+    }
+    @Override public NavigableMap<Long, V> headMap(Long toKey, boolean inclusive) {
+        return new SubMap(null, true, toKey, inclusive);
+    }
+    @Override public NavigableMap<Long, V> tailMap(Long fromKey, boolean inclusive) {
+        return new SubMap(fromKey, inclusive, null, true);
+    }
     @Override public SortedMap<Long, V> subMap(Long a, Long b) { return subMap(a, true, b, false); }
     @Override public SortedMap<Long, V> headMap(Long t) { return headMap(t, false); }
     @Override public SortedMap<Long, V> tailMap(Long f) { return tailMap(f, true); }
+
+    // === SubMap view ===
+    private class SubMap extends AbstractMap<Long, V> implements NavigableMap<Long, V> {
+        final Long fromKey, toKey;
+        final boolean fromInclusive, toInclusive;
+
+        SubMap(Long from, boolean fi, Long to, boolean ti) {
+            this.fromKey = from; this.fromInclusive = fi;
+            this.toKey = to; this.toInclusive = ti;
+        }
+
+        private boolean inRange(Long key) {
+            if (fromKey != null) {
+                int c = Long.compare(key, fromKey);
+                if (c < 0 || (c == 0 && !fromInclusive)) return false;
+            }
+            if (toKey != null) {
+                int c = Long.compare(key, toKey);
+                if (c > 0 || (c == 0 && !toInclusive)) return false;
+            }
+            return true;
+        }
+
+        @Override public V get(Object key) {
+            if (!(key instanceof Long k) || !inRange(k)) return null;
+            return KNTrie.this.get(k);
+        }
+
+        @Override public V put(Long key, V value) {
+            if (!inRange(key)) throw new IllegalArgumentException("key out of range");
+            return KNTrie.this.put(key, value);
+        }
+
+        @Override public int size() {
+            int n = 0;
+            for (var e : entrySet()) n++;
+            return n;
+        }
+
+        @Override public boolean containsKey(Object key) {
+            return key instanceof Long k && inRange(k) && KNTrie.this.containsKey(k);
+        }
+
+        // Starting entry for iteration
+        private Entry<Long, V> loEntry() {
+            if (fromKey == null) return KNTrie.this.firstEntry();
+            return fromInclusive ? KNTrie.this.ceilingEntry(fromKey) : KNTrie.this.higherEntry(fromKey);
+        }
+
+        @Override public Set<Entry<Long, V>> entrySet() {
+            return new AbstractSet<>() {
+                @Override public int size() { return SubMap.this.size(); }
+                @Override public Iterator<Entry<Long, V>> iterator() {
+                    return new Iterator<>() {
+                        Entry<Long, V> next = loEntry();
+                        { if (next != null && !inRange(next.getKey())) next = null; }
+
+                        @Override public boolean hasNext() { return next != null; }
+                        @Override public Entry<Long, V> next() {
+                            if (next == null) throw new NoSuchElementException();
+                            Entry<Long, V> r = next;
+                            next = KNTrie.this.higherEntry(r.getKey());
+                            if (next != null && !inRange(next.getKey())) next = null;
+                            return r;
+                        }
+                    };
+                }
+            };
+        }
+
+        // NavigableMap methods delegate to parent with range checks
+        @Override public Comparator<? super Long> comparator() { return null; }
+        @Override public Long firstKey() { var e = loEntry(); if (e == null || !inRange(e.getKey())) throw new NoSuchElementException(); return e.getKey(); }
+        @Override public Long lastKey() {
+            Entry<Long, V> e = toKey != null ? (toInclusive ? KNTrie.this.floorEntry(toKey) : KNTrie.this.lowerEntry(toKey)) : KNTrie.this.lastEntry();
+            if (e == null || !inRange(e.getKey())) throw new NoSuchElementException();
+            return e.getKey();
+        }
+        @Override public Entry<Long, V> firstEntry() { var e = loEntry(); return e != null && inRange(e.getKey()) ? e : null; }
+        @Override public Entry<Long, V> lastEntry() {
+            Entry<Long, V> e = toKey != null ? (toInclusive ? KNTrie.this.floorEntry(toKey) : KNTrie.this.lowerEntry(toKey)) : KNTrie.this.lastEntry();
+            return e != null && inRange(e.getKey()) ? e : null;
+        }
+        @Override public Entry<Long, V> pollFirstEntry() { var e = firstEntry(); if (e != null) KNTrie.this.remove(e.getKey()); return e; }
+        @Override public Entry<Long, V> pollLastEntry() { var e = lastEntry(); if (e != null) KNTrie.this.remove(e.getKey()); return e; }
+
+        @Override public Entry<Long, V> ceilingEntry(Long key) { var e = KNTrie.this.ceilingEntry(key); return e != null && inRange(e.getKey()) ? e : null; }
+        @Override public Entry<Long, V> floorEntry(Long key) { var e = KNTrie.this.floorEntry(key); return e != null && inRange(e.getKey()) ? e : null; }
+        @Override public Entry<Long, V> higherEntry(Long key) { var e = KNTrie.this.higherEntry(key); return e != null && inRange(e.getKey()) ? e : null; }
+        @Override public Entry<Long, V> lowerEntry(Long key) { var e = KNTrie.this.lowerEntry(key); return e != null && inRange(e.getKey()) ? e : null; }
+        @Override public Long ceilingKey(Long k) { var e = ceilingEntry(k); return e == null ? null : e.getKey(); }
+        @Override public Long floorKey(Long k) { var e = floorEntry(k); return e == null ? null : e.getKey(); }
+        @Override public Long higherKey(Long k) { var e = higherEntry(k); return e == null ? null : e.getKey(); }
+        @Override public Long lowerKey(Long k) { var e = lowerEntry(k); return e == null ? null : e.getKey(); }
+
+        @Override public NavigableMap<Long, V> subMap(Long a, boolean ai, Long b, boolean bi) { return KNTrie.this.subMap(a, ai, b, bi); }
+        @Override public NavigableMap<Long, V> headMap(Long t, boolean i) { return KNTrie.this.headMap(t, i); }
+        @Override public NavigableMap<Long, V> tailMap(Long f, boolean i) { return KNTrie.this.tailMap(f, i); }
+        @Override public SortedMap<Long, V> subMap(Long a, Long b) { return subMap(a, true, b, false); }
+        @Override public SortedMap<Long, V> headMap(Long t) { return headMap(t, false); }
+        @Override public SortedMap<Long, V> tailMap(Long f) { return tailMap(f, true); }
+        @Override public NavigableSet<Long> navigableKeySet() { throw new UnsupportedOperationException(); }
+        @Override public NavigableSet<Long> descendingKeySet() { throw new UnsupportedOperationException(); }
+        @Override public NavigableMap<Long, V> descendingMap() { throw new UnsupportedOperationException(); }
+    }
 
     // === Iterator ===
     @Override public Set<Entry<Long, V>> entrySet() {
@@ -887,6 +1164,86 @@ public class KNTrie<V> extends AbstractMap<Long, V>
         assert !t.containsKey(0L);
         assert t.containsKey(1L);
         System.out.println("Iterator.remove: PASS (size=" + t.size() + ")"); 
+
+        // Navigation: floor/ceiling/lower/higher
+        t.clear();
+        for (int i = 0; i < 100; i += 10) t.put((long) i, "v" + i);
+        // Keys: 0, 10, 20, 30, 40, 50, 60, 70, 80, 90
+
+        // ceiling
+        assert t.ceilingKey(0L) == 0L;
+        assert t.ceilingKey(5L) == 10L;
+        assert t.ceilingKey(10L) == 10L;
+        assert t.ceilingKey(90L) == 90L;
+        assert t.ceilingKey(91L) == null;
+
+        // floor
+        assert t.floorKey(0L) == 0L;
+        assert t.floorKey(5L) == 0L;
+        assert t.floorKey(10L) == 10L;
+        assert t.floorKey(90L) == 90L;
+        assert t.floorKey(-1L) == null;
+
+        // higher
+        assert t.higherKey(0L) == 10L;
+        assert t.higherKey(5L) == 10L;
+        assert t.higherKey(89L) == 90L;
+        assert t.higherKey(90L) == null;
+
+        // lower
+        assert t.lowerKey(0L) == null;
+        assert t.lowerKey(10L) == 0L;
+        assert t.lowerKey(15L) == 10L;
+        assert t.lowerKey(91L) == 90L;
+
+        System.out.println("Navigation (floor/ceil/lower/higher): PASS");
+
+        // Verify against TreeMap at scale
+        t.clear();
+        TreeMap<Long, String> navRef = new TreeMap<>();
+        var navRng = new java.util.Random(123);
+        for (int i = 0; i < 5000; i++) {
+            long k = navRng.nextLong();
+            t.put(k, "v" + i); navRef.put(k, "v" + i);
+        }
+        navRng = new java.util.Random(456);
+        int navChecked = 0;
+        for (int i = 0; i < 1000; i++) {
+            long probe = navRng.nextLong();
+            Long tc = t.ceilingKey(probe), rc = navRef.ceilingKey(probe);
+            assert Objects.equals(tc, rc) : "ceiling(" + probe + "): " + tc + " != " + rc;
+            Long tf = t.floorKey(probe), rf = navRef.floorKey(probe);
+            assert Objects.equals(tf, rf) : "floor(" + probe + "): " + tf + " != " + rf;
+            Long th = t.higherKey(probe), rh = navRef.higherKey(probe);
+            assert Objects.equals(th, rh) : "higher(" + probe + "): " + th + " != " + rh;
+            Long tl = t.lowerKey(probe), rl = navRef.lowerKey(probe);
+            assert Objects.equals(tl, rl) : "lower(" + probe + "): " + tl + " != " + rl;
+            navChecked++;
+        }
+        System.out.println("Navigation vs TreeMap: PASS (" + navChecked + " probes)");
+
+        // SubMap view
+        t.clear();
+        for (int i = 0; i < 100; i++) t.put((long) i, "v" + i);
+        var sub = t.subMap(20L, true, 50L, false);
+        assert sub.size() == 30 : "subMap size=" + sub.size();
+        assert sub.firstKey() == 20L;
+        assert sub.lastKey() == 49L;
+        assert sub.containsKey(20L);
+        assert sub.containsKey(49L);
+        assert !sub.containsKey(50L);
+        assert !sub.containsKey(19L);
+
+        var head = t.headMap(10L, false);
+        assert head.size() == 10;
+        assert head.firstKey() == 0L;
+        assert head.lastKey() == 9L;
+
+        var tail = t.tailMap(90L, true);
+        assert tail.size() == 10;
+        assert tail.firstKey() == 90L;
+        assert tail.lastKey() == 99L;
+        System.out.println("SubMap/HeadMap/TailMap: PASS");
 
         System.out.println("\nALL PASS"); 
     }
