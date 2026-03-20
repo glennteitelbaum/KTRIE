@@ -880,9 +880,151 @@ public class KNTrie<V> extends AbstractMap<Long, V>
     @Override public Long higherKey(Long k) { var e = higherEntry(k); return e == null ? null : e.getKey(); }
 
     // === NavigableMap views ===
-    @Override public NavigableSet<Long> navigableKeySet() { throw new UnsupportedOperationException("TODO"); }
-    @Override public NavigableSet<Long> descendingKeySet() { throw new UnsupportedOperationException("TODO"); }
-    @Override public NavigableMap<Long, V> descendingMap() { throw new UnsupportedOperationException("TODO"); }
+    @Override public NavigableSet<Long> navigableKeySet() { return new KeySet(this); }
+    @Override public NavigableSet<Long> descendingKeySet() { return new KeySet(descendingMap()); }
+    @Override public NavigableMap<Long, V> descendingMap() { return new DescendingMap(); }
+
+    // === Descending iterator (spread dups: skip backward) ===
+    private class DescIter implements Iterator<Entry<Long, V>> {
+        CompactNode leaf;
+        int index;
+        int expectedModCount;
+        long lastKey;
+        boolean canRemove;
+
+        DescIter() {
+            expectedModCount = modCount;
+            leaf = descendLast(root);
+            index = (leaf != null) ? leaf.keys.length - 1 : -1;
+        }
+
+        @Override public boolean hasNext() { return leaf != null && index >= 0; }
+
+        @Override @SuppressWarnings("unchecked")
+        public Entry<Long, V> next() {
+            if (modCount != expectedModCount) throw new ConcurrentModificationException();
+            if (!hasNext()) throw new NoSuchElementException();
+            long ik = leaf.keys[index];
+            V val = (V) leaf.values[index];
+            lastKey = ik;
+            canRemove = true;
+            retreat();
+            return new SimpleImmutableEntry<>(fromInternal(ik), val);
+        }
+
+        private void retreat() {
+            index--;
+            while (index >= 0 && leaf.keys[index] == leaf.keys[index + 1]) index--;
+            if (index >= 0) return;
+            // Walk up to previous leaf
+            Node node = leaf;
+            while (node.parent != null) {
+                BitmaskNode bm = node.parent;
+                if (node.parentByte == PARENT_EOS) { node = bm; continue; }
+                int prevBit = bm.findPrevSet(node.parentByte - 1);
+                if (prevBit >= 0) {
+                    CompactNode target = descendLast(bm.children[bm.slotOf(prevBit)]);
+                    if (target != null) { leaf = target; index = leaf.keys.length - 1; return; }
+                }
+                if (bm.hasEos()) {
+                    CompactNode target = descendLast(bm.eosChild());
+                    if (target != null) { leaf = target; index = leaf.keys.length - 1; return; }
+                }
+                node = bm;
+            }
+            leaf = null; index = -1;
+        }
+
+        @Override public void remove() {
+            if (!canRemove) throw new IllegalStateException();
+            canRemove = false;
+            removeImpl(lastKey);
+            expectedModCount = modCount;
+            // Refind: position at entry just before lastKey (in descending order = just after in ascending)
+            var e = floorImpl(lastKey);
+            if (e == null || toInternal(e.getKey()) == lastKey) {
+                e = lowerImpl(lastKey);
+            }
+            if (e == null) { leaf = null; index = -1; return; }
+            long ik = toInternal(e.getKey());
+            // Descend to that entry
+            Node node = root;
+            while (node instanceof BitmaskNode bm) {
+                if (!matchSkip(bm, ik)) { leaf = null; index = -1; return; }
+                node = bm.dispatch(byteAt(ik, bm.effectiveDepth()));
+            }
+            if (node instanceof CompactNode c && c != CompactNode.SENTINEL) {
+                int pos = c.findBase(ik);
+                if (c.keys[pos] == ik) { leaf = c; index = pos; }
+                else { leaf = null; index = -1; }
+            } else { leaf = null; index = -1; }
+        }
+    }
+
+    // === KeySet: NavigableSet<Long> backed by NavigableMap ===
+    private static class KeySet extends AbstractSet<Long> implements NavigableSet<Long> {
+        private final NavigableMap<Long, ?> map;
+        KeySet(NavigableMap<Long, ?> map) { this.map = map; }
+        @Override public int size() { return map.size(); }
+        @Override public boolean contains(Object o) { return map.containsKey(o); }
+        @Override public Iterator<Long> iterator() { return map.entrySet().stream().map(Entry::getKey).iterator(); }
+        @Override public Long first() { return map.firstKey(); }
+        @Override public Long last() { return map.lastKey(); }
+        @Override public Long lower(Long e) { return map.lowerKey(e); }
+        @Override public Long floor(Long e) { return map.floorKey(e); }
+        @Override public Long ceiling(Long e) { return map.ceilingKey(e); }
+        @Override public Long higher(Long e) { return map.higherKey(e); }
+        @Override public Long pollFirst() { var e = map.pollFirstEntry(); return e == null ? null : e.getKey(); }
+        @Override public Long pollLast() { var e = map.pollLastEntry(); return e == null ? null : e.getKey(); }
+        @Override public NavigableSet<Long> descendingSet() { return new KeySet(map.descendingMap()); }
+        @Override public Iterator<Long> descendingIterator() { return descendingSet().iterator(); }
+        @Override public NavigableSet<Long> subSet(Long a, boolean ai, Long b, boolean bi) { return new KeySet(map.subMap(a, ai, b, bi)); }
+        @Override public NavigableSet<Long> headSet(Long t, boolean i) { return new KeySet(map.headMap(t, i)); }
+        @Override public NavigableSet<Long> tailSet(Long f, boolean i) { return new KeySet(map.tailMap(f, i)); }
+        @Override public SortedSet<Long> subSet(Long a, Long b) { return subSet(a, true, b, false); }
+        @Override public SortedSet<Long> headSet(Long t) { return headSet(t, false); }
+        @Override public SortedSet<Long> tailSet(Long f) { return tailSet(f, true); }
+        @Override public Comparator<? super Long> comparator() { return map.comparator(); }
+    }
+
+    // === DescendingMap: reversed NavigableMap view ===
+    private class DescendingMap extends AbstractMap<Long, V> implements NavigableMap<Long, V> {
+        @Override public int size() { return KNTrie.this.size; }
+        @Override public boolean containsKey(Object key) { return KNTrie.this.containsKey(key); }
+        @Override public V get(Object key) { return KNTrie.this.get(key); }
+        @Override public V put(Long key, V value) { return KNTrie.this.put(key, value); }
+        @Override public V remove(Object key) { return KNTrie.this.remove(key); }
+        @Override public Set<Entry<Long, V>> entrySet() {
+            return new AbstractSet<>() {
+                @Override public int size() { return KNTrie.this.size; }
+                @Override public Iterator<Entry<Long, V>> iterator() { return new DescIter(); }
+            };
+        }
+        @Override public Comparator<? super Long> comparator() { return Comparator.<Long>naturalOrder().reversed(); }
+        @Override public Long firstKey() { return KNTrie.this.lastKey(); }
+        @Override public Long lastKey() { return KNTrie.this.firstKey(); }
+        @Override public Entry<Long, V> firstEntry() { return KNTrie.this.lastEntry(); }
+        @Override public Entry<Long, V> lastEntry() { return KNTrie.this.firstEntry(); }
+        @Override public Entry<Long, V> pollFirstEntry() { return KNTrie.this.pollLastEntry(); }
+        @Override public Entry<Long, V> pollLastEntry() { return KNTrie.this.pollFirstEntry(); }
+        @Override public Entry<Long, V> ceilingEntry(Long key) { return KNTrie.this.floorEntry(key); }
+        @Override public Entry<Long, V> floorEntry(Long key) { return KNTrie.this.ceilingEntry(key); }
+        @Override public Entry<Long, V> higherEntry(Long key) { return KNTrie.this.lowerEntry(key); }
+        @Override public Entry<Long, V> lowerEntry(Long key) { return KNTrie.this.higherEntry(key); }
+        @Override public Long ceilingKey(Long k) { return KNTrie.this.floorKey(k); }
+        @Override public Long floorKey(Long k) { return KNTrie.this.ceilingKey(k); }
+        @Override public Long higherKey(Long k) { return KNTrie.this.lowerKey(k); }
+        @Override public Long lowerKey(Long k) { return KNTrie.this.higherKey(k); }
+        @Override public NavigableMap<Long, V> descendingMap() { return KNTrie.this; }
+        @Override public NavigableSet<Long> navigableKeySet() { return new KeySet(this); }
+        @Override public NavigableSet<Long> descendingKeySet() { return KNTrie.this.navigableKeySet(); }
+        @Override public NavigableMap<Long, V> subMap(Long a, boolean ai, Long b, boolean bi) { return KNTrie.this.subMap(b, bi, a, ai).descendingMap(); }
+        @Override public NavigableMap<Long, V> headMap(Long t, boolean i) { return KNTrie.this.tailMap(t, i).descendingMap(); }
+        @Override public NavigableMap<Long, V> tailMap(Long f, boolean i) { return KNTrie.this.headMap(f, i).descendingMap(); }
+        @Override public SortedMap<Long, V> subMap(Long a, Long b) { return subMap(a, true, b, false); }
+        @Override public SortedMap<Long, V> headMap(Long t) { return headMap(t, false); }
+        @Override public SortedMap<Long, V> tailMap(Long f) { return tailMap(f, true); }
+    }
 
     @Override public NavigableMap<Long, V> subMap(Long fromKey, boolean fromInclusive, Long toKey, boolean toInclusive) {
         return new SubMap(fromKey, fromInclusive, toKey, toInclusive);
@@ -997,9 +1139,9 @@ public class KNTrie<V> extends AbstractMap<Long, V>
         @Override public SortedMap<Long, V> subMap(Long a, Long b) { return subMap(a, true, b, false); }
         @Override public SortedMap<Long, V> headMap(Long t) { return headMap(t, false); }
         @Override public SortedMap<Long, V> tailMap(Long f) { return tailMap(f, true); }
-        @Override public NavigableSet<Long> navigableKeySet() { throw new UnsupportedOperationException(); }
-        @Override public NavigableSet<Long> descendingKeySet() { throw new UnsupportedOperationException(); }
-        @Override public NavigableMap<Long, V> descendingMap() { throw new UnsupportedOperationException(); }
+        @Override public NavigableSet<Long> navigableKeySet() { return new KeySet(this); }
+        @Override public NavigableSet<Long> descendingKeySet() { throw new UnsupportedOperationException("SubMap.descendingKeySet"); }
+        @Override public NavigableMap<Long, V> descendingMap() { throw new UnsupportedOperationException("SubMap.descendingMap"); }
     }
 
     // === Iterator ===
@@ -1244,6 +1386,56 @@ public class KNTrie<V> extends AbstractMap<Long, V>
         assert tail.firstKey() == 90L;
         assert tail.lastKey() == 99L;
         System.out.println("SubMap/HeadMap/TailMap: PASS");
+
+        // Descending map
+        t.clear();
+        t.put(10L, "ten"); t.put(20L, "twenty"); t.put(30L, "thirty");
+        var desc = t.descendingMap();
+        assert desc.firstKey() == 30L;
+        assert desc.lastKey() == 10L;
+        var descIt = desc.entrySet().iterator();
+        assert descIt.next().getKey() == 30L;
+        assert descIt.next().getKey() == 20L;
+        assert descIt.next().getKey() == 10L;
+        assert !descIt.hasNext();
+        assert desc.descendingMap() == t;
+        System.out.println("DescendingMap: PASS");
+
+        // NavigableKeySet
+        var ks = t.navigableKeySet();
+        assert ks.size() == 3;
+        assert ks.first() == 10L;
+        assert ks.last() == 30L;
+        assert ks.contains(20L);
+        assert !ks.contains(15L);
+        assert ks.ceiling(15L) == 20L;
+        assert ks.floor(15L) == 10L;
+        System.out.println("NavigableKeySet: PASS");
+
+        // DescendingKeySet
+        var dks = t.descendingKeySet();
+        var dksIt = dks.iterator();
+        assert dksIt.next() == 30L;
+        assert dksIt.next() == 20L;
+        assert dksIt.next() == 10L;
+        assert !dksIt.hasNext();
+        System.out.println("DescendingKeySet: PASS");
+
+        // Descending at scale vs TreeMap
+        t.clear();
+        TreeMap<Long, String> descRef = new TreeMap<>();
+        var descRng = new java.util.Random(555);
+        for (int i = 0; i < 5000; i++) { long k = descRng.nextLong(); t.put(k, "v" + i); descRef.put(k, "v" + i); }
+        var descTrieIt = t.descendingMap().entrySet().iterator();
+        var descRefIt = descRef.descendingMap().entrySet().iterator();
+        int descChecked = 0;
+        while (descTrieIt.hasNext() && descRefIt.hasNext()) {
+            var te = descTrieIt.next(); var re = descRefIt.next();
+            assert te.getKey().equals(re.getKey()) : "desc key " + te.getKey() + " != " + re.getKey() + " at " + descChecked;
+            descChecked++;
+        }
+        assert !descTrieIt.hasNext() && !descRefIt.hasNext();
+        System.out.println("Descending vs TreeMap: PASS (" + descChecked + " entries)");
 
         System.out.println("\nALL PASS"); 
     }

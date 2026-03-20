@@ -1111,24 +1111,534 @@ public class KSTrie<V> extends AbstractMap<String, V>
         return new SimpleImmutableEntry<>(reconstructKey(c, i), (V) c.values[i]);
     }
 
-    // Simple O(N) implementations — proper descent follow-up
-    @Override public Map.Entry<String, V> lowerEntry(String key) { Map.Entry<String, V> r = null; for (var e : entrySet()) { if (e.getKey().compareTo(key) < 0) r = e; else break; } return r; }
-    @Override public Map.Entry<String, V> higherEntry(String key) { for (var e : entrySet()) if (e.getKey().compareTo(key) > 0) return e; return null; }
-    @Override public Map.Entry<String, V> floorEntry(String key) { var v = get(key); if (v != null) return new SimpleImmutableEntry<>(key, v); return lowerEntry(key); }
-    @Override public Map.Entry<String, V> ceilingEntry(String key) { var v = get(key); if (v != null) return new SimpleImmutableEntry<>(key, v); return higherEntry(key); }
+    // === Navigation helpers ===
+    private SimpleImmutableEntry<String, V> firstEntryIn(Node node) {
+        CompactNode c = descendFirst(node);
+        return c != null ? makeEntry(c, 0) : null;
+    }
+
+    private SimpleImmutableEntry<String, V> lastEntryIn(Node node) {
+        CompactNode c = descendLast(node);
+        return c != null ? makeEntry(c, c.count - 1) : null;
+    }
+
+    private SimpleImmutableEntry<String, V> nextEntryAfter(Node node) {
+        while (node.parent != null) {
+            BitmaskNode bm = node.parent;
+            int nextBit = (node.parentByte == PARENT_EOS)
+                ? bm.findNextSet(0) : bm.findNextSet(node.parentByte + 1);
+            if (nextBit >= 0) {
+                var e = firstEntryIn(bm.children[bm.slotOf(nextBit)]);
+                if (e != null) return e;
+            }
+            node = bm;
+        }
+        return null;
+    }
+
+    private SimpleImmutableEntry<String, V> prevEntryBefore(Node node) {
+        while (node.parent != null) {
+            BitmaskNode bm = node.parent;
+            if (node.parentByte == PARENT_EOS) { node = bm; continue; }
+            int prevBit = bm.findPrevSet(node.parentByte - 1);
+            if (prevBit >= 0) {
+                var e = lastEntryIn(bm.children[bm.slotOf(prevBit)]);
+                if (e != null) return e;
+            }
+            if (bm.hasEos()) {
+                var e = lastEntryIn(bm.eosChild());
+                if (e != null) return e;
+            }
+            node = bm;
+        }
+        return null;
+    }
+
+    // === ceilingImpl: first entry >= key ===
+    @SuppressWarnings("unchecked")
+    private SimpleImmutableEntry<String, V> ceilingImpl(byte[] key) {
+        Node node = root;
+        int consumed = 0;
+        while (node instanceof BitmaskNode bm) {
+            int mm = skipMismatch(bm.skip, key, consumed);
+            if (mm >= 0) {
+                int skipByte = bm.skip[mm] & 0xFF;
+                int keyByte = consumed + mm < key.length ? (key[consumed + mm] & 0xFF) : -1;
+                return keyByte < skipByte ? firstEntryIn(bm) : nextEntryAfter(bm);
+            }
+            consumed += bm.skipLen();
+            if (consumed >= key.length) {
+                if (bm.hasEos()) return firstEntryIn(bm.eosChild());
+                int bit = bm.findNextSet(0);
+                return bit >= 0 ? firstEntryIn(bm.children[bm.slotOf(bit)]) : nextEntryAfter(bm);
+            }
+            int b = key[consumed++] & 0xFF;
+            Node child = bm.dispatch(b);
+            if (child == CompactNode.SENTINEL) {
+                int next = bm.findNextSet(b + 1);
+                return next >= 0 ? firstEntryIn(bm.children[bm.slotOf(next)]) : nextEntryAfter(bm);
+            }
+            node = child;
+        }
+        if (node == CompactNode.SENTINEL) return null;
+        CompactNode c = (CompactNode) node;
+        int mm = skipMismatch(c.skip, key, consumed);
+        if (mm >= 0) {
+            int skipByte = c.skip[mm] & 0xFF;
+            int keyByte = consumed + mm < key.length ? (key[consumed + mm] & 0xFF) : -1;
+            return keyByte < skipByte ? firstEntryIn(c) : nextEntryAfter(c);
+        }
+        consumed += c.skipLen();
+        int[] fp = c.findPos(key, consumed);
+        if (fp[0] == 1) return makeEntry(c, fp[1]);
+        int pos = fp[1];
+        return pos < c.count ? makeEntry(c, pos) : nextEntryAfter(c);
+    }
+
+    // === floorImpl: last entry <= key ===
+    @SuppressWarnings("unchecked")
+    private SimpleImmutableEntry<String, V> floorImpl(byte[] key) {
+        Node node = root;
+        int consumed = 0;
+        while (node instanceof BitmaskNode bm) {
+            int mm = skipMismatch(bm.skip, key, consumed);
+            if (mm >= 0) {
+                int skipByte = bm.skip[mm] & 0xFF;
+                int keyByte = consumed + mm < key.length ? (key[consumed + mm] & 0xFF) : -1;
+                return keyByte > skipByte ? lastEntryIn(bm) : prevEntryBefore(bm);
+            }
+            consumed += bm.skipLen();
+            if (consumed >= key.length) {
+                if (bm.hasEos()) return lastEntryIn(bm.eosChild());
+                return prevEntryBefore(bm);
+            }
+            int b = key[consumed++] & 0xFF;
+            Node child = bm.dispatch(b);
+            if (child == CompactNode.SENTINEL) {
+                int prev = bm.findPrevSet(b - 1);
+                if (prev >= 0) return lastEntryIn(bm.children[bm.slotOf(prev)]);
+                if (bm.hasEos()) return lastEntryIn(bm.eosChild());
+                return prevEntryBefore(bm);
+            }
+            node = child;
+        }
+        if (node == CompactNode.SENTINEL) return null;
+        CompactNode c = (CompactNode) node;
+        int mm = skipMismatch(c.skip, key, consumed);
+        if (mm >= 0) {
+            int skipByte = c.skip[mm] & 0xFF;
+            int keyByte = consumed + mm < key.length ? (key[consumed + mm] & 0xFF) : -1;
+            return keyByte > skipByte ? lastEntryIn(c) : prevEntryBefore(c);
+        }
+        consumed += c.skipLen();
+        int[] fp = c.findPos(key, consumed);
+        if (fp[0] == 1) return makeEntry(c, fp[1]);
+        int pos = fp[1] - 1;
+        return pos >= 0 ? makeEntry(c, pos) : prevEntryBefore(c);
+    }
+
+    // === higher/lower: find entry, advance via parent ===
+    private SimpleImmutableEntry<String, V> higherImpl(byte[] key) {
+        var e = ceilingImpl(key);
+        if (e == null) return null;
+        if (!Arrays.equals(e.getKey().getBytes(StandardCharsets.UTF_8), key)) return e;
+        // Exact match — descend to the leaf, advance past it
+        Node node = root;
+        int consumed = 0;
+        while (node instanceof BitmaskNode bm) {
+            if (!matchSkip(bm.skip, key, consumed)) return null;
+            consumed += bm.skipLen();
+            if (consumed >= key.length) { node = bm.eosChild(); break; }
+            node = bm.dispatch(key[consumed++] & 0xFF);
+        }
+        if (node == CompactNode.SENTINEL) return null;
+        CompactNode c = (CompactNode) node;
+        consumed += c.skipLen(); // skip already matched via ceiling
+        int pos = c.findEntry(key, consumed);
+        if (pos < 0) return null;
+        // Advance: next entry in this leaf, or parent walk
+        if (pos + 1 < c.count) return makeEntry(c, pos + 1);
+        return nextEntryAfter(c);
+    }
+
+    private SimpleImmutableEntry<String, V> lowerImpl(byte[] key) {
+        var e = floorImpl(key);
+        if (e == null) return null;
+        if (!Arrays.equals(e.getKey().getBytes(StandardCharsets.UTF_8), key)) return e;
+        // Exact match — descend, retreat
+        Node node = root;
+        int consumed = 0;
+        while (node instanceof BitmaskNode bm) {
+            if (!matchSkip(bm.skip, key, consumed)) return null;
+            consumed += bm.skipLen();
+            if (consumed >= key.length) { node = bm.eosChild(); break; }
+            node = bm.dispatch(key[consumed++] & 0xFF);
+        }
+        if (node == CompactNode.SENTINEL) return null;
+        CompactNode c = (CompactNode) node;
+        consumed += c.skipLen();
+        int pos = c.findEntry(key, consumed);
+        if (pos < 0) return null;
+        if (pos > 0) return makeEntry(c, pos - 1);
+        return prevEntryBefore(c);
+    }
+
+    // === NavigableMap ===
+    @Override public Map.Entry<String, V> ceilingEntry(String key) { return ceilingImpl(key.getBytes(StandardCharsets.UTF_8)); }
+    @Override public Map.Entry<String, V> floorEntry(String key) { return floorImpl(key.getBytes(StandardCharsets.UTF_8)); }
+    @Override public Map.Entry<String, V> higherEntry(String key) { return higherImpl(key.getBytes(StandardCharsets.UTF_8)); }
+    @Override public Map.Entry<String, V> lowerEntry(String key) { return lowerImpl(key.getBytes(StandardCharsets.UTF_8)); }
     @Override public String floorKey(String k) { var e = floorEntry(k); return e == null ? null : e.getKey(); }
     @Override public String ceilingKey(String k) { var e = ceilingEntry(k); return e == null ? null : e.getKey(); }
     @Override public String lowerKey(String k) { var e = lowerEntry(k); return e == null ? null : e.getKey(); }
     @Override public String higherKey(String k) { var e = higherEntry(k); return e == null ? null : e.getKey(); }
-    @Override public NavigableMap<String, V> descendingMap() { throw new UnsupportedOperationException("TODO"); }
-    @Override public NavigableSet<String> navigableKeySet() { throw new UnsupportedOperationException("TODO"); }
-    @Override public NavigableSet<String> descendingKeySet() { throw new UnsupportedOperationException("TODO"); }
-    @Override public NavigableMap<String, V> subMap(String a, boolean ai, String b, boolean bi) { throw new UnsupportedOperationException("TODO"); }
-    @Override public NavigableMap<String, V> headMap(String t, boolean i) { throw new UnsupportedOperationException("TODO"); }
-    @Override public NavigableMap<String, V> tailMap(String f, boolean i) { throw new UnsupportedOperationException("TODO"); }
-    @Override public SortedMap<String, V> subMap(String a, String b) { throw new UnsupportedOperationException("TODO"); }
-    @Override public SortedMap<String, V> headMap(String t) { throw new UnsupportedOperationException("TODO"); }
-    @Override public SortedMap<String, V> tailMap(String f) { throw new UnsupportedOperationException("TODO"); }
+
+    @Override public NavigableSet<String> navigableKeySet() { return new KeySet(this); }
+    @Override public NavigableSet<String> descendingKeySet() { return new KeySet(descendingMap()); }
+    @Override public NavigableMap<String, V> descendingMap() { return new DescendingMap(); }
+
+    // === Descending iterator ===
+    private class DescIter implements Iterator<Map.Entry<String, V>> {
+        CompactNode leaf;
+        int index;
+        int expectedModCount;
+        String lastKey;
+        boolean canRemove;
+
+        DescIter() {
+            expectedModCount = modCount;
+            leaf = descendLast(root);
+            index = (leaf != null) ? leaf.count - 1 : -1;
+        }
+
+        @Override public boolean hasNext() { return leaf != null && index >= 0; }
+
+        @Override @SuppressWarnings("unchecked")
+        public Map.Entry<String, V> next() {
+            if (modCount != expectedModCount) throw new ConcurrentModificationException();
+            if (!hasNext()) throw new NoSuchElementException();
+            String key = reconstructKey(leaf, index);
+            V val = (V) leaf.values[index];
+            lastKey = key;
+            canRemove = true;
+            retreat();
+            return new SimpleImmutableEntry<>(key, val);
+        }
+
+        private void retreat() {
+            index--;
+            if (index >= 0) return;
+            // Walk up to previous leaf
+            Node node = leaf;
+            while (node.parent != null) {
+                BitmaskNode bm = node.parent;
+                if (node.parentByte == PARENT_EOS) {
+                    // EOS is first — nothing before it at this level
+                    node = bm;
+                    continue;
+                }
+                int prevBit = bm.findPrevSet(node.parentByte - 1);
+                if (prevBit >= 0) {
+                    CompactNode target = descendLast(bm.children[bm.slotOf(prevBit)]);
+                    if (target != null) { leaf = target; index = leaf.count - 1; return; }
+                }
+                if (bm.hasEos()) {
+                    CompactNode target = descendLast(bm.eosChild());
+                    if (target != null) { leaf = target; index = leaf.count - 1; return; }
+                }
+                node = bm;
+            }
+            leaf = null; index = -1;
+        }
+
+        @Override public void remove() {
+            if (!canRemove) throw new IllegalStateException();
+            canRemove = false;
+            KSTrie.this.remove(lastKey);
+            expectedModCount = modCount;
+            // Refind: position at entry just before lastKey
+            leaf = null; index = -1;
+            var e = KSTrie.this.lowerEntry(lastKey);
+            if (e == null) return;
+            // Descend to that entry's leaf
+            byte[] k = e.getKey().getBytes(StandardCharsets.UTF_8);
+            Node node = root;
+            int consumed = 0;
+            while (node instanceof BitmaskNode bm) {
+                if (!matchSkip(bm.skip, k, consumed)) return;
+                consumed += bm.skipLen();
+                if (consumed >= k.length) { node = bm.eosChild(); break; }
+                node = bm.dispatch(k[consumed++] & 0xFF);
+            }
+            if (node instanceof CompactNode c && c != CompactNode.SENTINEL) {
+                consumed += c.skipLen();
+                int pos = c.findEntry(k, consumed);
+                if (pos >= 0) { leaf = c; index = pos; }
+            }
+        }
+    }
+
+    // === KeySet: NavigableSet<String> backed by a NavigableMap ===
+    private static class KeySet extends AbstractSet<String> implements NavigableSet<String> {
+        private final NavigableMap<String, ?> map;
+        KeySet(NavigableMap<String, ?> map) { this.map = map; }
+
+        @Override public int size() { return map.size(); }
+        @Override public boolean contains(Object o) { return map.containsKey(o); }
+        @Override public Iterator<String> iterator() { return map.entrySet().stream().map(Map.Entry::getKey).iterator(); }
+        @Override public String first() { return map.firstKey(); }
+        @Override public String last() { return map.lastKey(); }
+        @Override public String lower(String e) { return map.lowerKey(e); }
+        @Override public String floor(String e) { return map.floorKey(e); }
+        @Override public String ceiling(String e) { return map.ceilingKey(e); }
+        @Override public String higher(String e) { return map.higherKey(e); }
+        @Override public String pollFirst() { var e = map.pollFirstEntry(); return e == null ? null : e.getKey(); }
+        @Override public String pollLast() { var e = map.pollLastEntry(); return e == null ? null : e.getKey(); }
+        @Override public NavigableSet<String> descendingSet() { return new KeySet(map.descendingMap()); }
+        @Override public Iterator<String> descendingIterator() { return descendingSet().iterator(); }
+        @Override public NavigableSet<String> subSet(String a, boolean ai, String b, boolean bi) { return new KeySet(map.subMap(a, ai, b, bi)); }
+        @Override public NavigableSet<String> headSet(String t, boolean i) { return new KeySet(map.headMap(t, i)); }
+        @Override public NavigableSet<String> tailSet(String f, boolean i) { return new KeySet(map.tailMap(f, i)); }
+        @Override public SortedSet<String> subSet(String a, String b) { return subSet(a, true, b, false); }
+        @Override public SortedSet<String> headSet(String t) { return headSet(t, false); }
+        @Override public SortedSet<String> tailSet(String f) { return tailSet(f, true); }
+        @Override public Comparator<? super String> comparator() { return map.comparator(); }
+    }
+
+    // === DescendingMap: reversed NavigableMap view ===
+    private class DescendingMap extends AbstractMap<String, V> implements NavigableMap<String, V> {
+        @Override public int size() { return KSTrie.this.size; }
+        @Override public boolean containsKey(Object key) { return KSTrie.this.containsKey(key); }
+        @Override public V get(Object key) { return KSTrie.this.get(key); }
+        @Override public V put(String key, V value) { return KSTrie.this.put(key, value); }
+        @Override public V remove(Object key) { return KSTrie.this.remove(key); }
+
+        @Override public Set<Entry<String, V>> entrySet() {
+            return new AbstractSet<>() {
+                @Override public int size() { return KSTrie.this.size; }
+                @Override public Iterator<Entry<String, V>> iterator() { return new DescIter(); }
+            };
+        }
+
+        @Override public Comparator<? super String> comparator() { return Comparator.<String>naturalOrder().reversed(); }
+        @Override public String firstKey() { return KSTrie.this.lastKey(); }
+        @Override public String lastKey() { return KSTrie.this.firstKey(); }
+        @Override public Entry<String, V> firstEntry() { return KSTrie.this.lastEntry(); }
+        @Override public Entry<String, V> lastEntry() { return KSTrie.this.firstEntry(); }
+        @Override public Entry<String, V> pollFirstEntry() { return KSTrie.this.pollLastEntry(); }
+        @Override public Entry<String, V> pollLastEntry() { return KSTrie.this.pollFirstEntry(); }
+        @Override public Entry<String, V> ceilingEntry(String key) { return KSTrie.this.floorEntry(key); }
+        @Override public Entry<String, V> floorEntry(String key) { return KSTrie.this.ceilingEntry(key); }
+        @Override public Entry<String, V> higherEntry(String key) { return KSTrie.this.lowerEntry(key); }
+        @Override public Entry<String, V> lowerEntry(String key) { return KSTrie.this.higherEntry(key); }
+        @Override public String ceilingKey(String k) { return KSTrie.this.floorKey(k); }
+        @Override public String floorKey(String k) { return KSTrie.this.ceilingKey(k); }
+        @Override public String higherKey(String k) { return KSTrie.this.lowerKey(k); }
+        @Override public String lowerKey(String k) { return KSTrie.this.higherKey(k); }
+        @Override public NavigableMap<String, V> descendingMap() { return KSTrie.this; }
+        @Override public NavigableSet<String> navigableKeySet() { return new KeySet(this); }
+        @Override public NavigableSet<String> descendingKeySet() { return KSTrie.this.navigableKeySet(); }
+        @Override public NavigableMap<String, V> subMap(String a, boolean ai, String b, boolean bi) { return KSTrie.this.subMap(b, bi, a, ai).descendingMap(); }
+        @Override public NavigableMap<String, V> headMap(String t, boolean i) { return KSTrie.this.tailMap(t, i).descendingMap(); }
+        @Override public NavigableMap<String, V> tailMap(String f, boolean i) { return KSTrie.this.headMap(f, i).descendingMap(); }
+        @Override public SortedMap<String, V> subMap(String a, String b) { return subMap(a, true, b, false); }
+        @Override public SortedMap<String, V> headMap(String t) { return headMap(t, false); }
+        @Override public SortedMap<String, V> tailMap(String f) { return tailMap(f, true); }
+    }
+
+    @Override public NavigableMap<String, V> subMap(String fromKey, boolean fi, String toKey, boolean ti) { return new SubMap(fromKey, fi, toKey, ti); }
+    @Override public NavigableMap<String, V> headMap(String toKey, boolean i) { return new SubMap(null, true, toKey, i); }
+    @Override public NavigableMap<String, V> tailMap(String fromKey, boolean i) { return new SubMap(fromKey, i, null, true); }
+    @Override public SortedMap<String, V> subMap(String a, String b) { return subMap(a, true, b, false); }
+    @Override public SortedMap<String, V> headMap(String t) { return headMap(t, false); }
+    @Override public SortedMap<String, V> tailMap(String f) { return tailMap(f, true); }
+
+    // === SubMap view ===
+    private class SubMap extends AbstractMap<String, V> implements NavigableMap<String, V> {
+        final String fromKey, toKey;
+        final boolean fromInclusive, toInclusive;
+
+        SubMap(String from, boolean fi, String to, boolean ti) {
+            this.fromKey = from; this.fromInclusive = fi;
+            this.toKey = to; this.toInclusive = ti;
+        }
+
+        private boolean inRange(String key) {
+            if (fromKey != null) {
+                int c = key.compareTo(fromKey);
+                if (c < 0 || (c == 0 && !fromInclusive)) return false;
+            }
+            if (toKey != null) {
+                int c = key.compareTo(toKey);
+                if (c > 0 || (c == 0 && !toInclusive)) return false;
+            }
+            return true;
+        }
+
+        @Override public V get(Object key) {
+            if (!(key instanceof String k) || !inRange(k)) return null;
+            return KSTrie.this.get(k);
+        }
+        @Override public V put(String key, V value) {
+            if (!inRange(key)) throw new IllegalArgumentException("key out of range");
+            return KSTrie.this.put(key, value);
+        }
+        @Override public int size() { int n = 0; for (var ignored : entrySet()) n++; return n; }
+        @Override public boolean containsKey(Object key) { return key instanceof String k && inRange(k) && KSTrie.this.containsKey(k); }
+
+        private Entry<String, V> loEntry() {
+            if (fromKey == null) return KSTrie.this.firstEntry();
+            return fromInclusive ? KSTrie.this.ceilingEntry(fromKey) : KSTrie.this.higherEntry(fromKey);
+        }
+
+        @Override public Set<Entry<String, V>> entrySet() {
+            return new AbstractSet<>() {
+                @Override public int size() { return SubMap.this.size(); }
+                @Override public Iterator<Entry<String, V>> iterator() {
+                    return new Iterator<>() {
+                        Entry<String, V> next = loEntry();
+                        { if (next != null && !inRange(next.getKey())) next = null; }
+                        @Override public boolean hasNext() { return next != null; }
+                        @Override public Entry<String, V> next() {
+                            if (next == null) throw new NoSuchElementException();
+                            Entry<String, V> r = next;
+                            next = KSTrie.this.higherEntry(r.getKey());
+                            if (next != null && !inRange(next.getKey())) next = null;
+                            return r;
+                        }
+                    };
+                }
+            };
+        }
+
+        @Override public Comparator<? super String> comparator() { return null; }
+        @Override public String firstKey() { var e = loEntry(); if (e == null || !inRange(e.getKey())) throw new NoSuchElementException(); return e.getKey(); }
+        @Override public String lastKey() {
+            Entry<String, V> e = toKey != null ? (toInclusive ? KSTrie.this.floorEntry(toKey) : KSTrie.this.lowerEntry(toKey)) : KSTrie.this.lastEntry();
+            if (e == null || !inRange(e.getKey())) throw new NoSuchElementException(); return e.getKey();
+        }
+        @Override public Entry<String, V> firstEntry() { var e = loEntry(); return e != null && inRange(e.getKey()) ? e : null; }
+        @Override public Entry<String, V> lastEntry() {
+            Entry<String, V> e = toKey != null ? (toInclusive ? KSTrie.this.floorEntry(toKey) : KSTrie.this.lowerEntry(toKey)) : KSTrie.this.lastEntry();
+            return e != null && inRange(e.getKey()) ? e : null;
+        }
+        @Override public Entry<String, V> pollFirstEntry() { var e = firstEntry(); if (e != null) KSTrie.this.remove(e.getKey()); return e; }
+        @Override public Entry<String, V> pollLastEntry() { var e = lastEntry(); if (e != null) KSTrie.this.remove(e.getKey()); return e; }
+        @Override public Entry<String, V> ceilingEntry(String k) { var e = KSTrie.this.ceilingEntry(k); return e != null && inRange(e.getKey()) ? e : null; }
+        @Override public Entry<String, V> floorEntry(String k) { var e = KSTrie.this.floorEntry(k); return e != null && inRange(e.getKey()) ? e : null; }
+        @Override public Entry<String, V> higherEntry(String k) { var e = KSTrie.this.higherEntry(k); return e != null && inRange(e.getKey()) ? e : null; }
+        @Override public Entry<String, V> lowerEntry(String k) { var e = KSTrie.this.lowerEntry(k); return e != null && inRange(e.getKey()) ? e : null; }
+        @Override public String ceilingKey(String k) { var e = ceilingEntry(k); return e == null ? null : e.getKey(); }
+        @Override public String floorKey(String k) { var e = floorEntry(k); return e == null ? null : e.getKey(); }
+        @Override public String higherKey(String k) { var e = higherEntry(k); return e == null ? null : e.getKey(); }
+        @Override public String lowerKey(String k) { var e = lowerEntry(k); return e == null ? null : e.getKey(); }
+        @Override public NavigableMap<String, V> subMap(String a, boolean ai, String b, boolean bi) { return KSTrie.this.subMap(a, ai, b, bi); }
+        @Override public NavigableMap<String, V> headMap(String t, boolean i) { return KSTrie.this.headMap(t, i); }
+        @Override public NavigableMap<String, V> tailMap(String f, boolean i) { return KSTrie.this.tailMap(f, i); }
+        @Override public SortedMap<String, V> subMap(String a, String b) { return subMap(a, true, b, false); }
+        @Override public SortedMap<String, V> headMap(String t) { return headMap(t, false); }
+        @Override public SortedMap<String, V> tailMap(String f) { return tailMap(f, true); }
+        @Override public NavigableSet<String> navigableKeySet() { return new KeySet(this); }
+        @Override public NavigableSet<String> descendingKeySet() { throw new UnsupportedOperationException("SubMap.descendingKeySet"); }
+        @Override public NavigableMap<String, V> descendingMap() { throw new UnsupportedOperationException("SubMap.descendingMap"); }
+    }
+
+    // === Prefix operations ===
+    public void prefixWalk(String prefix, BiConsumer<String, V> action) {
+        prefixWalkBytes(prefix.getBytes(StandardCharsets.UTF_8), (k, v) ->
+            action.accept(new String(k, StandardCharsets.UTF_8), v));
+    }
+
+    @SuppressWarnings("unchecked")
+    public void prefixWalkBytes(byte[] prefix, BiConsumer<byte[], V> action) {
+        // Descend to prefix point
+        Node node = root;
+        int consumed = 0;
+        // Accumulate path bytes for key reconstruction
+        byte[] pathSoFar = new byte[0];
+
+        while (node instanceof BitmaskNode bm) {
+            if (bm.skip.length > 0) {
+                int rem = prefix.length - consumed;
+                if (rem < bm.skip.length) {
+                    // Prefix ends within skip — check partial match
+                    for (int i = 0; i < rem; i++)
+                        if (bm.skip[i] != prefix[consumed + i]) return;
+                    // Whole subtree matches
+                    walkSubtree(node, pathSoFar, action);
+                    return;
+                }
+                if (!matchSkip(bm.skip, prefix, consumed)) return;
+                pathSoFar = concat(pathSoFar, bm.skip);
+            }
+            consumed += bm.skipLen();
+            if (consumed >= prefix.length) { walkSubtree(node, pathSoFar, action); return; }
+            int b = prefix[consumed++] & 0xFF;
+            pathSoFar = concat(pathSoFar, new byte[]{(byte) b});
+            node = bm.dispatch(b);
+        }
+        if (node == CompactNode.SENTINEL) return;
+        CompactNode c = (CompactNode) node;
+        if (c.skip.length > 0) {
+            int rem = prefix.length - consumed;
+            if (rem < c.skip.length) {
+                for (int i = 0; i < rem; i++)
+                    if (c.skip[i] != prefix[consumed + i]) return;
+                walkSubtree(node, pathSoFar, action);
+                return;
+            }
+            if (!matchSkip(c.skip, prefix, consumed)) return;
+            pathSoFar = concat(pathSoFar, c.skip);
+        }
+        consumed += c.skipLen();
+        if (consumed >= prefix.length) { walkSubtree(node, pathSoFar, action); return; }
+        // Partial match within compact entries
+        for (int i = 0; i < c.count; i++) {
+            if (comparePrefixToEntry(c, i, prefix, consumed) == 0) {
+                int klen = c.L(i);
+                byte[] suffix = new byte[klen];
+                if (klen > 0) {
+                    suffix[0] = c.F(i);
+                    if (klen > 1) System.arraycopy(c.data, c.ksOff() + c.O(i), suffix, 1, klen - 1);
+                }
+                action.accept(concat(pathSoFar, suffix), (V) c.values[i]);
+            }
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private void walkSubtree(Node node, byte[] prefix, BiConsumer<byte[], V> action) {
+        if (node == CompactNode.SENTINEL) return;
+        if (node instanceof CompactNode c) {
+            byte[] fp = c.skip.length > 0 ? concat(prefix, c.skip) : prefix;
+            for (int i = 0; i < c.count; i++) {
+                int klen = c.L(i);
+                if (klen == 0) {
+                    action.accept(fp, (V) c.values[i]);
+                } else {
+                    byte[] suffix = new byte[klen];
+                    suffix[0] = c.F(i);
+                    if (klen > 1) System.arraycopy(c.data, c.ksOff() + c.O(i), suffix, 1, klen - 1);
+                    action.accept(concat(fp, suffix), (V) c.values[i]);
+                }
+            }
+            return;
+        }
+        BitmaskNode bm = (BitmaskNode) node;
+        byte[] bp = bm.skip.length > 0 ? concat(prefix, bm.skip) : prefix;
+        walkSubtree(bm.eosChild(), bp, action);
+        int bit = bm.findNextSet(0);
+        while (bit >= 0) {
+            walkSubtree(bm.children[bm.slotOf(bit)], concat(bp, new byte[]{(byte) bit}), action);
+            bit = bm.findNextSet(bit + 1);
+        }
+    }
+
+    public List<Map.Entry<String, V>> prefixItems(String prefix) {
+        List<Map.Entry<String, V>> result = new ArrayList<>();
+        prefixWalk(prefix, (k, v) -> result.add(new SimpleImmutableEntry<>(k, v)));
+        return result;
+    }
 
     // === entrySet + Iterator ===
     @Override public Set<Map.Entry<String, V>> entrySet() {
@@ -1368,6 +1878,158 @@ public class KSTrie<V> extends AbstractMap<String, V>
         }
         assert !tit.hasNext() && !rit.hasNext();
         System.out.println("Bulk 10K: PASS (" + checked + " entries)"); System.out.flush();
+
+        // Navigation: floor/ceiling/lower/higher
+        t.clear();
+        for (String s : new String[]{"apple", "banana", "cherry", "date", "elderberry"})
+            t.put(s, s.length());
+
+        assert t.ceilingKey("apple").equals("apple");
+        assert t.ceilingKey("b").equals("banana");
+        assert t.ceilingKey("cat").equals("cherry");
+        assert t.ceilingKey("f") == null;
+        assert t.ceilingKey("").equals("apple");
+
+        assert t.floorKey("apple").equals("apple");
+        assert t.floorKey("b").equals("apple");
+        assert t.floorKey("cat").equals("banana");
+        assert t.floorKey("zzz").equals("elderberry");
+        assert t.floorKey("a") == null;
+
+        assert t.higherKey("apple").equals("banana");
+        assert t.higherKey("elderberry") == null;
+        assert t.higherKey("b").equals("banana");
+
+        assert t.lowerKey("apple") == null;
+        assert t.lowerKey("banana").equals("apple");
+        assert t.lowerKey("cat").equals("banana");
+        System.out.println("Navigation (floor/ceil/lower/higher): PASS"); System.out.flush();
+
+        // Verify navigation against TreeMap at scale
+        t.clear();
+        TreeMap<String, Integer> navRef = new TreeMap<>();
+        var navRng = new java.util.Random(789);
+        for (int i = 0; i < 5000; i++) {
+            int len = 3 + navRng.nextInt(10);
+            var sb = new StringBuilder();
+            for (int j = 0; j < len; j++) sb.append((char)('a' + navRng.nextInt(26)));
+            String k = sb.toString();
+            t.put(k, i); navRef.put(k, i);
+        }
+        navRng = new java.util.Random(321);
+        int navChecked = 0;
+        for (int i = 0; i < 1000; i++) {
+            int len = 3 + navRng.nextInt(10);
+            var sb = new StringBuilder();
+            for (int j = 0; j < len; j++) sb.append((char)('a' + navRng.nextInt(26)));
+            String probe = sb.toString();
+            assert Objects.equals(t.ceilingKey(probe), navRef.ceilingKey(probe))
+                : "ceiling(" + probe + "): " + t.ceilingKey(probe) + " != " + navRef.ceilingKey(probe);
+            assert Objects.equals(t.floorKey(probe), navRef.floorKey(probe))
+                : "floor(" + probe + "): " + t.floorKey(probe) + " != " + navRef.floorKey(probe);
+            assert Objects.equals(t.higherKey(probe), navRef.higherKey(probe))
+                : "higher(" + probe + "): " + t.higherKey(probe) + " != " + navRef.higherKey(probe);
+            assert Objects.equals(t.lowerKey(probe), navRef.lowerKey(probe))
+                : "lower(" + probe + "): " + t.lowerKey(probe) + " != " + navRef.lowerKey(probe);
+            navChecked++;
+        }
+        System.out.println("Navigation vs TreeMap: PASS (" + navChecked + " probes)"); System.out.flush();
+
+        // SubMap view
+        t.clear();
+        String[] fruits = {"apple", "apricot", "banana", "blueberry", "cherry", "date"};
+        for (int i = 0; i < fruits.length; i++) t.put(fruits[i], i);
+        var sub = t.subMap("apricot", true, "cherry", false);
+        assert sub.size() == 3 : "subMap size=" + sub.size(); // apricot, banana, blueberry
+        assert sub.firstKey().equals("apricot");
+        assert sub.lastKey().equals("blueberry");
+        assert sub.containsKey("banana");
+        assert !sub.containsKey("cherry");
+        assert !sub.containsKey("apple");
+
+        var head = t.headMap("banana", false);
+        assert head.size() == 2; // apple, apricot
+        var tail = t.tailMap("cherry", true);
+        assert tail.size() == 2; // cherry, date
+        System.out.println("SubMap/HeadMap/TailMap: PASS"); System.out.flush();
+
+        // Prefix walk
+        t.clear();
+        t.put("/api/users/1", 1);
+        t.put("/api/users/2", 2);
+        t.put("/api/orders/1", 3);
+        t.put("/static/main.css", 4);
+        List<String> walked = new ArrayList<>();
+        t.prefixWalk("/api/users/", (k, v) -> walked.add(k));
+        assert walked.size() == 2 : "walk size=" + walked.size();
+        assert walked.get(0).equals("/api/users/1");
+        assert walked.get(1).equals("/api/users/2");
+
+        var items = t.prefixItems("/api/");
+        assert items.size() == 3;
+
+        walked.clear();
+        t.prefixWalk("", (k, v) -> walked.add(k));
+        assert walked.size() == 4 : "walk all=" + walked.size();
+        System.out.println("Prefix walk/items: PASS"); System.out.flush();
+
+        // Descending map
+        t.clear();
+        t.put("apple", 1); t.put("banana", 2); t.put("cherry", 3);
+        var desc = t.descendingMap();
+        assert desc.firstKey().equals("cherry");
+        assert desc.lastKey().equals("apple");
+        var descIt = desc.entrySet().iterator();
+        assert descIt.next().getKey().equals("cherry");
+        assert descIt.next().getKey().equals("banana");
+        assert descIt.next().getKey().equals("apple");
+        assert !descIt.hasNext();
+        // Round-trip
+        assert desc.descendingMap() == t;
+        System.out.println("DescendingMap: PASS"); System.out.flush();
+
+        // NavigableKeySet
+        var ks = t.navigableKeySet();
+        assert ks.size() == 3;
+        assert ks.first().equals("apple");
+        assert ks.last().equals("cherry");
+        assert ks.contains("banana");
+        assert !ks.contains("date");
+        assert ks.ceiling("b").equals("banana");
+        assert ks.floor("b").equals("apple");
+        assert ks.higher("banana").equals("cherry");
+        assert ks.lower("banana").equals("apple");
+        System.out.println("NavigableKeySet: PASS"); System.out.flush();
+
+        // DescendingKeySet
+        var dks = t.descendingKeySet();
+        var dksIt = dks.iterator();
+        assert dksIt.next().equals("cherry");
+        assert dksIt.next().equals("banana");
+        assert dksIt.next().equals("apple");
+        assert !dksIt.hasNext();
+        System.out.println("DescendingKeySet: PASS"); System.out.flush();
+
+        // Descending at scale vs TreeMap
+        t.clear();
+        TreeMap<String, Integer> descRef = new TreeMap<>();
+        var descRng = new java.util.Random(555);
+        for (int i = 0; i < 5000; i++) {
+            int len = 3 + descRng.nextInt(10);
+            var sb = new StringBuilder();
+            for (int j = 0; j < len; j++) sb.append((char)('a' + descRng.nextInt(26)));
+            t.put(sb.toString(), i); descRef.put(sb.toString(), i);
+        }
+        var descTrieIt = t.descendingMap().entrySet().iterator();
+        var descRefIt = descRef.descendingMap().entrySet().iterator();
+        int descChecked = 0;
+        while (descTrieIt.hasNext() && descRefIt.hasNext()) {
+            var te = descTrieIt.next(); var re = descRefIt.next();
+            assert te.getKey().equals(re.getKey()) : "desc key " + te.getKey() + " != " + re.getKey() + " at " + descChecked;
+            descChecked++;
+        }
+        assert !descTrieIt.hasNext() && !descRefIt.hasNext();
+        System.out.println("Descending vs TreeMap: PASS (" + descChecked + " entries)"); System.out.flush();
 
         System.out.println("\nALL PASS"); System.out.flush();
     }
