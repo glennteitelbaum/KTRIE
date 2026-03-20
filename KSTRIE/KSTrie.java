@@ -14,6 +14,8 @@ public class KSTrie<V> extends AbstractMap<String, V>
     private static final int PARENT_ROOT = -1;
     private static final int PARENT_EOS = -2;
 
+    private static final byte[] NO_SKIP = new byte[0];
+
     // === Node hierarchy ===
     static abstract sealed class Node permits BitmaskNode, CompactNode {
         BitmaskNode parent;
@@ -21,12 +23,12 @@ public class KSTrie<V> extends AbstractMap<String, V>
     }
 
     static final class BitmaskNode extends Node {
-        byte[] skip;            // null if none
+        byte[] skip = NO_SKIP;
         long b0, b1, b2, b3;
         Node[] children;        // [0]=sentinel, [1..N]=real, [last]=EOS
         long totalTailBytes;
 
-        int skipLen() { return skip == null ? 0 : skip.length; }
+        int skipLen() { return skip.length; }
         Node eosChild() { return children[children.length - 1]; }
         boolean hasEos() { return eosChild() != CompactNode.SENTINEL; }
 
@@ -118,12 +120,12 @@ public class KSTrie<V> extends AbstractMap<String, V>
     // === CompactNode ===
     @SuppressWarnings("rawtypes")
     static final class CompactNode extends Node {
-        byte[] skip;        // null if none
-        byte[] data;        // [F(cap) | L(cap) | O(2*cap) | keysuffix blob]
+        byte[] skip = NO_SKIP;
+        byte[] data;
         Object[] values;
         int count;
-        int capacity;       // allocated entry slots
-        int ksUsed;         // keysuffix blob bytes used
+        int capacity;
+        int ksUsed;
 
         static final CompactNode SENTINEL = new CompactNode();
         private static final int MIN_CAPACITY = 4;
@@ -135,7 +137,7 @@ public class KSTrie<V> extends AbstractMap<String, V>
         private CompactNode() { data = new byte[0]; values = new Object[0]; count = 0; capacity = 0; ksUsed = 0; }
         CompactNode(int dummy) { this(); }
 
-        int skipLen() { return skip == null ? 0 : skip.length; }
+        int skipLen() { return skip.length; }
 
         // --- Data accessors (use capacity for offsets) ---
         byte F(int i) { return data[i]; }
@@ -311,7 +313,7 @@ public class KSTrie<V> extends AbstractMap<String, V>
             int rem = key.length - consumed;
             if (rem == 0) return new BuildEntry((byte) 0, 0, null, value);
             byte fb = key[consumed];
-            byte[] tail = rem > 1 ? Arrays.copyOfRange(key, consumed + 1, key.length) : null;
+            byte[] tail = rem > 1 ? Arrays.copyOfRange(key, consumed + 1, key.length) : NO_SKIP;
             return new BuildEntry(fb, rem, tail, value);
         }
     }
@@ -323,7 +325,6 @@ public class KSTrie<V> extends AbstractMap<String, V>
 
     // === Skip helpers ===
     static boolean matchSkip(byte[] skip, byte[] key, int consumed) {
-        if (skip == null) return true;
         if (consumed + skip.length > key.length) return false;
         for (int i = 0; i < skip.length; i++)
             if (skip[i] != key[consumed + i]) return false;
@@ -331,7 +332,6 @@ public class KSTrie<V> extends AbstractMap<String, V>
     }
 
     static int skipMismatch(byte[] skip, byte[] key, int consumed) {
-        if (skip == null) return -1;
         int maxCmp = Math.min(skip.length, key.length - consumed);
         for (int i = 0; i < maxCmp; i++)
             if (skip[i] != key[consumed + i]) return i;
@@ -494,7 +494,7 @@ public class KSTrie<V> extends AbstractMap<String, V>
     private V putImpl(byte[] key, V value, boolean onlyIfAbsent) {
         if (root == CompactNode.SENTINEL) {
             BuildEntry[] e = { BuildEntry.fromKey(key, 0, value) };
-            root = buildCompact(null, e, 1);
+            root = buildCompact(NO_SKIP, e, 1);
             size++; modCount++;
             return null;
         }
@@ -517,7 +517,7 @@ public class KSTrie<V> extends AbstractMap<String, V>
             if (!bm.hasBit(b)) {
                 long oldTail = bm.totalTailBytes;
                 BuildEntry[] e = { BuildEntry.fromKey(key, consumed, value) };
-                CompactNode child = buildCompact(null, e, 1);
+                CompactNode child = buildCompact(NO_SKIP, e, 1);
                 bm.insertChild(b, child);
                 bm.totalTailBytes += nodeTailTotal(child);
                 propagateTail(bm.parent, nodeTailTotal(child));
@@ -551,7 +551,7 @@ public class KSTrie<V> extends AbstractMap<String, V>
         int ins = c.findInsertPos(key, consumed);
         int rem = key.length - consumed;
         byte fb = rem > 0 ? key[consumed] : 0;
-        byte[] tailBytes = rem > 1 ? Arrays.copyOfRange(key, consumed + 1, key.length) : null;
+        byte[] tailBytes = rem > 1 ? Arrays.copyOfRange(key, consumed + 1, key.length) : NO_SKIP;
         c.insertAt(ins, fb, rem, tailBytes, value);
 
         long delta = nodeTailTotal(c) - oldTail;
@@ -569,7 +569,7 @@ public class KSTrie<V> extends AbstractMap<String, V>
         Node eos = bm.eosChild();
         if (eos == CompactNode.SENTINEL) {
             BuildEntry[] e = { new BuildEntry((byte) 0, 0, null, value) };
-            CompactNode nc = buildCompact(null, e, 1);
+            CompactNode nc = buildCompact(NO_SKIP, e, 1);
             long oldTail = nodeTailTotal(eos);
             bm.setEosChild(nc);
             bm.totalTailBytes += nodeTailTotal(nc) - oldTail;
@@ -668,7 +668,7 @@ public class KSTrie<V> extends AbstractMap<String, V>
 
         // Find common skip among all entries
         byte[] newSkip = computeCommonSkip(entries);
-        int skipLen = newSkip == null ? 0 : newSkip.length;
+        int skipLen = newSkip.length;
 
         // Group by first byte after skip (entry suffix position skipLen)
         Map<Integer, List<BuildEntry>> groups = new LinkedHashMap<>();
@@ -692,13 +692,13 @@ public class KSTrie<V> extends AbstractMap<String, V>
                     full[0] = e.firstByte();
                     if (e.tail() != null) System.arraycopy(e.tail(), 0, full, 1, e.tail().length);
                     newF = full[skipLen];
-                    newTail = newLen > 1 ? Arrays.copyOfRange(full, skipLen + 1, full.length) : null;
+                    newTail = newLen > 1 ? Arrays.copyOfRange(full, skipLen + 1, full.length) : NO_SKIP;
                 }
                 int db = newF & 0xFF;
                 // Entry for child: remove dispatch byte
                 int childLen = newLen - 1;
                 byte childF = childLen > 0 && newTail != null && newTail.length > 0 ? newTail[0] : 0;
-                byte[] childTail = childLen > 1 && newTail != null ? Arrays.copyOfRange(newTail, 1, newTail.length) : null;
+                byte[] childTail = childLen > 1 && newTail != null ? Arrays.copyOfRange(newTail, 1, newTail.length) : NO_SKIP;
                 BuildEntry childEntry = new BuildEntry(childF, childLen, childTail, e.value());
                 groups.computeIfAbsent(db, k -> new ArrayList<>()).add(childEntry);
             }
@@ -715,7 +715,7 @@ public class KSTrie<V> extends AbstractMap<String, V>
         if (eosGroup.isEmpty()) {
             bm.children[cc + 1] = CompactNode.SENTINEL;
         } else {
-            CompactNode eosNode = buildCompact(null, eosGroup.toArray(new BuildEntry[0]), eosGroup.size());
+            CompactNode eosNode = buildCompact(NO_SKIP, eosGroup.toArray(new BuildEntry[0]), eosGroup.size());
             bm.children[cc + 1] = eosNode;
             eosNode.parent = bm; eosNode.parentByte = PARENT_EOS;
         }
@@ -728,7 +728,7 @@ public class KSTrie<V> extends AbstractMap<String, V>
             byte[] childSkip = computeCommonSkip(group.toArray(new BuildEntry[0]));
             // Trim childSkip from entries
             BuildEntry[] childEntries;
-            if (childSkip != null && childSkip.length > 0) {
+            if (childSkip.length > 0) {
                 childEntries = trimSkip(group.toArray(new BuildEntry[0]), childSkip.length);
             } else {
                 childEntries = group.toArray(new BuildEntry[0]);
@@ -757,17 +757,17 @@ public class KSTrie<V> extends AbstractMap<String, V>
         int oldParentByte = bmNode.parentByte;
 
         BitmaskNode bm = new BitmaskNode();
-        bm.skip = mm > 0 ? Arrays.copyOfRange(bmNode.skip, 0, mm) : null;
+        bm.skip = mm > 0 ? Arrays.copyOfRange(bmNode.skip, 0, mm) : NO_SKIP;
 
         int existByte = bmNode.skip[mm] & 0xFF;
         boolean keyExhausted = (consumed + mm >= key.length);
 
         int remaining = bmNode.skip.length - mm - 1;
-        bmNode.skip = remaining > 0 ? Arrays.copyOfRange(bmNode.skip, mm + 1, bmNode.skip.length) : null;
+        bmNode.skip = remaining > 0 ? Arrays.copyOfRange(bmNode.skip, mm + 1, bmNode.skip.length) : NO_SKIP;
 
         if (keyExhausted) {
             BuildEntry[] eosEntries = { new BuildEntry((byte) 0, 0, null, value) };
-            CompactNode eosNode = buildCompact(null, eosEntries, 1);
+            CompactNode eosNode = buildCompact(NO_SKIP, eosEntries, 1);
 
             bm.children = new Node[3]; // sentinel + 1 child + eos
             bm.children[0] = CompactNode.SENTINEL;
@@ -783,7 +783,7 @@ public class KSTrie<V> extends AbstractMap<String, V>
 
             BuildEntry[] e = { BuildEntry.fromKey(key, consumed + mm + 1, value) };
             
-            CompactNode nl = buildCompact(null, e, 1);
+            CompactNode nl = buildCompact(NO_SKIP, e, 1);
 
             int cc = 2;
             bm.children = new Node[cc + 2];
@@ -812,19 +812,19 @@ public class KSTrie<V> extends AbstractMap<String, V>
         int oldParentByte = cNode.parentByte;
 
         BitmaskNode bm = new BitmaskNode();
-        bm.skip = mm > 0 ? Arrays.copyOfRange(cNode.skip, 0, mm) : null;
+        bm.skip = mm > 0 ? Arrays.copyOfRange(cNode.skip, 0, mm) : NO_SKIP;
 
         int existByte = cNode.skip[mm] & 0xFF;
         boolean keyExhausted = (consumed + mm >= key.length);
 
         // Trim existing node's skip
         int remaining = cNode.skip.length - mm - 1;
-        cNode.skip = remaining > 0 ? Arrays.copyOfRange(cNode.skip, mm + 1, cNode.skip.length) : null;
+        cNode.skip = remaining > 0 ? Arrays.copyOfRange(cNode.skip, mm + 1, cNode.skip.length) : NO_SKIP;
 
         if (keyExhausted) {
             // New entry is EOS child, existing subtree is byte-dispatched
             BuildEntry[] eosEntries = { new BuildEntry((byte) 0, 0, null, value) };
-            CompactNode eosNode = buildCompact(null, eosEntries, 1);
+            CompactNode eosNode = buildCompact(NO_SKIP, eosEntries, 1);
 
             bm.children = new Node[3]; // sentinel + 1 child + eos
             bm.children[0] = CompactNode.SENTINEL;
@@ -840,7 +840,7 @@ public class KSTrie<V> extends AbstractMap<String, V>
 
             BuildEntry[] e = { BuildEntry.fromKey(key, consumed + mm + 1, value) };
             
-            CompactNode nl = buildCompact(null, e, 1);
+            CompactNode nl = buildCompact(NO_SKIP, e, 1);
 
             int cc = 2;
             bm.children = new Node[cc + 2];
@@ -877,7 +877,7 @@ public class KSTrie<V> extends AbstractMap<String, V>
         collectAllEntries(bm, all, new byte[0]);
         if (all.isEmpty()) { replaceNode(bm, CompactNode.SENTINEL); return; }
         byte[] skip = computeCommonSkip(all.toArray(new BuildEntry[0]));
-        BuildEntry[] entries = skip != null && skip.length > 0
+        BuildEntry[] entries = skip.length > 0
             ? trimSkip(all.toArray(new BuildEntry[0]), skip.length)
             : all.toArray(new BuildEntry[0]);
         CompactNode c = buildCompact(mergeSkip(bm.skip, skip), entries, entries.length);
@@ -888,7 +888,7 @@ public class KSTrie<V> extends AbstractMap<String, V>
         if (node == CompactNode.SENTINEL) return;
         if (node instanceof CompactNode c) {
             byte[] fullPrefix = prefix;
-            if (c.skip != null) fullPrefix = concat(prefix, c.skip);
+            if (c.skip.length > 0) fullPrefix = concat(prefix, c.skip);
             for (int i = 0; i < c.count; i++) {
                 int klen = c.L(i);
                 if (klen == 0) {
@@ -904,7 +904,7 @@ public class KSTrie<V> extends AbstractMap<String, V>
             return;
         }
         BitmaskNode bm = (BitmaskNode) node;
-        byte[] bp = bm.skip != null ? concat(prefix, bm.skip) : prefix;
+        byte[] bp = bm.skip.length > 0 ? concat(prefix, bm.skip) : prefix;
         collectAllEntries(bm.eosChild(), out, bp);
         int bit = bm.findNextSet(0);
         while (bit >= 0) {
@@ -921,9 +921,9 @@ public class KSTrie<V> extends AbstractMap<String, V>
         else return;
 
         if (child instanceof CompactNode cc) {
-            cc.skip = mergeSkip(bm.skip, db >= 0 ? new byte[]{(byte) db} : null, cc.skip);
+            cc.skip = mergeSkip(bm.skip, db >= 0 ? new byte[]{(byte) db} : NO_SKIP, cc.skip);
         } else if (child instanceof BitmaskNode bc) {
-            bc.skip = mergeSkip(bm.skip, db >= 0 ? new byte[]{(byte) db} : null, bc.skip);
+            bc.skip = mergeSkip(bm.skip, db >= 0 ? new byte[]{(byte) db} : NO_SKIP, bc.skip);
         }
         replaceNode(bm, child);
     }
@@ -956,16 +956,16 @@ public class KSTrie<V> extends AbstractMap<String, V>
     }
 
     static byte[] commonSkip(byte[] key, int off, int len) {
-        return len > 0 ? Arrays.copyOfRange(key, off, off + len) : null;
+        return len > 0 ? Arrays.copyOfRange(key, off, off + len) : NO_SKIP;
     }
 
     static byte[] computeCommonSkip(BuildEntry[] entries) {
-        if (entries.length <= 1) return null; // single entry doesn't need skip
+        if (entries.length <= 1) return NO_SKIP; // single entry doesn't need skip
         // Find common prefix of all suffixes
         byte[][] suffixes = new byte[entries.length][];
         for (int i = 0; i < entries.length; i++) {
             int klen = entries[i].suffixLen();
-            if (klen == 0) return null; // EOS entry — no common skip
+            if (klen == 0) return NO_SKIP; // EOS entry — no common skip
             suffixes[i] = new byte[klen];
             suffixes[i][0] = entries[i].firstByte();
             if (entries[i].tail() != null)
@@ -977,7 +977,7 @@ public class KSTrie<V> extends AbstractMap<String, V>
             for (int k = 0; k < common; k++)
                 if (suffixes[0][k] != suffixes[j][k]) { common = k; break; }
         }
-        return common > 0 ? Arrays.copyOf(suffixes[0], common) : null;
+        return common > 0 ? Arrays.copyOf(suffixes[0], common) : NO_SKIP;
     }
 
     static BuildEntry[] trimSkip(BuildEntry[] entries, int skipLen) {
@@ -992,7 +992,7 @@ public class KSTrie<V> extends AbstractMap<String, V>
                 full[0] = entries[i].firstByte();
                 if (entries[i].tail() != null) System.arraycopy(entries[i].tail(), 0, full, 1, entries[i].tail().length);
                 byte newF = full[skipLen];
-                byte[] newTail = newLen > 1 ? Arrays.copyOfRange(full, skipLen + 1, full.length) : null;
+                byte[] newTail = newLen > 1 ? Arrays.copyOfRange(full, skipLen + 1, full.length) : NO_SKIP;
                 result[i] = new BuildEntry(newF, newLen, newTail, entries[i].value());
             }
         }
@@ -1001,11 +1001,11 @@ public class KSTrie<V> extends AbstractMap<String, V>
 
     static byte[] mergeSkip(byte[]... parts) {
         int total = 0;
-        for (byte[] p : parts) if (p != null) total += p.length;
-        if (total == 0) return null;
+        for (byte[] p : parts) total += p.length;
+        if (total == 0) return NO_SKIP;
         byte[] result = new byte[total];
         int off = 0;
-        for (byte[] p : parts) if (p != null) { System.arraycopy(p, 0, result, off, p.length); off += p.length; }
+        for (byte[] p : parts) if (p.length > 0) { System.arraycopy(p, 0, result, off, p.length); off += p.length; }
         return result;
     }
 
@@ -1053,13 +1053,13 @@ public class KSTrie<V> extends AbstractMap<String, V>
             if (klen > 1) System.arraycopy(leaf.data, leaf.ksOff() + leaf.O(index), suffix, 1, klen - 1);
             parts.add(suffix);
         }
-        if (leaf.skip != null) parts.add(leaf.skip);
+        if (leaf.skip.length > 0) parts.add(leaf.skip);
 
         Node n = leaf;
         while (n.parent != null) {
             BitmaskNode bm = n.parent;
             if (n.parentByte >= 0) parts.add(new byte[]{(byte) n.parentByte});
-            if (bm.skip != null) parts.add(bm.skip);
+            if (bm.skip.length > 0) parts.add(bm.skip);
             n = bm;
         }
 
@@ -1241,7 +1241,6 @@ public class KSTrie<V> extends AbstractMap<String, V>
 
     // Does prefix end within skip? (prefix is shorter than skip but matches so far)
     static boolean matchSkipContains(byte[] skip, byte[] prefix, int consumed) {
-        if (skip == null) return true;
         int rem = prefix.length - consumed;
         if (rem >= skip.length) return false; // not a partial match
         for (int i = 0; i < rem; i++) if (skip[i] != prefix[consumed + i]) return false;
@@ -1249,7 +1248,6 @@ public class KSTrie<V> extends AbstractMap<String, V>
     }
 
     static boolean matchSkipPartial(byte[] skip, byte[] prefix, int consumed, int skipLen) {
-        if (skip == null) return true;
         int rem = prefix.length - consumed;
         if (rem < skipLen) return false; // can't fully match skip — handle separately
         for (int i = 0; i < skipLen; i++) if (skip[i] != prefix[consumed + i]) return false;
