@@ -166,7 +166,9 @@ Descendants are not stored in the node header. Internal nodes store a `uint64_t`
 
 ```
 depth_t {
-    is_skip  : 1    // whether this leaf has prefix bytes to check
+    is_skip  : 1    // whether this leaf has prefix bytes to check;
+                    // redundant (is_skip ≡ skip ≠ 0) but deliberate —
+                    // testing one bit avoids reading the skip count on the hot read path
     skip     : 3    // number of prefix bytes to compare (0-6)
     consumed : 6    // total bits resolved above this leaf (0-56, always a multiple of 8)
     shift    : 6    // = 64 - suffix_width_bits, only {0, 32, 48, 56} for suffix types u64/u32/u16/u8

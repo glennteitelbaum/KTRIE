@@ -227,7 +227,7 @@ Finding an entry in a compact node is a two-phase process. The first phase locat
 
 **Phase 1: binary search on F.** Entries are sorted by `(F[i], tail)`. A binary search over the F array finds the range of entries matching the target's first byte. Because F is a dense byte array, this search touches minimal cache lines.
 
-**Phase 2: suffix comparison.** Within the range of entries sharing the same first byte, a linear scan compares each entry's full suffix (first byte + tail bytes from keysuffix) against the lookup key's remaining bytes. The scan is short because entries sharing a first byte are typically few.
+**Phase 2: suffix comparison.** Within the range of entries sharing the same first byte, a linear scan compares each entry's full suffix (first byte + tail bytes from keysuffix) against the lookup key's remaining bytes. Each comparison reads F[i] as the first byte, then performs memcmp against B + O[i] for the remaining L[i] − 1 tail bytes. The O[] indirection into the contiguous keysuffix region preserves cache locality despite variable-length suffixes. The scan is short because entries sharing a first byte are typically few.
 
 For entries with `L[i] = 0` (end-of-string), the match succeeds only if the lookup key is also exhausted at this point.
 
@@ -276,6 +276,8 @@ Erasure from a compact node follows one of three cases:
 **Case C: Standalone.** The erased entry's tail bytes are entirely its own. All of them are reclaimed from the keysuffix region.
 
 In all cases, the L, F, O, and value arrays are shifted to close the gap left by the erased entry.
+
+Erase actively reclaims keysuffix bytes. When a standalone entry or chain head is erased, its tail bytes are removed from the keysuffix region via memmove and all O[] offsets are adjusted. Chain sharer erasure requires no keysuffix change because the shared bytes are still referenced by the remaining chain entries. Node capacity shrinks when count drops below cap/2: the node is rebuilt with a tight allocation, eliminating any excess capacity from prior growth (see §3.2.5).
 
 #### 3.2.5 Grow and Shrink
 
