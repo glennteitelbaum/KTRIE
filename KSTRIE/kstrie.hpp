@@ -263,9 +263,9 @@ public:
         const uint8_t* raw = reinterpret_cast<const uint8_t*>(pfx.data());
         uint32_t len = static_cast<uint32_t>(pfx.size());
         uint8_t stack_buf[256];
-        auto [mapped, heap_buf] = kstrie_detail::get_mapped<CHARMAP>(
+        auto [mapped, raw_buf] = kstrie_detail::get_mapped<CHARMAP>(
             raw, len, stack_buf, sizeof(stack_buf));
-        std::unique_ptr<uint8_t[]> heap_guard(heap_buf);
+        std::unique_ptr<uint8_t[]> heap_guard(raw_buf);
         size_t result = impl_v.prefix_count_impl(mapped, len);
         return result;
     }
@@ -275,9 +275,9 @@ public:
         const uint8_t* raw = reinterpret_cast<const uint8_t*>(pfx.data());
         uint32_t len = static_cast<uint32_t>(pfx.size());
         uint8_t stack_buf[256];
-        auto [mapped, heap_buf] = kstrie_detail::get_mapped<CHARMAP>(
+        auto [mapped, raw_buf] = kstrie_detail::get_mapped<CHARMAP>(
             raw, len, stack_buf, sizeof(stack_buf));
-        std::unique_ptr<uint8_t[]> heap_guard(heap_buf);
+        std::unique_ptr<uint8_t[]> heap_guard(raw_buf);
         impl_v.prefix_walk_impl(mapped, len, pfx, std::forward<F>(fn));
     }
 
@@ -294,9 +294,9 @@ public:
         const uint8_t* raw = reinterpret_cast<const uint8_t*>(pfx.data());
         uint32_t len = static_cast<uint32_t>(pfx.size());
         uint8_t stack_buf[256];
-        auto [mapped, heap_buf] = kstrie_detail::get_mapped<CHARMAP>(
+        auto [mapped, raw_buf] = kstrie_detail::get_mapped<CHARMAP>(
             raw, len, stack_buf, sizeof(stack_buf));
-        std::unique_ptr<uint8_t[]> heap_guard(heap_buf);
+        std::unique_ptr<uint8_t[]> heap_guard(raw_buf);
         kstrie result;
         auto r = impl_v.prefix_clone(mapped, len, result.impl_v.get_mem());
         if (r.cloned != impl_v.get_sentinel()) {
@@ -312,9 +312,9 @@ public:
         const uint8_t* raw = reinterpret_cast<const uint8_t*>(pfx.data());
         uint32_t len = static_cast<uint32_t>(pfx.size());
         uint8_t stack_buf[256];
-        auto [mapped, heap_buf] = kstrie_detail::get_mapped<CHARMAP>(
+        auto [mapped, raw_buf] = kstrie_detail::get_mapped<CHARMAP>(
             raw, len, stack_buf, sizeof(stack_buf));
-        std::unique_ptr<uint8_t[]> heap_guard(heap_buf);
+        std::unique_ptr<uint8_t[]> heap_guard(raw_buf);
         size_t result = impl_v.prefix_erase(mapped, len);
         return result;
     }
@@ -323,9 +323,9 @@ public:
         const uint8_t* raw = reinterpret_cast<const uint8_t*>(pfx.data());
         uint32_t len = static_cast<uint32_t>(pfx.size());
         uint8_t stack_buf[256];
-        auto [mapped, heap_buf] = kstrie_detail::get_mapped<CHARMAP>(
+        auto [mapped, raw_buf] = kstrie_detail::get_mapped<CHARMAP>(
             raw, len, stack_buf, sizeof(stack_buf));
-        std::unique_ptr<uint8_t[]> heap_guard(heap_buf);
+        std::unique_ptr<uint8_t[]> heap_guard(raw_buf);
         auto r = impl_v.prefix_split_impl(mapped, len);
         kstrie result;
         if (r.stolen != impl_v.get_sentinel()) {
@@ -524,9 +524,9 @@ private:
         uint32_t len = static_cast<uint32_t>(current.size());
 
         uint8_t stack_buf[256];
-        auto [mapped, heap_buf] = kstrie_detail::get_mapped<CHARMAP>(raw, len,
+        auto [mapped, raw_buf] = kstrie_detail::get_mapped<CHARMAP>(raw, len,
                                               stack_buf, sizeof(stack_buf));
-        std::unique_ptr<uint8_t[]> heap_guard(heap_buf);
+        std::unique_ptr<uint8_t[]> heap_guard(raw_buf);
 
         std::string result;
         const VALUE* val = find_next_impl(impl_v.get_root(), mapped, len,
@@ -609,9 +609,9 @@ private:
         uint32_t len = static_cast<uint32_t>(current.size());
 
         uint8_t stack_buf[256];
-        auto [mapped, heap_buf] = kstrie_detail::get_mapped<CHARMAP>(raw, len,
+        auto [mapped, raw_buf] = kstrie_detail::get_mapped<CHARMAP>(raw, len,
                                               stack_buf, sizeof(stack_buf));
-        std::unique_ptr<uint8_t[]> heap_guard(heap_buf);
+        std::unique_ptr<uint8_t[]> heap_guard(raw_buf);
 
         std::string result;
         const VALUE* val = find_prev_impl(impl_v.get_root(), mapped, len,
@@ -692,9 +692,9 @@ private:
         uint32_t len = static_cast<uint32_t>(key.size());
 
         uint8_t stack_buf[256];
-        auto [mapped, heap_buf] = kstrie_detail::get_mapped<CHARMAP>(raw, len,
+        auto [mapped, raw_buf] = kstrie_detail::get_mapped<CHARMAP>(raw, len,
                                               stack_buf, sizeof(stack_buf));
-        std::unique_ptr<uint8_t[]> heap_guard(heap_buf);
+        std::unique_ptr<uint8_t[]> heap_guard(raw_buf);
 
         std::string result;
         const VALUE* val = find_ge_impl(impl_v.get_root(), mapped, len,
@@ -837,9 +837,9 @@ private:
         uint32_t len = static_cast<uint32_t>(pfx.size());
 
         uint8_t stack_buf[256];
-        auto [mapped, heap_buf] = kstrie_detail::get_mapped<CHARMAP>(raw, len,
+        auto [mapped, raw_buf] = kstrie_detail::get_mapped<CHARMAP>(raw, len,
                                               stack_buf, sizeof(stack_buf));
-        std::unique_ptr<uint8_t[]> heap_guard(heap_buf);
+        std::unique_ptr<uint8_t[]> heap_guard(raw_buf);
 
         struct right_turn {
             const uint64_t* bm_node;

@@ -632,9 +632,9 @@ private:
             return find_inner(key_data, key_len);
         } else {
             uint8_t stack_buf[256];
-            auto [mapped, heap_buf] = get_mapped<CHARMAP>(key_data, key_len,
+            auto [mapped, raw_buf] = get_mapped<CHARMAP>(key_data, key_len,
                                                   stack_buf, sizeof(stack_buf));
-            std::unique_ptr<uint8_t[]> heap_guard(heap_buf);
+            std::unique_ptr<uint8_t[]> heap_guard(raw_buf);
             const VALUE* result = find_inner(mapped, key_len);
             return result;
         }
@@ -811,9 +811,9 @@ public:
             return modify_inner(raw, len, std::forward<F>(fn));
         } else {
             uint8_t stack_buf[256];
-            auto [mapped, heap_buf] = get_mapped<CHARMAP>(raw, len,
+            auto [mapped, raw_buf] = get_mapped<CHARMAP>(raw, len,
                                                   stack_buf, sizeof(stack_buf));
-            std::unique_ptr<uint8_t[]> heap_guard(heap_buf);
+        std::unique_ptr<uint8_t[]> heap_guard(raw_buf);
             bool result = modify_inner(mapped, len, std::forward<F>(fn));
             return result;
         }
@@ -826,9 +826,9 @@ public:
         uint32_t len = static_cast<uint32_t>(key.size());
 
         uint8_t stack_buf[256];
-        auto [mapped, heap_buf] = get_mapped<CHARMAP>(raw, len,
+        auto [mapped, raw_buf] = get_mapped<CHARMAP>(raw, len,
                                               stack_buf, sizeof(stack_buf));
-        std::unique_ptr<uint8_t[]> heap_guard(heap_buf);
+        std::unique_ptr<uint8_t[]> heap_guard(raw_buf);
 
         erase_info r = erase_node(root_v, mapped, len, 0);
 
@@ -867,9 +867,9 @@ public:
         uint32_t len = static_cast<uint32_t>(key.size());
 
         uint8_t stack_buf[256];
-        auto [mapped, heap_buf] = get_mapped<CHARMAP>(raw, len,
+        auto [mapped, raw_buf] = get_mapped<CHARMAP>(raw, len,
                                               stack_buf, sizeof(stack_buf));
-        std::unique_ptr<uint8_t[]> heap_guard(heap_buf);
+        std::unique_ptr<uint8_t[]> heap_guard(raw_buf);
 
         erase_info r = erase_when_node(root_v, mapped, len, 0,
                                        std::forward<F>(fn));
@@ -1828,9 +1828,9 @@ private:
         uint32_t len = static_cast<uint32_t>(key.size());
 
         uint8_t stack_buf[256];
-        auto [mapped, heap_buf] = get_mapped<CHARMAP>(raw, len,
+        auto [mapped, raw_buf] = get_mapped<CHARMAP>(raw, len,
                                               stack_buf, sizeof(stack_buf));
-        std::unique_ptr<uint8_t[]> heap_guard(heap_buf);
+        std::unique_ptr<uint8_t[]> heap_guard(raw_buf);
 
         insert_result r = insert_node(root_v, mapped, len, value, 0, mode);
         root_v = r.node;
@@ -2015,7 +2015,7 @@ private:
             return mem_v.alloc_node(1);
 
         using be = typename compact_type::build_entry;
-        be* arr = new be[count];
+        auto arr = std::make_unique<be[]>(count);
         for (size_t i = 0; i < count; ++i) {
             uint64_t raw = slots_type::make_raw(*entries[i].value, mem_v.alloc_v);
             arr[i].key      = entries[i].suffix;
@@ -2023,8 +2023,7 @@ private:
             arr[i].raw_slot = raw;
         }
         uint64_t* node = compact_type::build_compact(
-            mem_v, 0, nullptr, arr, static_cast<uint16_t>(count));
-        delete[] arr;
+            mem_v, 0, nullptr, arr.get(), static_cast<uint16_t>(count));
         return node;
     }
 };
