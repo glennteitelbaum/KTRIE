@@ -16,6 +16,14 @@ public class KSTrie<V> extends AbstractMap<String, V>
 
     private static final byte[] NO_SKIP = new byte[0];
 
+    // Byte-order string comparison (UTF-8 unsigned byte order, matching trie sort).
+    // String.compareTo uses UTF-16 code unit order which diverges for non-ASCII.
+    private static int compareByteOrder(String a, String b) {
+        return Arrays.compareUnsigned(
+            a.getBytes(StandardCharsets.UTF_8),
+            b.getBytes(StandardCharsets.UTF_8));
+    }
+
     // === Node hierarchy ===
     static abstract sealed class Node permits BitmaskNode, CompactNode {
         BitmaskNode parent;
@@ -343,9 +351,8 @@ public class KSTrie<V> extends AbstractMap<String, V>
     static long nodeTailTotal(Node node) {
         if (node == CompactNode.SENTINEL) return 0;
         if (node instanceof CompactNode c) {
-            long ksUsed = 0;
-            for (int i = 0; i < c.count; i++) ksUsed += c.L(i);
-            return ksUsed + (long) c.count * (1 + c.skipLen());
+            // ksUsed is actual keysuffix tail bytes (excludes F bytes), matching C++ keysuffix_used
+            return c.ksUsed + (long) c.count * (1 + c.skipLen());
         }
         return ((BitmaskNode) node).totalTailBytes;
     }
@@ -673,6 +680,7 @@ public class KSTrie<V> extends AbstractMap<String, V>
         byte[] bmSkip = mergeSkip(leaf.skip, entrySkip);
 
         // Group by first byte after skip (entry suffix position skipLen)
+        // LinkedHashMap preserves byte-ascending insertion order from the for-b loop
         Map<Integer, List<BuildEntry>> groups = new LinkedHashMap<>();
         List<BuildEntry> eosGroup = new ArrayList<>();
 
@@ -1395,7 +1403,14 @@ public class KSTrie<V> extends AbstractMap<String, V>
 
         @Override public int size() { return map.size(); }
         @Override public boolean contains(Object o) { return map.containsKey(o); }
-        @Override public Iterator<String> iterator() { return map.entrySet().stream().map(Map.Entry::getKey).iterator(); }
+        @Override public Iterator<String> iterator() {
+            var ei = map.entrySet().iterator();
+            return new Iterator<>() {
+                public boolean hasNext() { return ei.hasNext(); }
+                public String next() { return ei.next().getKey(); }
+                public void remove() { ei.remove(); }
+            };
+        }
         @Override public String first() { return map.firstKey(); }
         @Override public String last() { return map.lastKey(); }
         @Override public String lower(String e) { return map.lowerKey(e); }
@@ -1475,11 +1490,11 @@ public class KSTrie<V> extends AbstractMap<String, V>
 
         private boolean inRange(String key) {
             if (fromKey != null) {
-                int c = key.compareTo(fromKey);
+                int c = compareByteOrder(key, fromKey);
                 if (c < 0 || (c == 0 && !fromInclusive)) return false;
             }
             if (toKey != null) {
-                int c = key.compareTo(toKey);
+                int c = compareByteOrder(key, toKey);
                 if (c > 0 || (c == 0 && !toInclusive)) return false;
             }
             return true;
@@ -1542,15 +1557,34 @@ public class KSTrie<V> extends AbstractMap<String, V>
         @Override public String floorKey(String k) { var e = floorEntry(k); return e == null ? null : e.getKey(); }
         @Override public String higherKey(String k) { var e = higherEntry(k); return e == null ? null : e.getKey(); }
         @Override public String lowerKey(String k) { var e = lowerEntry(k); return e == null ? null : e.getKey(); }
-        @Override public NavigableMap<String, V> subMap(String a, boolean ai, String b, boolean bi) { return KSTrie.this.subMap(a, ai, b, bi); }
-        @Override public NavigableMap<String, V> headMap(String t, boolean i) { return KSTrie.this.headMap(t, i); }
-        @Override public NavigableMap<String, V> tailMap(String f, boolean i) { return KSTrie.this.tailMap(f, i); }
+        @Override public NavigableMap<String, V> subMap(String a, boolean ai, String b, boolean bi) {
+            if (fromKey != null && compareByteOrder(a, fromKey) < 0) throw new IllegalArgumentException("fromKey out of range");
+            if (toKey != null && compareByteOrder(b, toKey) > 0) throw new IllegalArgumentException("toKey out of range");
+            return KSTrie.this.subMap(a, ai, b, bi);
+        }
+        @Override public NavigableMap<String, V> headMap(String t, boolean i) {
+            if (toKey != null && compareByteOrder(t, toKey) > 0) throw new IllegalArgumentException("toKey out of range");
+            if (fromKey != null) return KSTrie.this.subMap(fromKey, fromInclusive, t, i);
+            return KSTrie.this.headMap(t, i);
+        }
+        @Override public NavigableMap<String, V> tailMap(String f, boolean i) {
+            if (fromKey != null && compareByteOrder(f, fromKey) < 0) throw new IllegalArgumentException("fromKey out of range");
+            if (toKey != null) return KSTrie.this.subMap(f, i, toKey, toInclusive);
+            return KSTrie.this.tailMap(f, i);
+        }
         @Override public SortedMap<String, V> subMap(String a, String b) { return subMap(a, true, b, false); }
         @Override public SortedMap<String, V> headMap(String t) { return headMap(t, false); }
         @Override public SortedMap<String, V> tailMap(String f) { return tailMap(f, true); }
         @Override public NavigableSet<String> navigableKeySet() { return new KeySet(this); }
-        @Override public NavigableSet<String> descendingKeySet() { throw new UnsupportedOperationException("SubMap.descendingKeySet"); }
-        @Override public NavigableMap<String, V> descendingMap() { throw new UnsupportedOperationException("SubMap.descendingMap"); }
+        @Override public NavigableSet<String> descendingKeySet() { return new KeySet(descendingMap()); }
+        @Override public NavigableMap<String, V> descendingMap() {
+            // Compose: parent's descending map with swapped bounds
+            NavigableMap<String, V> desc = KSTrie.this.descendingMap();
+            if (fromKey != null && toKey != null) return desc.subMap(toKey, toInclusive, fromKey, fromInclusive);
+            if (fromKey != null) return desc.headMap(fromKey, fromInclusive);
+            if (toKey != null) return desc.tailMap(toKey, toInclusive);
+            return desc;
+        }
     }
 
     // === Prefix operations ===

@@ -62,14 +62,18 @@ public class KSTrieBench {
         long t0 = System.nanoTime();
         int found = 0;
         for (String k : keys) if (map.get(k) != null) found++;
-        return System.nanoTime() - t0;
+        long elapsed = System.nanoTime() - t0;
+        assert found == keys.length : "get: found=" + found + " expected=" + keys.length;
+        return elapsed;
     }
 
     static long benchGetMiss(Map<String, Integer> map, String[] missKeys) {
         long t0 = System.nanoTime();
         int found = 0;
         for (String k : missKeys) if (map.get(k) != null) found++;
-        return System.nanoTime() - t0;
+        long elapsed = System.nanoTime() - t0;
+        assert found == 0 : "miss: found=" + found;
+        return elapsed;
     }
 
     static long benchIterate(Map<String, Integer> map) {

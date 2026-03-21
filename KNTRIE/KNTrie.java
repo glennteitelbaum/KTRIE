@@ -52,6 +52,8 @@ public class KNTrie<V> extends AbstractMap<Long, V>
         }
 
         // Branchless dispatch: returns child on hit, sentinel on miss
+        // Intentional duplication of slotOf() popcount arithmetic for dispatch hot path.
+        // dispatch inlines the branchless sentinel-on-miss pattern.
         Node dispatch(int idx) {
             int w = idx >> 6, b = idx & 63;
             long shifted = word(w) << (63 - b);
@@ -293,8 +295,12 @@ public class KNTrie<V> extends AbstractMap<Long, V>
 
         // --- Overwrite all dups of a key with new value ---
         void updateValue(long target, Object newVal) {
-            for (int i = 0; i < keys.length; i++)
-                if (keys[i] == target) values[i] = newVal;
+            // Dup run is contiguous — scan only the run, not the full array
+            int pos = findBase(target);
+            if (keys[pos] != target) return;
+            values[pos] = newVal;
+            for (int i = pos - 1; i >= 0 && keys[i] == target; i--) values[i] = newVal;
+            for (int i = pos + 1; i < keys.length && keys[i] == target; i++) values[i] = newVal;
         }
 
         // --- Shrink if way under-utilized ---
@@ -967,7 +973,14 @@ public class KNTrie<V> extends AbstractMap<Long, V>
         KeySet(NavigableMap<Long, ?> map) { this.map = map; }
         @Override public int size() { return map.size(); }
         @Override public boolean contains(Object o) { return map.containsKey(o); }
-        @Override public Iterator<Long> iterator() { return map.entrySet().stream().map(Entry::getKey).iterator(); }
+        @Override public Iterator<Long> iterator() {
+            var ei = map.entrySet().iterator();
+            return new Iterator<>() {
+                public boolean hasNext() { return ei.hasNext(); }
+                public Long next() { return ei.next().getKey(); }
+                public void remove() { ei.remove(); }
+            };
+        }
         @Override public Long first() { return map.firstKey(); }
         @Override public Long last() { return map.lastKey(); }
         @Override public Long lower(Long e) { return map.lowerKey(e); }
@@ -1133,15 +1146,29 @@ public class KNTrie<V> extends AbstractMap<Long, V>
         @Override public Long higherKey(Long k) { var e = higherEntry(k); return e == null ? null : e.getKey(); }
         @Override public Long lowerKey(Long k) { var e = lowerEntry(k); return e == null ? null : e.getKey(); }
 
-        @Override public NavigableMap<Long, V> subMap(Long a, boolean ai, Long b, boolean bi) { return KNTrie.this.subMap(a, ai, b, bi); }
-        @Override public NavigableMap<Long, V> headMap(Long t, boolean i) { return KNTrie.this.headMap(t, i); }
-        @Override public NavigableMap<Long, V> tailMap(Long f, boolean i) { return KNTrie.this.tailMap(f, i); }
+        @Override public NavigableMap<Long, V> subMap(Long a, boolean ai, Long b, boolean bi) {
+            if (fromKey != null && Long.compare(a, fromKey) < 0) throw new IllegalArgumentException("fromKey out of range");
+            if (toKey != null && Long.compare(b, toKey) > 0) throw new IllegalArgumentException("toKey out of range");
+            return KNTrie.this.subMap(a, ai, b, bi);
+        }
+        @Override public NavigableMap<Long, V> headMap(Long t, boolean i) {
+            if (toKey != null && Long.compare(t, toKey) > 0) throw new IllegalArgumentException("toKey out of range");
+            return KNTrie.this.subMap(fromKey != null ? fromKey : Long.MIN_VALUE, fromInclusive, t, i);
+        }
+        @Override public NavigableMap<Long, V> tailMap(Long f, boolean i) {
+            if (fromKey != null && Long.compare(f, fromKey) < 0) throw new IllegalArgumentException("fromKey out of range");
+            return KNTrie.this.subMap(f, i, toKey != null ? toKey : Long.MAX_VALUE, toInclusive);
+        }
         @Override public SortedMap<Long, V> subMap(Long a, Long b) { return subMap(a, true, b, false); }
         @Override public SortedMap<Long, V> headMap(Long t) { return headMap(t, false); }
         @Override public SortedMap<Long, V> tailMap(Long f) { return tailMap(f, true); }
         @Override public NavigableSet<Long> navigableKeySet() { return new KeySet(this); }
-        @Override public NavigableSet<Long> descendingKeySet() { throw new UnsupportedOperationException("SubMap.descendingKeySet"); }
-        @Override public NavigableMap<Long, V> descendingMap() { throw new UnsupportedOperationException("SubMap.descendingMap"); }
+        @Override public NavigableSet<Long> descendingKeySet() { return new KeySet(descendingMap()); }
+        @Override public NavigableMap<Long, V> descendingMap() {
+            return KNTrie.this.descendingMap().subMap(
+                toKey != null ? toKey : Long.MAX_VALUE, toInclusive,
+                fromKey != null ? fromKey : Long.MIN_VALUE, fromInclusive);
+        }
     }
 
     // === Iterator ===
