@@ -1158,7 +1158,7 @@ public class KSTrie<V> extends AbstractMap<String, V>
     @Override public void clear() { root = CompactNode.SENTINEL; size = 0; modCount++; }
 
     // === NavigableMap ===
-    @Override public Comparator<? super String> comparator() { return null; }
+    @Override public Comparator<? super String> comparator() { return KSTrie::compareByteOrder; }
     @Override public String firstKey() { CompactNode c = descendFirst(root); if (c == null) throw new NoSuchElementException(); return reconstructKey(c, 0); }
     @Override public String lastKey() { CompactNode c = descendLast(root); if (c == null) throw new NoSuchElementException(); return reconstructKey(c, c.count - 1); }
     @Override public Map.Entry<String, V> firstEntry() { CompactNode c = descendFirst(root); return c == null ? null : makeEntry(c, 0); }
@@ -1486,7 +1486,7 @@ public class KSTrie<V> extends AbstractMap<String, V>
             };
         }
 
-        @Override public Comparator<? super String> comparator() { return Comparator.<String>naturalOrder().reversed(); }
+        @Override public Comparator<? super String> comparator() { return KSTrie.this.comparator().reversed(); }
         @Override public String firstKey() { return KSTrie.this.lastKey(); }
         @Override public String lastKey() { return KSTrie.this.firstKey(); }
         @Override public Entry<String, V> firstEntry() { return KSTrie.this.lastEntry(); }
@@ -1577,7 +1577,7 @@ public class KSTrie<V> extends AbstractMap<String, V>
             };
         }
 
-        @Override public Comparator<? super String> comparator() { return null; }
+        @Override public Comparator<? super String> comparator() { return KSTrie.this.comparator(); }
         @Override public String firstKey() { var e = loEntry(); if (e == null || !inRange(e.getKey())) throw new NoSuchElementException(); return e.getKey(); }
         @Override public String lastKey() {
             Entry<String, V> e = toKey != null ? (toInclusive ? KSTrie.this.floorEntry(toKey) : KSTrie.this.lowerEntry(toKey)) : KSTrie.this.lastEntry();
