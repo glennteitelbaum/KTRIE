@@ -22,4 +22,4 @@ Concepts that apply to both implementations
 
 - Be aware that: KNTRIE/KSTRIE Use snapshot iterators, so a modify method is included
 
-*Note: This was done vibe coding with Claude Opus 4.6*
+*Note: This was done using AI-assisted development with Claude Opus 4.6*
