@@ -290,7 +290,7 @@ inline uint64_t* bm_to_node(uint64_t ptr) noexcept {
     return reinterpret_cast<uint64_t*>(static_cast<std::uintptr_t>(ptr)) - 1;
 }
 inline const uint64_t* bm_to_node_const(uint64_t ptr) noexcept {
-    return reinterpret_cast<const uint64_t*>(ptr) - 1;
+    return reinterpret_cast<const uint64_t*>(static_cast<std::uintptr_t>(ptr)) - 1;
 }
 
 // Dynamic header size: only for bitmask nodes (always 1 u64).
@@ -686,26 +686,114 @@ public:
             if (src[i]) set(i, true);
     }
 
+private:
+    static constexpr unsigned WORD_HIGH_BIT = U64_BITS - 1;  // 63
+
+    // Mask with bits [0, b) set.  lo_mask(0)=0, lo_mask(64)=~0.
+    static constexpr uint64_t lo_mask(unsigned b) noexcept {
+        return b >= U64_BITS ? ~uint64_t{0} : (uint64_t{1} << b) - 1;
+    }
+
+public:
     // Shift bits [from, from+count) left by 1 (toward lower index).
-    // Bit at 'from' is overwritten. Bit at from+count is unchanged.
+    // Bit at 'from-1' is overwritten. Bit at from+count-1 moves to from+count-2.
     // Equivalent to memmove(vd + from - 1, vd + from, count) for 1-byte slots.
+    // O(N/64) — word-level shift with carry.
     void shift_left_1(unsigned from, unsigned count) noexcept {
-        for (unsigned i = 0; i < count; ++i)
-            set(from - 1 + i, get(from + i));
+        if (count == 0) return;
+        unsigned dst  = from - 1;           // first destination bit
+        unsigned end  = from + count - 1;   // last source bit
+        unsigned w_lo = dst / U64_BITS;
+        unsigned w_hi = end / U64_BITS;
+        unsigned b_lo = dst % U64_BITS;
+        unsigned b_hi = end % U64_BITS;
+
+        if (w_lo == w_hi) {
+            // Single word: right-shift bits (b_lo+1..b_hi) by 1 within the word
+            uint64_t src_mask  = lo_mask(b_hi + 1) & ~lo_mask(b_lo + 1);
+            uint64_t dest_bit  = uint64_t{1} << b_lo;
+            uint64_t preserved = data[w_lo] & ~(src_mask | dest_bit);
+            data[w_lo] = preserved | ((data[w_lo] & src_mask) >> 1);
+            return;
+        }
+
+        // Multi-word: save bits outside the destination range
+        uint64_t save_lo = data[w_lo] & lo_mask(b_lo);
+        uint64_t save_hi = data[w_hi] & ~lo_mask(b_hi + 1);
+
+        // Right-shift within words, carry from word above (low to high)
+        for (unsigned w = w_lo; w < w_hi; ++w)
+            data[w] = (data[w] >> 1) | (data[w + 1] << WORD_HIGH_BIT);
+        data[w_hi] >>= 1;
+
+        // Restore boundary bits
+        data[w_lo] = (data[w_lo] & ~lo_mask(b_lo)) | save_lo;
+        data[w_hi] = (data[w_hi] & lo_mask(b_hi + 1)) | save_hi;
     }
 
     // Shift bits [from, from+count) right by 1 (toward higher index).
     // Bit at from+count is overwritten. Bit at 'from' is freed.
     // Equivalent to memmove(vd + from + 1, vd + from, count) for 1-byte slots.
+    // O(N/64) — word-level shift with carry.
     void shift_right_1(unsigned from, unsigned count) noexcept {
-        for (unsigned i = count; i > 0; --i)
-            set(from + i, get(from + i - 1));
+        if (count == 0) return;
+        unsigned end  = from + count;       // last destination bit
+        unsigned w_lo = from / U64_BITS;
+        unsigned w_hi = end  / U64_BITS;
+        unsigned b_lo = from % U64_BITS;
+        unsigned b_hi = end  % U64_BITS;
+
+        if (w_lo == w_hi) {
+            // Single word: left-shift bits (b_lo..b_hi-1) by 1 within the word
+            uint64_t src_mask  = lo_mask(b_hi) & ~lo_mask(b_lo);
+            uint64_t dest_bit  = uint64_t{1} << b_hi;
+            uint64_t preserved = data[w_lo] & ~(src_mask | dest_bit);
+            data[w_lo] = preserved | ((data[w_lo] & src_mask) << 1);
+            return;
+        }
+
+        // Multi-word: save bits outside the source/dest range
+        uint64_t save_lo = data[w_lo] & lo_mask(b_lo);
+        uint64_t save_hi = data[w_hi] & ~lo_mask(b_hi + 1);
+
+        // Left-shift within words, carry from word below (high to low)
+        for (unsigned w = w_hi; w > w_lo; --w)
+            data[w] = (data[w] << 1) | (data[w - 1] >> WORD_HIGH_BIT);
+        data[w_lo] <<= 1;
+
+        // Restore boundary bits
+        data[w_lo] = (data[w_lo] & ~lo_mask(b_lo)) | save_lo;
+        data[w_hi] = (data[w_hi] & lo_mask(b_hi + 1)) | save_hi;
     }
 
     // Fill bits [from, from+count) with value v.
+    // O(N/64) — word-level mask and fill.
     void fill_range(unsigned from, unsigned count, bool v) noexcept {
-        for (unsigned i = 0; i < count; ++i)
-            set(from + i, v);
+        if (count == 0) return;
+        unsigned end  = from + count;
+        unsigned w_lo = from       / U64_BITS;
+        unsigned w_hi = (end - 1)  / U64_BITS;
+        unsigned b_lo = from       % U64_BITS;
+        unsigned b_hi = (end - 1)  % U64_BITS;
+        uint64_t fill = v ? ~uint64_t{0} : uint64_t{0};
+
+        if (w_lo == w_hi) {
+            uint64_t mask = lo_mask(b_hi + 1) & ~lo_mask(b_lo);
+            data[w_lo] = (data[w_lo] & ~mask) | (fill & mask);
+            return;
+        }
+
+        // First word: fill bits [b_lo, 63]
+        uint64_t first_mask = ~lo_mask(b_lo);
+        data[w_lo] = (data[w_lo] & ~first_mask) | (fill & first_mask);
+
+        // Interior words
+        for (unsigned w = w_lo + 1; w < w_hi; ++w)
+            data[w] = fill;
+
+        // Last word: fill bits [0, b_hi]
+        uint64_t last_mask = lo_mask(b_hi + 1);
+        data[w_hi] = (data[w_hi] & ~last_mask) | (fill & last_mask);
     }
 
     static constexpr size_t u64_for(unsigned n) noexcept {

@@ -490,6 +490,10 @@ struct bpe_scratch {
 // Min-scan: [[unlikely]] tells the compiler the update is rare —
 // the minimum is typically found in the first few positions (BPE rank ordering),
 // then the branch stays "not taken" for the remaining elements.
+// NOTE: This hint is input-distribution-dependent. On adversarial inputs
+// (ascending rank sequences, short repeated merge sequences) the branch becomes
+// frequently taken and the cmov codegen is a pessimization. Paper benchmarks
+// should note this distribution dependency.
 // Kept as a separate inline function for clarity.
 inline uint32_t find_min_pair(const uint32_t* pair_ranks, uint32_t n, uint32_t& out_rank) {
     uint32_t mr = NO_RANK, mi = 0;

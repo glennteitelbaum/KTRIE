@@ -124,8 +124,8 @@ bool test_find(kntrie<KEY, int>& t, const std::vector<KEY>& keys, const char* la
     std::printf("    [find] %s ...", label); fflush(stdout);
     for (auto k : keys) {
         CHECK(t.contains(k), "%s: key %lld not found via contains", label, (long long)k);
-        const int* vp = t.find_value(k);
-        CHECK(vp != nullptr, "%s: find_value null for %lld", label, (long long)k);
+        auto it = t.find(k);
+        CHECK(it != t.end(), "%s: find returned end for %lld", label, (long long)k);
     }
     std::printf(" ok (%zu keys)\n", keys.size());
     PASS(label);

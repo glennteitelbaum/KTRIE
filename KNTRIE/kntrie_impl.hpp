@@ -265,7 +265,6 @@ public:
     // ==================================================================
 
     struct impl_insert_result_t {
-        bool ok;
         bool inserted;
         const VALUE* existing;   // non-null on dup: pointer to existing value in leaf
     };
@@ -413,12 +412,14 @@ public:
     }
 
     iter_result_t iter_first() const noexcept {
+        if (size_v == 0) [[unlikely]] return {KEY{}, VALUE{}, false};
         auto r = BO::descend_first_loop(root_ptr_v);
         if (!r.found) [[unlikely]] return {KEY{}, VALUE{}, false};
         return to_iter_result(r);
     }
 
     iter_result_t iter_last() const noexcept {
+        if (size_v == 0) [[unlikely]] return {KEY{}, VALUE{}, false};
         auto r = BO::descend_last_loop(root_ptr_v);
         if (!r.found) [[unlikely]] return {KEY{}, VALUE{}, false};
         return to_iter_result(r);
@@ -528,14 +529,14 @@ private:
         }
 
         if (size_v == 0) [[unlikely]] {
-            if constexpr (!INSERT) { bld_v.destroy_value(sv); return {true, false, nullptr}; }
+            if constexpr (!INSERT) { bld_v.destroy_value(sv); return {false, nullptr}; }
             set_root(0);
         }
 
         if (root_skip_bits_v > 0) [[unlikely]] {
             uint64_t diff = (ik ^ root_prefix_v) & root_prefix_mask();
             if (diff) [[unlikely]] {
-                if constexpr (!INSERT) { bld_v.destroy_value(sv); return {true, false, nullptr}; }
+                if constexpr (!INSERT) { bld_v.destroy_value(sv); return {false, nullptr}; }
                 int clz = std::countl_zero(diff);
                 uint8_t div_pos = static_cast<uint8_t>(clz / CHAR_BIT);
                 reduce_root_skip(div_pos);
@@ -554,10 +555,10 @@ private:
                 if (size_v <= COMPACT_MAX && !(root_ptr_v & LEAF_BIT)) [[unlikely]]
                     coalesce_bm_to_leaf();
             }
-            return {true, true, nullptr};
+            return {true, nullptr};
         }
         bld_v.destroy_value(sv);
-        return {true, false,
+        return {false,
                 reinterpret_cast<const VALUE*>(r.existing_value)};
     }
 

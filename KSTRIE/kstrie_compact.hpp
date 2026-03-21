@@ -1,6 +1,7 @@
 #ifndef KSTRIE_COMPACT_HPP
 #define KSTRIE_COMPACT_HPP
 #include "kstrie_support.hpp"
+#include <algorithm>
 
 namespace gteitelbaum::kstrie_detail {
 
@@ -46,6 +47,17 @@ struct kstrie_compact {
     // Sentinel: all-zeros compact(0). Static, never freed (alloc_u64=0).
     static inline constinit uint64_t sentinel_data_[3] = {};
     static uint64_t* sentinel() noexcept { return sentinel_data_; }
+
+    // Compute a subtree's total-tail contribution (keysuffix cost).
+    // Replicates kstrie_impl::node_tail_total as a static for use in compact.
+    static uint64_t subtree_tail(const uint64_t* node) noexcept {
+        if (!node || node == sentinel()) return 0;
+        hdr_type h = hdr_type::from_node(node);
+        if (h.is_bitmap()) return node[NODE_TOTAL_TAIL];
+        const auto& p = get_prefix(node, h);
+        return p.keysuffix_used
+             + static_cast<uint64_t>(h.count) * (1 + h.skip_bytes());
+    }
 
     // build_entry: used by split_node, collect_entries, build_compact, kstrie_impl.
     // key points to full suffix (first byte included); key_len is full suffix length.
@@ -767,8 +779,8 @@ struct kstrie_compact {
                 if (mode == insert_mode::INSERT)
                     return {node, insert_outcome::FOUND};
                 auto* sb = h.get_compact_slots(node);
-                slots::destroy_value(sb, pos, mem.alloc_);
-                slots::store_value(sb, pos, value, mem.alloc_);
+                slots::destroy_value(sb, pos, mem.alloc_v);
+                slots::store_value(sb, pos, value, mem.alloc_v);
                 return {node, insert_outcome::UPDATED};
             }
 
@@ -797,7 +809,7 @@ struct kstrie_compact {
             }
 
             // Allocate value after pre-split check to avoid leak on redirect.
-            uint64_t raw = slots::make_raw(value, mem.alloc_);
+            uint64_t raw = slots::make_raw(value, mem.alloc_v);
 
             node = insert_at(node, h, mem, pos,
                               klen, fb,
@@ -816,12 +828,15 @@ struct kstrie_compact {
     }
 
     // ------------------------------------------------------------------
-    // rebuild_with_new -- called when:
-    //   (a) MATCHED but suffix_len > 255, or
-    //   (b) MISMATCH / KEY_EXHAUSTED (prefix shrinks).
+    // ------------------------------------------------------------------
+    // rebuild_with_new -- two paths:
     //
-    // Collects existing entries (with prepend if MISMATCH), adds new entry,
-    // builds a new compact node, then calls finalize (may split to bitmask).
+    //   MISMATCH / KEY_EXHAUSTED: skip diverged. Reskip existing compact,
+    //     create bitmask above with two children. Zero temp allocations.
+    //
+    //   MATCHED (suffix > 255 or ks overflow): promote compact to bitmask.
+    //     Read F/L/O/B directly to build entries. Stack key buffer (bounded
+    //     by COMPACT_KEYSUFFIX_LIMIT + count). Entries via make_unique.
     // ------------------------------------------------------------------
 
     static insert_result rebuild_with_new(uint64_t* node, hdr_type& h,
@@ -836,84 +851,177 @@ struct kstrie_compact {
             skip_data = hdr_type::get_skip(node, h);
         uint32_t old_skip = h.skip_bytes();
 
-        uint8_t  new_skip_len;
-        uint32_t prepend_len;
-        uint32_t new_suffix_off;
+        if (mr.status != match_status::MATCHED) {
+            // ---- MISMATCH / KEY_EXHAUSTED: reskip + bitmask ----
+            return promote_mismatch(node, h, key_data, key_len, value,
+                                    consumed, mr, skip_data, old_skip, mem);
+        }
 
-        if (mr.status == match_status::MATCHED) {
-            // suffix_len > 255 case: skip did not shrink
-            new_skip_len   = h.skip;
-            prepend_len    = 0;
-            new_suffix_off = mr.consumed;
+        // ---- MATCHED: suffix > 255 or ks overflow → promote via split ----
+        return promote_matched(node, h, key_data, key_len, value,
+                               consumed, mr, skip_data, mem);
+    }
+
+    // ------------------------------------------------------------------
+    // promote_mismatch -- skip diverged at mr.match_len.
+    //   Reskip existing compact, create bitmask above, two children.
+    //   Zero temp allocations.
+    // ------------------------------------------------------------------
+
+    static insert_result promote_mismatch(uint64_t* node, hdr_type& h,
+                                           const uint8_t* key_data,
+                                           uint32_t key_len,
+                                           const VALUE& value,
+                                           uint32_t consumed,
+                                           match_result mr,
+                                           const uint8_t* skip_data,
+                                           uint32_t old_skip,
+                                           mem_type& mem) {
+        using bitmask_ops = kstrie_bitmask<VALUE, CHARMAP, ALLOC>;
+
+        uint32_t match_len = mr.match_len;
+        uint32_t child_skip_off = match_len + 1;
+        uint32_t child_skip_len = old_skip > child_skip_off
+                                ? old_skip - child_skip_off : 0;
+
+        // Reskip existing compact: skip becomes old_skip[match_len+1..]
+        uint64_t* existing = reskip(node, h, mem,
+            static_cast<uint8_t>(child_skip_len),
+            child_skip_len > 0 ? skip_data + child_skip_off : nullptr);
+        hdr_type& eh = hdr_type::from_node(existing);
+
+        // Existing child's dispatch byte
+        uint8_t exist_byte = skip_data[match_len];
+
+        // New entry suffix
+        uint32_t new_off = consumed + match_len;
+
+        if (mr.status == match_status::KEY_EXHAUSTED) {
+            // New entry has no dispatch byte — it's the EOS child.
+            uint64_t raw = slots::make_raw(value, mem.alloc_v);
+            build_entry eos_ent{nullptr, 0, raw};
+            uint64_t* eos_node = build_compact(mem, 0, nullptr, &eos_ent, 1);
+
+            // Bitmask: skip = old_skip[0..match_len), one byte child, EOS child
+            uint8_t  bkt[1] = {exist_byte};
+            uint64_t* cld[1] = {existing};
+            uint64_t* parent = bitmask_ops::create_with_children(
+                mem, static_cast<uint8_t>(match_len),
+                match_len > 0 ? skip_data : nullptr,
+                bkt, cld, 1);
+            // Set EOS child
+            hdr_type& ph = hdr_type::from_node(parent);
+            *bitmask_ops::eos_child_ptr(parent, ph) =
+                reinterpret_cast<uintptr_t>(eos_node);
+            // total_tail = children's tail + all entries * parent_skip
+            hdr_type eh2 = hdr_type::from_node(existing);
+            uint64_t n_entries = static_cast<uint64_t>(eh2.count) + 1;
+            parent[NODE_TOTAL_TAIL] = subtree_tail(existing)
+                                    + subtree_tail(eos_node)
+                                    + n_entries * match_len;
+            return {parent, insert_outcome::INSERTED};
+        }
+
+        // MISMATCH: new entry has a dispatch byte at key_data[new_off].
+        uint8_t new_byte = key_data[new_off];
+        uint32_t new_suffix_off = new_off + 1;
+        uint32_t new_suffix_len = key_len > new_suffix_off
+                                ? key_len - new_suffix_off : 0;
+        const uint8_t* new_suffix = new_suffix_len > 0
+                                  ? key_data + new_suffix_off : nullptr;
+
+        uint64_t raw = slots::make_raw(value, mem.alloc_v);
+        build_entry new_ent{new_suffix,
+                            static_cast<uint32_t>(new_suffix_len), raw};
+        uint64_t* new_child = build_compact(mem, 0, nullptr, &new_ent, 1);
+
+        // Build bitmask with two children, sorted by dispatch byte
+        uint8_t  bkt[2];
+        uint64_t* cld[2];
+        if (exist_byte < new_byte) {
+            bkt[0] = exist_byte; cld[0] = existing;
+            bkt[1] = new_byte;   cld[1] = new_child;
         } else {
-            // MISMATCH or KEY_EXHAUSTED
-            new_skip_len   = static_cast<uint8_t>(mr.match_len);
-            prepend_len    = old_skip - mr.match_len;
-            new_suffix_off = consumed + mr.match_len;
+            bkt[0] = new_byte;   cld[0] = new_child;
+            bkt[1] = exist_byte; cld[1] = existing;
         }
+        uint64_t* parent = bitmask_ops::create_with_children(
+            mem, static_cast<uint8_t>(match_len),
+            match_len > 0 ? skip_data : nullptr,
+            bkt, cld, 2);
+        parent[NODE_TOTAL_TAIL] = subtree_tail(existing)
+                                + subtree_tail(new_child)
+                                + (static_cast<uint64_t>(eh.count) + 1)
+                                  * match_len;
+        return {parent, insert_outcome::INSERTED};
+    }
 
-        const uint8_t* prepend    = skip_data + new_skip_len;
-        const uint8_t* new_suffix = key_data + new_suffix_off;
-        uint32_t new_suffix_len   = key_len - new_suffix_off;
-        uint16_t new_count        = h.count + 1;
+    // ------------------------------------------------------------------
+    // promote_matched -- MATCHED but suffix > 255 or ks overflow.
+    //   Build entries from F/L/O/B arrays directly — stack key buffer,
+    //   entries via make_unique. No separate key_buf heap alloc.
+    // ------------------------------------------------------------------
 
-        // Heap-allocate key buffer: existing entries x max key bytes
-        // each, plus the new suffix.
-        size_t key_buf_size = static_cast<size_t>(h.count) * (255 + prepend_len + 1)
-                            + new_suffix_len + 64;
-        uint8_t*     key_buf = new uint8_t[key_buf_size];
-        build_entry* entries = new build_entry[new_count];
+    // Stack key buffer size: sum(L[i]) = keysuffix_used + count_with_F_byte.
+    // Upper bound: COMPACT_KEYSUFFIX_LIMIT (max blob) + MAX_COLLAPSE_ENTRIES (max count).
+    static constexpr size_t PROMOTE_KEY_BUF_SIZE =
+        COMPACT_KEYSUFFIX_LIMIT + COMPACT_KEYSUFFIX_LIMIT + BITMASK_MAX_CHILDREN;
 
-        // Collect existing entries, applying prepend to each
+    static insert_result promote_matched(uint64_t* node, hdr_type& h,
+                                          const uint8_t* key_data,
+                                          uint32_t key_len,
+                                          const VALUE& value,
+                                          uint32_t consumed,
+                                          match_result mr,
+                                          const uint8_t* skip_data,
+                                          mem_type& mem) {
+        uint16_t new_count = h.count + 1;
+        uint8_t  skip_len  = h.skip;
+
+        const uint8_t*        L  = lengths(node, h);
+        const uint8_t*        F  = firsts(node, h);
+        const ks_offset_type* O  = offsets(node, h);
+        const uint8_t*        B  = keysuffix(node, h);
+        const auto*           sb = h.get_compact_slots(node);
+
+        // Stack key buffer: concatenate F[i] + tail for each existing entry.
+        // Bounded by sum(L[i]) ≤ COMPACT_KEYSUFFIX_LIMIT + count.
+        uint8_t key_stk[PROMOTE_KEY_BUF_SIZE];
+        auto entries = std::make_unique<build_entry[]>(new_count);
+
         size_t buf_off = 0;
-        const uint8_t*  L  = lengths(node, h);
-        const uint8_t*  F  = firsts(node, h);
-        const ks_offset_type* O = offsets(node, h);
-        const uint8_t*  B  = keysuffix(node, h);
-        const auto* sb = h.get_compact_slots(node);
-
         for (uint16_t i = 0; i < h.count; ++i) {
-            uint8_t  old_klen = L[i];
-            uint32_t new_klen = old_klen + prepend_len;
-            uint8_t* dst = key_buf + buf_off;
-
-            if (prepend_len > 0)
-                std::memcpy(dst, prepend, prepend_len);
-            if (old_klen > 0) {
-                dst[prepend_len] = F[i];
-                if (old_klen > 1)
-                    std::memcpy(dst + prepend_len + 1, B + O[i], old_klen - 1);
+            uint8_t klen = L[i];
+            uint8_t* dst = key_stk + buf_off;
+            if (klen > 0) {
+                dst[0] = F[i];
+                if (klen > 1)
+                    std::memcpy(dst + 1, B + O[i], klen - 1);
             }
-
-            entries[i].key      = dst;
-            entries[i].key_len  = new_klen;
-            entries[i].raw_slot = slots::load_raw(sb, i);
-            buf_off += new_klen;
+            entries[i] = {dst, klen, slots::load_raw(sb, i)};
+            buf_off += klen;
         }
 
-        // New entry
-        uint64_t raw = slots::make_raw(value, mem.alloc_);
+        // New entry — suffix starts at mr.consumed
+        const uint8_t* new_suffix = key_data + mr.consumed;
+        uint32_t new_suffix_len   = key_len - mr.consumed;
+        uint64_t raw = slots::make_raw(value, mem.alloc_v);
+        build_entry new_ent{new_suffix, new_suffix_len, raw};
 
-        uint8_t* new_dst = key_buf + buf_off;
-        if (new_suffix_len > 0)
-            std::memcpy(new_dst, new_suffix, new_suffix_len);
-
-        build_entry new_ent{new_dst, new_suffix_len, raw};
-
-        // Find insertion position (existing entries are already sorted)
-        int ins = static_cast<int>(h.count);
-        for (int i = 0; i < static_cast<int>(h.count); ++i) {
-            if (cmp_entry(entries[i], new_ent) > 0) { ins = i; break; }
-        }
-        std::memmove(&entries[ins + 1], &entries[ins],
+        // Binary search for insertion position (existing entries sorted by F)
+        auto less = [](const build_entry& a, const build_entry& b) noexcept {
+            return cmp_entry(a, b) < 0;
+        };
+        auto it = std::lower_bound(entries.get(), entries.get() + h.count,
+                                   new_ent, less);
+        int ins = static_cast<int>(it - entries.get());
+        std::memmove(entries.get() + ins + 1, entries.get() + ins,
                      (h.count - ins) * sizeof(build_entry));
         entries[ins] = new_ent;
 
-        uint64_t* result = build_node_from_entries(mem, new_skip_len, skip_data,
-                                                    entries, new_count);
+        uint64_t* result = build_node_from_entries(mem, skip_len, skip_data,
+                                                    entries.get(), new_count);
         mem.free_node(node);
-        delete[] entries;
-        delete[] key_buf;
         return {result, insert_outcome::INSERTED};
     }
 
@@ -964,7 +1072,7 @@ struct kstrie_compact {
         auto* sb = h.get_compact_slots(node);
         uint16_t  e  = h.count;
 
-        slots::destroy_value(sb, pos, mem.alloc_);
+        slots::destroy_value(sb, pos, mem.alloc_v);
 
         uint8_t erased_tail = L[pos] > 0 ? L[pos] - 1 : 0;
         if (erased_tail > 0) {
@@ -1144,7 +1252,7 @@ struct kstrie_compact {
             }
 
             // Strip dispatch byte from all entries.
-            build_entry* child_entries = new build_entry[cnt];
+            auto child_entries = std::make_unique<build_entry[]>(cnt);
             for (uint16_t j = 0; j < cnt; ++j) {
                 child_entries[j].key      = entries[start + j].key     + 1;
                 child_entries[j].key_len  = entries[start + j].key_len - 1;
@@ -1190,9 +1298,8 @@ struct kstrie_compact {
             children[n_children] = build_node_from_entries(mem,
                                                    static_cast<uint8_t>(lcp),
                                                    child_skip,
-                                                   child_entries, cnt);
+                                                   child_entries.get(), cnt);
             n_children++;
-            delete[] child_entries;
         }
 
         uint64_t* parent = bitmask_ops::create_with_children(
@@ -1229,10 +1336,10 @@ struct kstrie_compact {
                                      mem_type& mem) {
         uint16_t N = h.count;
 
-        // Collect all entries into heap buffers.
-        uint8_t*     key_buf = new uint8_t[static_cast<size_t>(N) * 256];
-        build_entry* all     = new build_entry[N];
-        collect_entries(node, h, all, key_buf);
+        // RAII heap buffers for exception safety.
+        auto key_buf = std::make_unique<uint8_t[]>(static_cast<size_t>(N) * 256);
+        auto all     = std::make_unique<build_entry[]>(N);
+        collect_entries(node, h, all.get(), key_buf.get());
 
         uint8_t        skip_len  = h.skip;
         const uint8_t* skip_data = nullptr;
@@ -1240,10 +1347,8 @@ struct kstrie_compact {
             skip_data = hdr_type::get_skip(node, h);
 
         uint64_t* result = build_node_from_entries(mem, skip_len, skip_data,
-                                                    all, N);
+                                                    all.get(), N);
         mem.free_node(node);
-        delete[] all;
-        delete[] key_buf;
         return {result, insert_outcome::INSERTED};
     }
 };

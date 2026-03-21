@@ -172,14 +172,19 @@ public:
         UK uk = to_unsigned(kv.first);
         auto r = impl_.insert_ex(uk, kv.second);
         if (r.inserted) return {const_iterator(&impl_, uk, kv.second, true), true};
-        return {const_iterator(&impl_, uk, *r.existing, true), false};
+        VALUE ev = r.existing ? *r.existing : VALUE{};
+        return {const_iterator(&impl_, uk, ev, true), false};
     }
     std::pair<iterator, bool> insert(const KEY& key, const VALUE& value) {
         UK uk = to_unsigned(key);
         auto r = impl_.insert_ex(uk, value);
         if (r.inserted) return {const_iterator(&impl_, uk, value, true), true};
-        return {const_iterator(&impl_, uk, *r.existing, true), false};
+        VALUE ev = r.existing ? *r.existing : VALUE{};
+        return {const_iterator(&impl_, uk, ev, true), false};
     }
+    // Returns {was_new, was_assigned} — differs from std::map which returns
+    // {iterator, bool}. Snapshot iterators make returning an iterator here
+    // incorrect (it would be immediately stale).
     std::pair<bool, bool> insert_or_assign(const KEY& key, const VALUE& value) {
         return impl_.insert_or_assign(to_unsigned(key), value);
     }

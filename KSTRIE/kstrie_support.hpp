@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <memory>
 #include <type_traits>
 #include <utility>
@@ -629,6 +630,11 @@ using ks_offset_type = std::conditional_t<COMPACT_KEYSUFFIX_LIMIT <= 256, uint8_
 // Max suffix bytes per compact entry (same as COMPACT_SUFFIX_LEN_MAX but uint32_t for sizing)
 inline constexpr uint32_t COMPACT_ENTRY_KEY_MAX = COMPACT_SUFFIX_LEN_MAX;
 
+// Bitmask node child limits
+inline constexpr uint32_t BYTE_VALUES          = 1u << CHAR_BIT;            // 256
+inline constexpr uint32_t BITMASK_EOS_SLOTS    = 1;                          // one EOS child slot
+inline constexpr uint32_t BITMASK_MAX_CHILDREN = BYTE_VALUES + BITMASK_EOS_SLOTS;  // 257
+
 enum class insert_mode : uint8_t { INSERT, UPSERT, ASSIGN };
 enum class insert_outcome : uint8_t { INSERTED, UPDATED, FOUND };
 
@@ -673,14 +679,22 @@ struct prefix_split_result {
 // REMOVED VK2_INIT_CAP — cap is now derived from padded allocation in alloc_compact_ks
 
 
+// Maximum possible node size in allocation units (u64s) is structurally bounded:
+// compact ≤ COMPACT_KEYSUFFIX_LIMIT/8 + slots + header; bitmask ≤ BITMASK_MAX_CHILDREN + header.
+// Both are well under uint16_t::max (65535).
+static_assert(
+    (COMPACT_KEYSUFFIX_LIMIT / sizeof(uint64_t) + BITMASK_MAX_CHILDREN + 64)
+        <= std::numeric_limits<uint16_t>::max(),
+    "structural maximum node size exceeds uint16_t alloc cap");
+
 template <typename ALLOC>
 struct kstrie_memory {
-    ALLOC alloc_{};
+    ALLOC alloc_v{};
     kstrie_memory() = default;
-    explicit kstrie_memory(const ALLOC& a) : alloc_(a) {}
+    explicit kstrie_memory(const ALLOC& a) : alloc_v(a) {}
     uint64_t* alloc_node(std::size_t needed_u64) {
         std::size_t au = padded_size(static_cast<uint16_t>(needed_u64));
-        uint64_t* p = std::allocator_traits<ALLOC>::allocate(alloc_, au);
+        uint64_t* p = std::allocator_traits<ALLOC>::allocate(alloc_v, au);
         std::memset(p, 0, au * U64_BYTES);
         uint16_t au16 = static_cast<uint16_t>(au);
         std::memcpy(p, &au16, sizeof(au16));
@@ -691,7 +705,7 @@ struct kstrie_memory {
         uint16_t au;
         std::memcpy(&au, p, sizeof(au));
         if (au == 0) [[unlikely]] return;
-        std::allocator_traits<ALLOC>::deallocate(alloc_, p, au);
+        std::allocator_traits<ALLOC>::deallocate(alloc_v, p, au);
     }
 };
 

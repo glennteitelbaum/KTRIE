@@ -65,6 +65,8 @@ constexpr auto LOWER_MAP = [] {
 using lower_char_map = char_map<LOWER_MAP>;
 ```
 
+**Character map requirements.** The character map is not required to be a bijection. A many-to-one map (e.g. case-insensitive mapping) causes distinct input keys to collide in the trie. This is the intended behavior for case-insensitive containers: `find("Hello")` and `find("hello")` resolve to the same entry. Iteration yields keys in their mapped (internal) form. The user is responsible for preserving the original key form if needed. A map that maps all 256 byte values to a single output byte is degenerate but not undefined — it produces a trie that behaves like a list sorted by key length.
+
 **Creating a custom map.** A user defines a custom character map by constructing a 256-element array and wrapping it in `char_map`:
 
 ```cpp
