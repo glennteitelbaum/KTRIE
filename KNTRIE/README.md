@@ -37,7 +37,7 @@ Performance charts:
 
 ## Notes:
 
-- Written in C++ using C++23, benefits from at least -march=x86-64-v3
+- Written in C++ using C++23, benefits from at least -march=x86-64-v3 (`popcnt`, `tzcnt`, `lzcnt`)
 
 - Supports Python via a pybind11 wrapper for the C++ implementations
 
