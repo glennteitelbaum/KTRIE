@@ -710,17 +710,20 @@ public class KSTrie<V> extends AbstractMap<String, V>
         // Bitmask inherits leaf.skip + common entry prefix
         byte[] bmSkip = mergeSkip(leaf.skip, entrySkip);
 
-        // Group by first byte after skip (entry suffix position skipLen)
-        // LinkedHashMap preserves byte-ascending insertion order from the for-b loop
-        Map<Integer, List<BuildEntry>> groups = new LinkedHashMap<>();
+        // Group by dispatch byte after skip. Entries are sorted — same-dispatch
+        // entries are contiguous. Walk once to find run boundaries.
         List<BuildEntry> eosGroup = new ArrayList<>();
+        int[] runStart = new int[256];    // start index per dispatch byte
+        int[] runCount = new int[256];    // count per dispatch byte
+        int[] runBytes = new int[256];    // dispatch byte values in order
+        int nRuns = 0;
+        BuildEntry[] trimmed = new BuildEntry[entries.length];
+        int trimmedCount = 0;
 
         for (BuildEntry e : entries) {
             if (e.suffixLen() <= skipLen) {
-                // EOS or entry fully consumed by skip
                 eosGroup.add(new BuildEntry((byte) 0, 0, null, e.value()));
             } else {
-                // Trim skip from entry
                 int newLen = e.suffixLen() - skipLen;
                 byte newF;
                 byte[] newTail;
@@ -728,7 +731,6 @@ public class KSTrie<V> extends AbstractMap<String, V>
                     newF = e.firstByte();
                     newTail = e.tail();
                 } else {
-                    // Reconstruct suffix bytes after skip
                     byte[] full = new byte[e.suffixLen()];
                     full[0] = e.firstByte();
                     if (e.tail() != null) System.arraycopy(e.tail(), 0, full, 1, e.tail().length);
@@ -736,19 +738,27 @@ public class KSTrie<V> extends AbstractMap<String, V>
                     newTail = newLen > 1 ? Arrays.copyOfRange(full, skipLen + 1, full.length) : NO_SKIP;
                 }
                 int db = newF & 0xFF;
-                // Entry for child: remove dispatch byte
                 int childLen = newLen - 1;
                 byte childF = childLen > 0 && newTail != null && newTail.length > 0 ? newTail[0] : 0;
                 byte[] childTail = childLen > 1 && newTail != null ? Arrays.copyOfRange(newTail, 1, newTail.length) : NO_SKIP;
                 BuildEntry childEntry = new BuildEntry(childF, childLen, childTail, e.value());
-                groups.computeIfAbsent(db, k -> new ArrayList<>()).add(childEntry);
+
+                if (nRuns == 0 || runBytes[nRuns - 1] != db) {
+                    runBytes[nRuns] = db;
+                    runStart[nRuns] = trimmedCount;
+                    runCount[nRuns] = 1;
+                    nRuns++;
+                } else {
+                    runCount[nRuns - 1]++;
+                }
+                trimmed[trimmedCount++] = childEntry;
             }
         }
 
         // Build bitmask
         BitmaskNode bm = new BitmaskNode();
         bm.skip = bmSkip;
-        int cc = groups.size();
+        int cc = nRuns;
         bm.children = new Node[cc + 2]; // sentinel + children + eos
         bm.children[0] = CompactNode.SENTINEL;
 
@@ -762,17 +772,17 @@ public class KSTrie<V> extends AbstractMap<String, V>
         }
 
         int slot = 1;
-        for (var entry : groups.entrySet()) {
-            int b = entry.getKey();
+        for (int r = 0; r < nRuns; r++) {
+            int b = runBytes[r];
             bm.setBit(b);
-            List<BuildEntry> group = entry.getValue();
-            byte[] childSkip = computeCommonSkip(group.toArray(new BuildEntry[0]));
+            BuildEntry[] group = Arrays.copyOfRange(trimmed, runStart[r], runStart[r] + runCount[r]);
+            byte[] childSkip = computeCommonSkip(group);
             // Trim childSkip from entries
             BuildEntry[] childEntries;
             if (childSkip.length > 0) {
-                childEntries = trimSkip(group.toArray(new BuildEntry[0]), childSkip.length);
+                childEntries = trimSkip(group, childSkip.length);
             } else {
-                childEntries = group.toArray(new BuildEntry[0]);
+                childEntries = group;
             }
             CompactNode child = buildCompact(childSkip, childEntries, childEntries.length);
             child.parent = bm; child.parentByte = b;

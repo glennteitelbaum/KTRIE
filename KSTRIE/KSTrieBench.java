@@ -102,7 +102,8 @@ public class KSTrieBench {
     // === Run one config ===
 
     static void runConfig(String label, int n, String[] keys, String[] missKeys) {
-        System.out.printf("\n=== N = %,d (%s) ===%n", n, label);
+        int unique = new HashSet<>(Arrays.asList(keys)).size();
+        System.out.printf("\n=== N = %,d (%s, %,d unique) ===%n", n, label, unique);
         System.out.printf("%-14s %10s %10s %10s %10s %10s %10s%n",
             "Container", "put ns/op", "get ns/op", "miss ns/op", "iter ms", "rm ns/op", "MB");
 
