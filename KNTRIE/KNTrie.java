@@ -680,14 +680,22 @@ public class KNTrie<V> extends AbstractMap<Long, V>
     }
 
     // === Map interface ===
+    /** {@inheritDoc} */
     @Override public int size() { return size; }
+    /** {@inheritDoc} */
     @Override public boolean isEmpty() { return size == 0; }
+    /** {@inheritDoc} */
     @Override public boolean containsKey(Object key) { return key instanceof Long k && findImpl(toInternal(k)) != null; }
+    /** {@inheritDoc} */
     @Override public V get(Object key) { return key instanceof Long k ? findImpl(toInternal(k)) : null; }
     @Override public V put(Long key, V value) { return putImpl(toInternal(key), value, false); }
     @Override public V remove(Object key) { return key instanceof Long k ? removeImpl(toInternal(k)) : null; }
+    /** {@inheritDoc} */
     @Override public void clear() { root = CompactNode.SENTINEL; size = 0; modCount++; }
 
+    /** Inserts the key-value pair only if the key is not already present.
+     *  Uses primitive {@code long} to avoid autoboxing.
+     *  @return {@code true} if inserted, {@code false} if key already existed */
     public boolean insertIfAbsent(long key, V value) { int old = size; putImpl(toInternal(key), value, true); return size > old; }
 
     // === Navigation helpers ===
@@ -894,24 +902,40 @@ public class KNTrie<V> extends AbstractMap<Long, V>
     }
 
     // === NavigableMap ===
-    @Override public Comparator<? super Long> comparator() { return null; }
+    /** {@inheritDoc} */
+    @Override public Comparator<? super Long> comparator() { return Long::compareUnsigned; }
+    /** {@inheritDoc} */
     @Override public Long firstKey() { CompactNode c = descendFirst(root); if (c == null) throw new NoSuchElementException(); return fromInternal(c.keys[0]); }
+    /** {@inheritDoc} */
     @Override public Long lastKey() { CompactNode c = descendLast(root); if (c == null) throw new NoSuchElementException(); return fromInternal(c.keys[c.keys.length - 1]); }
+    /** {@inheritDoc} */
     @Override public Entry<Long, V> firstEntry() { return entryAt(descendFirst(root), 0); }
+    /** {@inheritDoc} */
     @Override public Entry<Long, V> lastEntry() { CompactNode c = descendLast(root); return c == null ? null : entryAt(c, c.keys.length - 1); }
     @Override public Entry<Long, V> pollFirstEntry() { var e = firstEntry(); if (e != null) remove(e.getKey()); return e; }
     @Override public Entry<Long, V> pollLastEntry() { var e = lastEntry(); if (e != null) remove(e.getKey()); return e; }
 
+    /** {@inheritDoc} */
+    /** {@inheritDoc} */
+    /** {@inheritDoc} */
     @Override public Entry<Long, V> ceilingEntry(Long key) { return ceilingImpl(toInternal(key)); }
+    /** {@inheritDoc} */
     @Override public Entry<Long, V> floorEntry(Long key) { return floorImpl(toInternal(key)); }
     @Override public Entry<Long, V> higherEntry(Long key) { return higherImpl(toInternal(key)); }
     @Override public Entry<Long, V> lowerEntry(Long key) { return lowerImpl(toInternal(key)); }
+    /** {@inheritDoc} */
     @Override public Long floorKey(Long k) { var e = floorEntry(k); return e == null ? null : e.getKey(); }
+    /** {@inheritDoc} */
     @Override public Long ceilingKey(Long k) { var e = ceilingEntry(k); return e == null ? null : e.getKey(); }
+    /** {@inheritDoc} */
     @Override public Long lowerKey(Long k) { var e = lowerEntry(k); return e == null ? null : e.getKey(); }
+    /** {@inheritDoc} */
     @Override public Long higherKey(Long k) { var e = higherEntry(k); return e == null ? null : e.getKey(); }
 
     // === NavigableMap views ===
+    /** {@inheritDoc} */
+    /** {@inheritDoc} */
+    /** {@inheritDoc} */
     @Override public NavigableSet<Long> navigableKeySet() { return new KeySet(this); }
     @Override public NavigableSet<Long> descendingKeySet() { return new KeySet(descendingMap()); }
     @Override public NavigableMap<Long, V> descendingMap() { return new DescendingMap(); }
@@ -930,8 +954,10 @@ public class KNTrie<V> extends AbstractMap<Long, V>
             index = (leaf != null) ? leaf.keys.length - 1 : -1;
         }
 
+        /** {@inheritDoc} */
         @Override public boolean hasNext() { return leaf != null && index >= 0; }
 
+        /** {@inheritDoc} */
         @Override @SuppressWarnings("unchecked")
         public Entry<Long, V> next() {
             if (modCount != expectedModCount) throw new ConcurrentModificationException();
@@ -967,6 +993,7 @@ public class KNTrie<V> extends AbstractMap<Long, V>
             leaf = null; index = -1;
         }
 
+        /** {@inheritDoc} */
         @Override public void remove() {
             if (!canRemove) throw new IllegalStateException();
             canRemove = false;
@@ -997,85 +1024,136 @@ public class KNTrie<V> extends AbstractMap<Long, V>
     private static class KeySet extends AbstractSet<Long> implements NavigableSet<Long> {
         private final NavigableMap<Long, ?> map;
         KeySet(NavigableMap<Long, ?> map) { this.map = map; }
+        /** {@inheritDoc} */
         @Override public int size() { return map.size(); }
+        /** {@inheritDoc} */
         @Override public boolean contains(Object o) { return map.containsKey(o); }
+        /** {@inheritDoc} */
         @Override public Iterator<Long> iterator() {
             var ei = map.entrySet().iterator();
             return new Iterator<>() {
-                public boolean hasNext() { return ei.hasNext(); }
-                public Long next() { return ei.next().getKey(); }
-                public void remove() { ei.remove(); }
+                /** {@inheritDoc} */ public boolean hasNext() { return ei.hasNext(); }
+                /** {@inheritDoc} */ public Long next() { return ei.next().getKey(); }
+                /** {@inheritDoc} */ public void remove() { ei.remove(); }
             };
         }
+        /** {@inheritDoc} */
         @Override public Long first() { return map.firstKey(); }
+        /** {@inheritDoc} */
         @Override public Long last() { return map.lastKey(); }
+        /** {@inheritDoc} */
         @Override public Long lower(Long e) { return map.lowerKey(e); }
+        /** {@inheritDoc} */
         @Override public Long floor(Long e) { return map.floorKey(e); }
+        /** {@inheritDoc} */
         @Override public Long ceiling(Long e) { return map.ceilingKey(e); }
+        /** {@inheritDoc} */
         @Override public Long higher(Long e) { return map.higherKey(e); }
+        /** {@inheritDoc} */
         @Override public Long pollFirst() { var e = map.pollFirstEntry(); return e == null ? null : e.getKey(); }
+        /** {@inheritDoc} */
         @Override public Long pollLast() { var e = map.pollLastEntry(); return e == null ? null : e.getKey(); }
         @Override public NavigableSet<Long> descendingSet() { return new KeySet(map.descendingMap()); }
         @Override public Iterator<Long> descendingIterator() { return descendingSet().iterator(); }
+        /** {@inheritDoc} */
         @Override public NavigableSet<Long> subSet(Long a, boolean ai, Long b, boolean bi) { return new KeySet(map.subMap(a, ai, b, bi)); }
+        /** {@inheritDoc} */
         @Override public NavigableSet<Long> headSet(Long t, boolean i) { return new KeySet(map.headMap(t, i)); }
         @Override public NavigableSet<Long> tailSet(Long f, boolean i) { return new KeySet(map.tailMap(f, i)); }
+        /** {@inheritDoc} */
         @Override public SortedSet<Long> subSet(Long a, Long b) { return subSet(a, true, b, false); }
         @Override public SortedSet<Long> headSet(Long t) { return headSet(t, false); }
+        /** {@inheritDoc} */
         @Override public SortedSet<Long> tailSet(Long f) { return tailSet(f, true); }
         @Override public Comparator<? super Long> comparator() { return map.comparator(); }
     }
 
     // === DescendingMap: reversed NavigableMap view ===
     private class DescendingMap extends AbstractMap<Long, V> implements NavigableMap<Long, V> {
+        /** {@inheritDoc} */
+        /** {@inheritDoc} */
+        /** {@inheritDoc} */
         @Override public int size() { return KNTrie.this.size; }
+        /** {@inheritDoc} */
         @Override public boolean containsKey(Object key) { return KNTrie.this.containsKey(key); }
+        /** {@inheritDoc} */
         @Override public V get(Object key) { return KNTrie.this.get(key); }
+        /** {@inheritDoc} */
         @Override public V put(Long key, V value) { return KNTrie.this.put(key, value); }
         @Override public V remove(Object key) { return KNTrie.this.remove(key); }
         @Override public Set<Entry<Long, V>> entrySet() {
             return new AbstractSet<>() {
+                /** {@inheritDoc} */
+                /** {@inheritDoc} */
                 @Override public int size() { return KNTrie.this.size; }
                 @Override public Iterator<Entry<Long, V>> iterator() { return new DescIter(); }
             };
         }
-        @Override public Comparator<? super Long> comparator() { return Comparator.<Long>naturalOrder().reversed(); }
+        /** {@inheritDoc} */
+        @Override public Comparator<? super Long> comparator() { return KNTrie.this.comparator().reversed(); }
+        /** {@inheritDoc} */
         @Override public Long firstKey() { return KNTrie.this.lastKey(); }
+        /** {@inheritDoc} */
         @Override public Long lastKey() { return KNTrie.this.firstKey(); }
+        /** {@inheritDoc} */
         @Override public Entry<Long, V> firstEntry() { return KNTrie.this.lastEntry(); }
+        /** {@inheritDoc} */
         @Override public Entry<Long, V> lastEntry() { return KNTrie.this.firstEntry(); }
+        /** {@inheritDoc} */
         @Override public Entry<Long, V> pollFirstEntry() { return KNTrie.this.pollLastEntry(); }
+        /** {@inheritDoc} */
         @Override public Entry<Long, V> pollLastEntry() { return KNTrie.this.pollFirstEntry(); }
+        /** {@inheritDoc} */
         @Override public Entry<Long, V> ceilingEntry(Long key) { return KNTrie.this.floorEntry(key); }
+        /** {@inheritDoc} */
         @Override public Entry<Long, V> floorEntry(Long key) { return KNTrie.this.ceilingEntry(key); }
+        /** {@inheritDoc} */
         @Override public Entry<Long, V> higherEntry(Long key) { return KNTrie.this.lowerEntry(key); }
+        /** {@inheritDoc} */
         @Override public Entry<Long, V> lowerEntry(Long key) { return KNTrie.this.higherEntry(key); }
         @Override public Long ceilingKey(Long k) { return KNTrie.this.floorKey(k); }
         @Override public Long floorKey(Long k) { return KNTrie.this.ceilingKey(k); }
+        /** {@inheritDoc} */
         @Override public Long higherKey(Long k) { return KNTrie.this.lowerKey(k); }
+        /** {@inheritDoc} */
         @Override public Long lowerKey(Long k) { return KNTrie.this.higherKey(k); }
+        /** {@inheritDoc} */
         @Override public NavigableMap<Long, V> descendingMap() { return KNTrie.this; }
+        /** {@inheritDoc} */
         @Override public NavigableSet<Long> navigableKeySet() { return new KeySet(this); }
+        /** {@inheritDoc} */
         @Override public NavigableSet<Long> descendingKeySet() { return KNTrie.this.navigableKeySet(); }
+        /** {@inheritDoc} */
         @Override public NavigableMap<Long, V> subMap(Long a, boolean ai, Long b, boolean bi) { return KNTrie.this.subMap(b, bi, a, ai).descendingMap(); }
+        /** {@inheritDoc} */
         @Override public NavigableMap<Long, V> headMap(Long t, boolean i) { return KNTrie.this.tailMap(t, i).descendingMap(); }
+        /** {@inheritDoc} */
         @Override public NavigableMap<Long, V> tailMap(Long f, boolean i) { return KNTrie.this.headMap(f, i).descendingMap(); }
+        /** {@inheritDoc} */
         @Override public SortedMap<Long, V> subMap(Long a, Long b) { return subMap(a, true, b, false); }
+        /** {@inheritDoc} */
         @Override public SortedMap<Long, V> headMap(Long t) { return headMap(t, false); }
+        /** {@inheritDoc} */
         @Override public SortedMap<Long, V> tailMap(Long f) { return tailMap(f, true); }
     }
 
+    /** {@inheritDoc} */
     @Override public NavigableMap<Long, V> subMap(Long fromKey, boolean fromInclusive, Long toKey, boolean toInclusive) {
         return new SubMap(fromKey, fromInclusive, toKey, toInclusive);
     }
+    /** {@inheritDoc} */
     @Override public NavigableMap<Long, V> headMap(Long toKey, boolean inclusive) {
         return new SubMap(null, true, toKey, inclusive);
     }
+    /** {@inheritDoc} */
     @Override public NavigableMap<Long, V> tailMap(Long fromKey, boolean inclusive) {
         return new SubMap(fromKey, inclusive, null, true);
     }
+    /** {@inheritDoc} */
     @Override public SortedMap<Long, V> subMap(Long a, Long b) { return subMap(a, true, b, false); }
+    /** {@inheritDoc} */
     @Override public SortedMap<Long, V> headMap(Long t) { return headMap(t, false); }
+    /** {@inheritDoc} */
     @Override public SortedMap<Long, V> tailMap(Long f) { return tailMap(f, true); }
 
     // === SubMap view ===
@@ -1100,22 +1178,26 @@ public class KNTrie<V> extends AbstractMap<Long, V>
             return true;
         }
 
+        /** {@inheritDoc} */
         @Override public V get(Object key) {
             if (!(key instanceof Long k) || !inRange(k)) return null;
             return KNTrie.this.get(k);
         }
 
+        /** {@inheritDoc} */
         @Override public V put(Long key, V value) {
             if (!inRange(key)) throw new IllegalArgumentException("key out of range");
             return KNTrie.this.put(key, value);
         }
 
+        /** {@inheritDoc} */
         @Override public int size() {
             int n = 0;
             for (var e : entrySet()) n++;
             return n;
         }
 
+        /** {@inheritDoc} */
         @Override public boolean containsKey(Object key) {
             return key instanceof Long k && inRange(k) && KNTrie.this.containsKey(k);
         }
@@ -1126,15 +1208,20 @@ public class KNTrie<V> extends AbstractMap<Long, V>
             return fromInclusive ? KNTrie.this.ceilingEntry(fromKey) : KNTrie.this.higherEntry(fromKey);
         }
 
+        /** {@inheritDoc} */
         @Override public Set<Entry<Long, V>> entrySet() {
             return new AbstractSet<>() {
+                /** {@inheritDoc} */
                 @Override public int size() { return SubMap.this.size(); }
+                /** {@inheritDoc} */
                 @Override public Iterator<Entry<Long, V>> iterator() {
                     return new Iterator<>() {
                         Entry<Long, V> next = loEntry();
                         { if (next != null && !inRange(next.getKey())) next = null; }
 
+                        /** {@inheritDoc} */
                         @Override public boolean hasNext() { return next != null; }
+                        /** {@inheritDoc} */
                         @Override public Entry<Long, V> next() {
                             if (next == null) throw new NoSuchElementException();
                             Entry<Long, V> r = next;
@@ -1148,48 +1235,70 @@ public class KNTrie<V> extends AbstractMap<Long, V>
         }
 
         // NavigableMap methods delegate to parent with range checks
-        @Override public Comparator<? super Long> comparator() { return null; }
+        /** {@inheritDoc} */
+        @Override public Comparator<? super Long> comparator() { return KNTrie.this.comparator(); }
+        /** {@inheritDoc} */
         @Override public Long firstKey() { var e = loEntry(); if (e == null || !inRange(e.getKey())) throw new NoSuchElementException(); return e.getKey(); }
         @Override public Long lastKey() {
             Entry<Long, V> e = toKey != null ? (toInclusive ? KNTrie.this.floorEntry(toKey) : KNTrie.this.lowerEntry(toKey)) : KNTrie.this.lastEntry();
             if (e == null || !inRange(e.getKey())) throw new NoSuchElementException();
             return e.getKey();
         }
+        /** {@inheritDoc} */
         @Override public Entry<Long, V> firstEntry() { var e = loEntry(); return e != null && inRange(e.getKey()) ? e : null; }
         @Override public Entry<Long, V> lastEntry() {
             Entry<Long, V> e = toKey != null ? (toInclusive ? KNTrie.this.floorEntry(toKey) : KNTrie.this.lowerEntry(toKey)) : KNTrie.this.lastEntry();
             return e != null && inRange(e.getKey()) ? e : null;
         }
+        /** {@inheritDoc} */
         @Override public Entry<Long, V> pollFirstEntry() { var e = firstEntry(); if (e != null) KNTrie.this.remove(e.getKey()); return e; }
+        /** {@inheritDoc} */
         @Override public Entry<Long, V> pollLastEntry() { var e = lastEntry(); if (e != null) KNTrie.this.remove(e.getKey()); return e; }
 
+        /** {@inheritDoc} */
         @Override public Entry<Long, V> ceilingEntry(Long key) { var e = KNTrie.this.ceilingEntry(key); return e != null && inRange(e.getKey()) ? e : null; }
+        /** {@inheritDoc} */
         @Override public Entry<Long, V> floorEntry(Long key) { var e = KNTrie.this.floorEntry(key); return e != null && inRange(e.getKey()) ? e : null; }
+        /** {@inheritDoc} */
         @Override public Entry<Long, V> higherEntry(Long key) { var e = KNTrie.this.higherEntry(key); return e != null && inRange(e.getKey()) ? e : null; }
+        /** {@inheritDoc} */
         @Override public Entry<Long, V> lowerEntry(Long key) { var e = KNTrie.this.lowerEntry(key); return e != null && inRange(e.getKey()) ? e : null; }
+        /** {@inheritDoc} */
         @Override public Long ceilingKey(Long k) { var e = ceilingEntry(k); return e == null ? null : e.getKey(); }
+        /** {@inheritDoc} */
         @Override public Long floorKey(Long k) { var e = floorEntry(k); return e == null ? null : e.getKey(); }
+        /** {@inheritDoc} */
         @Override public Long higherKey(Long k) { var e = higherEntry(k); return e == null ? null : e.getKey(); }
+        /** {@inheritDoc} */
         @Override public Long lowerKey(Long k) { var e = lowerEntry(k); return e == null ? null : e.getKey(); }
 
+        /** {@inheritDoc} */
         @Override public NavigableMap<Long, V> subMap(Long a, boolean ai, Long b, boolean bi) {
             if (fromKey != null && Long.compare(a, fromKey) < 0) throw new IllegalArgumentException("fromKey out of range");
             if (toKey != null && Long.compare(b, toKey) > 0) throw new IllegalArgumentException("toKey out of range");
             return KNTrie.this.subMap(a, ai, b, bi);
         }
+        /** {@inheritDoc} */
         @Override public NavigableMap<Long, V> headMap(Long t, boolean i) {
             if (toKey != null && Long.compare(t, toKey) > 0) throw new IllegalArgumentException("toKey out of range");
             return KNTrie.this.subMap(fromKey != null ? fromKey : Long.MIN_VALUE, fromInclusive, t, i);
         }
+        /** {@inheritDoc} */
         @Override public NavigableMap<Long, V> tailMap(Long f, boolean i) {
             if (fromKey != null && Long.compare(f, fromKey) < 0) throw new IllegalArgumentException("fromKey out of range");
             return KNTrie.this.subMap(f, i, toKey != null ? toKey : Long.MAX_VALUE, toInclusive);
         }
+        /** {@inheritDoc} */
+        /** {@inheritDoc} */
+        /** {@inheritDoc} */
         @Override public SortedMap<Long, V> subMap(Long a, Long b) { return subMap(a, true, b, false); }
         @Override public SortedMap<Long, V> headMap(Long t) { return headMap(t, false); }
         @Override public SortedMap<Long, V> tailMap(Long f) { return tailMap(f, true); }
+        /** {@inheritDoc} */
         @Override public NavigableSet<Long> navigableKeySet() { return new KeySet(this); }
+        /** {@inheritDoc} */
         @Override public NavigableSet<Long> descendingKeySet() { return new KeySet(descendingMap()); }
+        /** {@inheritDoc} */
         @Override public NavigableMap<Long, V> descendingMap() {
             return KNTrie.this.descendingMap().subMap(
                 toKey != null ? toKey : Long.MAX_VALUE, toInclusive,
@@ -1198,8 +1307,11 @@ public class KNTrie<V> extends AbstractMap<Long, V>
     }
 
     // === Iterator ===
+    /** {@inheritDoc} */
     @Override public Set<Entry<Long, V>> entrySet() {
         return new AbstractSet<>() {
+            /** {@inheritDoc} */
+            /** {@inheritDoc} */
             @Override public int size() { return KNTrie.this.size; }
             @Override public Iterator<Entry<Long, V>> iterator() { return new Iter(); }
         };
@@ -1218,8 +1330,10 @@ public class KNTrie<V> extends AbstractMap<Long, V>
             index = 0;
         }
 
+        /** {@inheritDoc} */
         @Override public boolean hasNext() { return leaf != null && index < leaf.keys.length; }
 
+        /** {@inheritDoc} */
         @Override @SuppressWarnings("unchecked")
         public Entry<Long, V> next() {
             if (modCount != expectedModCount) throw new ConcurrentModificationException();
@@ -1252,6 +1366,7 @@ public class KNTrie<V> extends AbstractMap<Long, V>
             leaf = null; index = 0;
         }
 
+        /** {@inheritDoc} */
         @Override public void remove() {
             if (!canRemove) throw new IllegalStateException();
             canRemove = false;

@@ -495,6 +495,8 @@ public class KSTrie<V> extends AbstractMap<String, V>
     }
 
     // === find ===
+    /** Looks up a key by raw UTF-8 bytes, avoiding String encoding overhead.
+     *  @return the value, or {@code null} if not found */
     @SuppressWarnings("unchecked")
     public V getBytes(byte[] key) {
         Node node = root;
@@ -517,11 +519,13 @@ public class KSTrie<V> extends AbstractMap<String, V>
     }
 
     // === put ===
+    /** Inserts or updates by raw UTF-8 bytes. @return previous value, or {@code null} */
     @SuppressWarnings("unchecked")
     public V putBytes(byte[] key, V value) {
         return putImpl(key, value, false);
     }
 
+    /** Inserts by raw UTF-8 bytes only if absent. @return {@code true} if inserted */
     public boolean insertBytes(byte[] key, V value) {
         int oldSize = size;
         putImpl(key, value, true);
@@ -636,6 +640,7 @@ public class KSTrie<V> extends AbstractMap<String, V>
     }
 
     // === remove ===
+    /** Removes an entry by raw UTF-8 bytes. @return previous value, or {@code null} */
     @SuppressWarnings("unchecked")
     public V removeBytes(byte[] key) {
         Node node = root;
@@ -1143,35 +1148,46 @@ public class KSTrie<V> extends AbstractMap<String, V>
     }
 
     // === Map interface ===
+    /** {@inheritDoc} */
     @Override public int size() { return size; }
     @Override public boolean isEmpty() { return size == 0; }
 
+    /** {@inheritDoc} */
     @Override public boolean containsKey(Object key) {
         if (!(key instanceof String s)) return false;
         return getBytes(s.getBytes(StandardCharsets.UTF_8)) != null;
     }
 
+    /** {@inheritDoc} */
     @Override public V get(Object key) {
         if (!(key instanceof String s)) return null;
         return getBytes(s.getBytes(StandardCharsets.UTF_8));
     }
 
+    /** {@inheritDoc} */
     @Override public V put(String key, V value) {
         return putBytes(key.getBytes(StandardCharsets.UTF_8), value);
     }
 
+    /** {@inheritDoc} */
     @Override public V remove(Object key) {
         if (!(key instanceof String s)) return null;
         return removeBytes(s.getBytes(StandardCharsets.UTF_8));
     }
 
+    /** {@inheritDoc} */
     @Override public void clear() { root = CompactNode.SENTINEL; size = 0; modCount++; }
 
     // === NavigableMap ===
+    /** {@inheritDoc} */
     @Override public Comparator<? super String> comparator() { return KSTrie::compareByteOrder; }
+    /** {@inheritDoc} */
     @Override public String firstKey() { CompactNode c = descendFirst(root); if (c == null) throw new NoSuchElementException(); return reconstructKey(c, 0); }
+    /** {@inheritDoc} */
     @Override public String lastKey() { CompactNode c = descendLast(root); if (c == null) throw new NoSuchElementException(); return reconstructKey(c, c.count - 1); }
+    /** {@inheritDoc} */
     @Override public Map.Entry<String, V> firstEntry() { CompactNode c = descendFirst(root); return c == null ? null : makeEntry(c, 0); }
+    /** {@inheritDoc} */
     @Override @SuppressWarnings("unchecked") public Map.Entry<String, V> lastEntry() { CompactNode c = descendLast(root); return c == null ? null : makeEntry(c, c.count - 1); }
     @Override public Map.Entry<String, V> pollFirstEntry() { var e = firstEntry(); if (e != null) remove(e.getKey()); return e; }
     @Override public Map.Entry<String, V> pollLastEntry() { var e = lastEntry(); if (e != null) remove(e.getKey()); return e; }
@@ -1353,15 +1369,24 @@ public class KSTrie<V> extends AbstractMap<String, V>
     }
 
     // === NavigableMap ===
+    /** {@inheritDoc} */
     @Override public Map.Entry<String, V> ceilingEntry(String key) { return ceilingImpl(key.getBytes(StandardCharsets.UTF_8)); }
+    /** {@inheritDoc} */
     @Override public Map.Entry<String, V> floorEntry(String key) { return floorImpl(key.getBytes(StandardCharsets.UTF_8)); }
+    /** {@inheritDoc} */
     @Override public Map.Entry<String, V> higherEntry(String key) { return higherImpl(key.getBytes(StandardCharsets.UTF_8), key); }
+    /** {@inheritDoc} */
     @Override public Map.Entry<String, V> lowerEntry(String key) { return lowerImpl(key.getBytes(StandardCharsets.UTF_8), key); }
+    /** {@inheritDoc} */
     @Override public String floorKey(String k) { var e = floorEntry(k); return e == null ? null : e.getKey(); }
+    /** {@inheritDoc} */
     @Override public String ceilingKey(String k) { var e = ceilingEntry(k); return e == null ? null : e.getKey(); }
     @Override public String lowerKey(String k) { var e = lowerEntry(k); return e == null ? null : e.getKey(); }
     @Override public String higherKey(String k) { var e = higherEntry(k); return e == null ? null : e.getKey(); }
 
+    /** {@inheritDoc} */
+    /** {@inheritDoc} */
+    /** {@inheritDoc} */
     @Override public NavigableSet<String> navigableKeySet() { return new KeySet(this); }
     @Override public NavigableSet<String> descendingKeySet() { return new KeySet(descendingMap()); }
     @Override public NavigableMap<String, V> descendingMap() { return new DescendingMap(); }
@@ -1380,8 +1405,10 @@ public class KSTrie<V> extends AbstractMap<String, V>
             index = (leaf != null) ? leaf.count - 1 : -1;
         }
 
+        /** {@inheritDoc} */
         @Override public boolean hasNext() { return leaf != null && index >= 0; }
 
+        /** {@inheritDoc} */
         @Override @SuppressWarnings("unchecked")
         public Map.Entry<String, V> next() {
             if (modCount != expectedModCount) throw new ConcurrentModificationException();
@@ -1420,6 +1447,7 @@ public class KSTrie<V> extends AbstractMap<String, V>
             leaf = null; index = -1;
         }
 
+        /** {@inheritDoc} */
         @Override public void remove() {
             if (!canRemove) throw new IllegalStateException();
             canRemove = false;
@@ -1452,81 +1480,129 @@ public class KSTrie<V> extends AbstractMap<String, V>
         private final NavigableMap<String, ?> map;
         KeySet(NavigableMap<String, ?> map) { this.map = map; }
 
+        /** {@inheritDoc} */
         @Override public int size() { return map.size(); }
+        /** {@inheritDoc} */
         @Override public boolean contains(Object o) { return map.containsKey(o); }
+        /** {@inheritDoc} */
         @Override public Iterator<String> iterator() {
             var ei = map.entrySet().iterator();
             return new Iterator<>() {
-                public boolean hasNext() { return ei.hasNext(); }
-                public String next() { return ei.next().getKey(); }
-                public void remove() { ei.remove(); }
+                /** {@inheritDoc} */ public boolean hasNext() { return ei.hasNext(); }
+                /** {@inheritDoc} */ public String next() { return ei.next().getKey(); }
+                /** {@inheritDoc} */ public void remove() { ei.remove(); }
             };
         }
+        /** {@inheritDoc} */
         @Override public String first() { return map.firstKey(); }
+        /** {@inheritDoc} */
         @Override public String last() { return map.lastKey(); }
+        /** {@inheritDoc} */
         @Override public String lower(String e) { return map.lowerKey(e); }
+        /** {@inheritDoc} */
         @Override public String floor(String e) { return map.floorKey(e); }
+        /** {@inheritDoc} */
         @Override public String ceiling(String e) { return map.ceilingKey(e); }
+        /** {@inheritDoc} */
         @Override public String higher(String e) { return map.higherKey(e); }
+        /** {@inheritDoc} */
         @Override public String pollFirst() { var e = map.pollFirstEntry(); return e == null ? null : e.getKey(); }
+        /** {@inheritDoc} */
         @Override public String pollLast() { var e = map.pollLastEntry(); return e == null ? null : e.getKey(); }
+        /** {@inheritDoc} */
         @Override public NavigableSet<String> descendingSet() { return new KeySet(map.descendingMap()); }
+        /** {@inheritDoc} */
         @Override public Iterator<String> descendingIterator() { return descendingSet().iterator(); }
         @Override public NavigableSet<String> subSet(String a, boolean ai, String b, boolean bi) { return new KeySet(map.subMap(a, ai, b, bi)); }
         @Override public NavigableSet<String> headSet(String t, boolean i) { return new KeySet(map.headMap(t, i)); }
+        /** {@inheritDoc} */
         @Override public NavigableSet<String> tailSet(String f, boolean i) { return new KeySet(map.tailMap(f, i)); }
+        /** {@inheritDoc} */
         @Override public SortedSet<String> subSet(String a, String b) { return subSet(a, true, b, false); }
         @Override public SortedSet<String> headSet(String t) { return headSet(t, false); }
+        /** {@inheritDoc} */
         @Override public SortedSet<String> tailSet(String f) { return tailSet(f, true); }
         @Override public Comparator<? super String> comparator() { return map.comparator(); }
     }
 
     // === DescendingMap: reversed NavigableMap view ===
     private class DescendingMap extends AbstractMap<String, V> implements NavigableMap<String, V> {
+        /** {@inheritDoc} */
         @Override public int size() { return KSTrie.this.size; }
+        /** {@inheritDoc} */
         @Override public boolean containsKey(Object key) { return KSTrie.this.containsKey(key); }
+        /** {@inheritDoc} */
         @Override public V get(Object key) { return KSTrie.this.get(key); }
         @Override public V put(String key, V value) { return KSTrie.this.put(key, value); }
         @Override public V remove(Object key) { return KSTrie.this.remove(key); }
 
+        /** {@inheritDoc} */
         @Override public Set<Entry<String, V>> entrySet() {
             return new AbstractSet<>() {
+                /** {@inheritDoc} */
+                /** {@inheritDoc} */
                 @Override public int size() { return KSTrie.this.size; }
                 @Override public Iterator<Entry<String, V>> iterator() { return new DescIter(); }
             };
         }
 
+        /** {@inheritDoc} */
+        /** {@inheritDoc} */
+        /** {@inheritDoc} */
         @Override public Comparator<? super String> comparator() { return KSTrie.this.comparator().reversed(); }
         @Override public String firstKey() { return KSTrie.this.lastKey(); }
         @Override public String lastKey() { return KSTrie.this.firstKey(); }
+        /** {@inheritDoc} */
         @Override public Entry<String, V> firstEntry() { return KSTrie.this.lastEntry(); }
+        /** {@inheritDoc} */
         @Override public Entry<String, V> lastEntry() { return KSTrie.this.firstEntry(); }
+        /** {@inheritDoc} */
         @Override public Entry<String, V> pollFirstEntry() { return KSTrie.this.pollLastEntry(); }
+        /** {@inheritDoc} */
         @Override public Entry<String, V> pollLastEntry() { return KSTrie.this.pollFirstEntry(); }
+        /** {@inheritDoc} */
         @Override public Entry<String, V> ceilingEntry(String key) { return KSTrie.this.floorEntry(key); }
+        /** {@inheritDoc} */
         @Override public Entry<String, V> floorEntry(String key) { return KSTrie.this.ceilingEntry(key); }
+        /** {@inheritDoc} */
         @Override public Entry<String, V> higherEntry(String key) { return KSTrie.this.lowerEntry(key); }
+        /** {@inheritDoc} */
         @Override public Entry<String, V> lowerEntry(String key) { return KSTrie.this.higherEntry(key); }
+        /** {@inheritDoc} */
         @Override public String ceilingKey(String k) { return KSTrie.this.floorKey(k); }
         @Override public String floorKey(String k) { return KSTrie.this.ceilingKey(k); }
         @Override public String higherKey(String k) { return KSTrie.this.lowerKey(k); }
+        /** {@inheritDoc} */
         @Override public String lowerKey(String k) { return KSTrie.this.higherKey(k); }
+        /** {@inheritDoc} */
         @Override public NavigableMap<String, V> descendingMap() { return KSTrie.this; }
+        /** {@inheritDoc} */
         @Override public NavigableSet<String> navigableKeySet() { return new KeySet(this); }
+        /** {@inheritDoc} */
         @Override public NavigableSet<String> descendingKeySet() { return KSTrie.this.navigableKeySet(); }
+        /** {@inheritDoc} */
         @Override public NavigableMap<String, V> subMap(String a, boolean ai, String b, boolean bi) { return KSTrie.this.subMap(b, bi, a, ai).descendingMap(); }
+        /** {@inheritDoc} */
         @Override public NavigableMap<String, V> headMap(String t, boolean i) { return KSTrie.this.tailMap(t, i).descendingMap(); }
+        /** {@inheritDoc} */
         @Override public NavigableMap<String, V> tailMap(String f, boolean i) { return KSTrie.this.headMap(f, i).descendingMap(); }
         @Override public SortedMap<String, V> subMap(String a, String b) { return subMap(a, true, b, false); }
         @Override public SortedMap<String, V> headMap(String t) { return headMap(t, false); }
+        /** {@inheritDoc} */
         @Override public SortedMap<String, V> tailMap(String f) { return tailMap(f, true); }
     }
 
+    /** {@inheritDoc} */
     @Override public NavigableMap<String, V> subMap(String fromKey, boolean fi, String toKey, boolean ti) { return new SubMap(fromKey, fi, toKey, ti); }
+    /** {@inheritDoc} */
     @Override public NavigableMap<String, V> headMap(String toKey, boolean i) { return new SubMap(null, true, toKey, i); }
+    /** {@inheritDoc} */
     @Override public NavigableMap<String, V> tailMap(String fromKey, boolean i) { return new SubMap(fromKey, i, null, true); }
+    /** {@inheritDoc} */
     @Override public SortedMap<String, V> subMap(String a, String b) { return subMap(a, true, b, false); }
+    /** {@inheritDoc} */
     @Override public SortedMap<String, V> headMap(String t) { return headMap(t, false); }
+    /** {@inheritDoc} */
     @Override public SortedMap<String, V> tailMap(String f) { return tailMap(f, true); }
 
     // === SubMap view ===
@@ -1551,15 +1627,19 @@ public class KSTrie<V> extends AbstractMap<String, V>
             return true;
         }
 
+        /** {@inheritDoc} */
         @Override public V get(Object key) {
             if (!(key instanceof String k) || !inRange(k)) return null;
             return KSTrie.this.get(k);
         }
+        /** {@inheritDoc} */
         @Override public V put(String key, V value) {
             if (!inRange(key)) throw new IllegalArgumentException("key out of range");
             return KSTrie.this.put(key, value);
         }
+        /** {@inheritDoc} */
         @Override public int size() { int n = 0; for (var ignored : entrySet()) n++; return n; }
+        /** {@inheritDoc} */
         @Override public boolean containsKey(Object key) { return key instanceof String k && inRange(k) && KSTrie.this.containsKey(k); }
 
         private Entry<String, V> loEntry() {
@@ -1567,13 +1647,18 @@ public class KSTrie<V> extends AbstractMap<String, V>
             return fromInclusive ? KSTrie.this.ceilingEntry(fromKey) : KSTrie.this.higherEntry(fromKey);
         }
 
+        /** {@inheritDoc} */
         @Override public Set<Entry<String, V>> entrySet() {
             return new AbstractSet<>() {
+                /** {@inheritDoc} */
+                /** {@inheritDoc} */
                 @Override public int size() { return SubMap.this.size(); }
                 @Override public Iterator<Entry<String, V>> iterator() {
                     return new Iterator<>() {
                         Entry<String, V> next = loEntry();
                         { if (next != null && !inRange(next.getKey())) next = null; }
+                        /** {@inheritDoc} */
+                        /** {@inheritDoc} */
                         @Override public boolean hasNext() { return next != null; }
                         @Override public Entry<String, V> next() {
                             if (next == null) throw new NoSuchElementException();
@@ -1587,25 +1672,39 @@ public class KSTrie<V> extends AbstractMap<String, V>
             };
         }
 
+        /** {@inheritDoc} */
         @Override public Comparator<? super String> comparator() { return KSTrie.this.comparator(); }
+        /** {@inheritDoc} */
         @Override public String firstKey() { var e = loEntry(); if (e == null || !inRange(e.getKey())) throw new NoSuchElementException(); return e.getKey(); }
+        /** {@inheritDoc} */
         @Override public String lastKey() {
             Entry<String, V> e = toKey != null ? (toInclusive ? KSTrie.this.floorEntry(toKey) : KSTrie.this.lowerEntry(toKey)) : KSTrie.this.lastEntry();
             if (e == null || !inRange(e.getKey())) throw new NoSuchElementException(); return e.getKey();
         }
+        /** {@inheritDoc} */
         @Override public Entry<String, V> firstEntry() { var e = loEntry(); return e != null && inRange(e.getKey()) ? e : null; }
+        /** {@inheritDoc} */
         @Override public Entry<String, V> lastEntry() {
             Entry<String, V> e = toKey != null ? (toInclusive ? KSTrie.this.floorEntry(toKey) : KSTrie.this.lowerEntry(toKey)) : KSTrie.this.lastEntry();
             return e != null && inRange(e.getKey()) ? e : null;
         }
+        /** {@inheritDoc} */
         @Override public Entry<String, V> pollFirstEntry() { var e = firstEntry(); if (e != null) KSTrie.this.remove(e.getKey()); return e; }
+        /** {@inheritDoc} */
         @Override public Entry<String, V> pollLastEntry() { var e = lastEntry(); if (e != null) KSTrie.this.remove(e.getKey()); return e; }
+        /** {@inheritDoc} */
         @Override public Entry<String, V> ceilingEntry(String k) { var e = KSTrie.this.ceilingEntry(k); return e != null && inRange(e.getKey()) ? e : null; }
+        /** {@inheritDoc} */
         @Override public Entry<String, V> floorEntry(String k) { var e = KSTrie.this.floorEntry(k); return e != null && inRange(e.getKey()) ? e : null; }
+        /** {@inheritDoc} */
         @Override public Entry<String, V> higherEntry(String k) { var e = KSTrie.this.higherEntry(k); return e != null && inRange(e.getKey()) ? e : null; }
+        /** {@inheritDoc} */
         @Override public Entry<String, V> lowerEntry(String k) { var e = KSTrie.this.lowerEntry(k); return e != null && inRange(e.getKey()) ? e : null; }
+        /** {@inheritDoc} */
         @Override public String ceilingKey(String k) { var e = ceilingEntry(k); return e == null ? null : e.getKey(); }
+        /** {@inheritDoc} */
         @Override public String floorKey(String k) { var e = floorEntry(k); return e == null ? null : e.getKey(); }
+        /** {@inheritDoc} */
         @Override public String higherKey(String k) { var e = higherEntry(k); return e == null ? null : e.getKey(); }
         @Override public String lowerKey(String k) { var e = lowerEntry(k); return e == null ? null : e.getKey(); }
         @Override public NavigableMap<String, V> subMap(String a, boolean ai, String b, boolean bi) {
@@ -1613,21 +1712,29 @@ public class KSTrie<V> extends AbstractMap<String, V>
             if (toKey != null && compareByteOrder(b, toKey) > 0) throw new IllegalArgumentException("toKey out of range");
             return KSTrie.this.subMap(a, ai, b, bi);
         }
+        /** {@inheritDoc} */
         @Override public NavigableMap<String, V> headMap(String t, boolean i) {
             if (toKey != null && compareByteOrder(t, toKey) > 0) throw new IllegalArgumentException("toKey out of range");
             if (fromKey != null) return KSTrie.this.subMap(fromKey, fromInclusive, t, i);
             return KSTrie.this.headMap(t, i);
         }
+        /** {@inheritDoc} */
         @Override public NavigableMap<String, V> tailMap(String f, boolean i) {
             if (fromKey != null && compareByteOrder(f, fromKey) < 0) throw new IllegalArgumentException("fromKey out of range");
             if (toKey != null) return KSTrie.this.subMap(f, i, toKey, toInclusive);
             return KSTrie.this.tailMap(f, i);
         }
+        /** {@inheritDoc} */
         @Override public SortedMap<String, V> subMap(String a, String b) { return subMap(a, true, b, false); }
+        /** {@inheritDoc} */
         @Override public SortedMap<String, V> headMap(String t) { return headMap(t, false); }
+        /** {@inheritDoc} */
         @Override public SortedMap<String, V> tailMap(String f) { return tailMap(f, true); }
+        /** {@inheritDoc} */
         @Override public NavigableSet<String> navigableKeySet() { return new KeySet(this); }
+        /** {@inheritDoc} */
         @Override public NavigableSet<String> descendingKeySet() { return new KeySet(descendingMap()); }
+        /** {@inheritDoc} */
         @Override public NavigableMap<String, V> descendingMap() {
             // Compose: parent's descending map with swapped bounds
             NavigableMap<String, V> desc = KSTrie.this.descendingMap();
@@ -1639,11 +1746,16 @@ public class KSTrie<V> extends AbstractMap<String, V>
     }
 
     // === Prefix operations ===
+
+    /** Walks all entries whose key starts with {@code prefix} in sorted order.
+     *  @param prefix the key prefix to match
+     *  @param action called with (key, value) for each matching entry */
     public void prefixWalk(String prefix, BiConsumer<String, V> action) {
         prefixWalkBytes(prefix.getBytes(StandardCharsets.UTF_8), (k, v) ->
             action.accept(new String(k, StandardCharsets.UTF_8), v));
     }
 
+    /** Byte-array variant of {@link #prefixWalk}. Avoids String encoding overhead. */
     @SuppressWarnings("unchecked")
     public void prefixWalkBytes(byte[] prefix, BiConsumer<byte[], V> action) {
         // Descend to prefix point
@@ -1729,17 +1841,21 @@ public class KSTrie<V> extends AbstractMap<String, V>
         }
     }
 
+    /** Returns all entries whose key starts with {@code prefix}, in sorted order.
+     *  @return list of (key, value) entries; empty if no matches */
     public List<Map.Entry<String, V>> prefixItems(String prefix) {
         List<Map.Entry<String, V>> result = new ArrayList<>();
         prefixWalk(prefix, (k, v) -> result.add(new SimpleImmutableEntry<>(k, v)));
         return result;
     }
 
-    // === prefixErase: remove all entries matching prefix, return count ===
+    /** Removes all entries whose key starts with {@code prefix}.
+     *  @return the number of entries removed */
     public int prefixErase(String prefix) {
         return prefixEraseBytes(prefix.getBytes(StandardCharsets.UTF_8));
     }
 
+    /** Byte-array variant of {@link #prefixErase}. */
     public int prefixEraseBytes(byte[] prefix) {
         int[] result = prefixEraseNode(root, prefix, 0);
         // result[0] = erased count, root may have changed
@@ -1856,11 +1972,14 @@ public class KSTrie<V> extends AbstractMap<String, V>
         return new int[]{erased};
     }
 
-    // === prefixCopy: deep clone matching subtree into new trie ===
+    /** Deep-clones all entries whose key starts with {@code prefix} into a new trie.
+     *  The source trie is not modified.
+     *  @return a new KSTrie containing only the matching entries */
     public KSTrie<V> prefixCopy(String prefix) {
         return prefixCopyBytes(prefix.getBytes(StandardCharsets.UTF_8));
     }
 
+    /** Byte-array variant of {@link #prefixCopy}. */
     @SuppressWarnings("unchecked")
     public KSTrie<V> prefixCopyBytes(byte[] prefix) {
         KSTrie<V> result = new KSTrie<>();
@@ -1946,11 +2065,14 @@ public class KSTrie<V> extends AbstractMap<String, V>
         }
     }
 
-    // === prefixSplit: steal matching subtree, return as new trie ===
+    /** Removes all entries whose key starts with {@code prefix} from this trie and
+     *  returns them in a new trie. Zero-copy where possible (subtree pointer steal).
+     *  @return a new KSTrie containing the extracted entries */
     public KSTrie<V> prefixSplit(String prefix) {
         return prefixSplitBytes(prefix.getBytes(StandardCharsets.UTF_8));
     }
 
+    /** Byte-array variant of {@link #prefixSplit}. */
     public KSTrie<V> prefixSplitBytes(byte[] prefix) {
         KSTrie<V> stolen = new KSTrie<>();
         int[] result = prefixSplitNode(root, prefix, 0, 0, stolen);
@@ -2136,9 +2258,12 @@ public class KSTrie<V> extends AbstractMap<String, V>
     }
 
     // === entrySet + Iterator ===
+    /** {@inheritDoc} */
     @Override public Set<Map.Entry<String, V>> entrySet() {
         return new AbstractSet<>() {
+            /** {@inheritDoc} */
             @Override public int size() { return KSTrie.this.size; }
+            /** {@inheritDoc} */
             @Override public Iterator<Map.Entry<String, V>> iterator() { return new Iter(); }
         };
     }
@@ -2152,8 +2277,10 @@ public class KSTrie<V> extends AbstractMap<String, V>
 
         Iter() { expectedModCount = modCount; leaf = descendFirst(root); index = 0; }
 
+        /** {@inheritDoc} */
         @Override public boolean hasNext() { return leaf != null && index < leaf.count; }
 
+        /** {@inheritDoc} */
         @Override @SuppressWarnings("unchecked")
         public Map.Entry<String, V> next() {
             if (modCount != expectedModCount) throw new ConcurrentModificationException();
@@ -2182,6 +2309,7 @@ public class KSTrie<V> extends AbstractMap<String, V>
             leaf = null; index = 0;
         }
 
+        /** {@inheritDoc} */
         @Override public void remove() {
             if (!canRemove) throw new IllegalStateException();
             canRemove = false;
@@ -2211,10 +2339,13 @@ public class KSTrie<V> extends AbstractMap<String, V>
     }
 
     // === Prefix operations ===
+    /** Counts entries whose key starts with {@code prefix} without materializing them.
+     *  @return the number of matching entries */
     public int prefixCount(String prefix) {
         return prefixCountBytes(prefix.getBytes(StandardCharsets.UTF_8));
     }
 
+    /** Byte-array variant of {@link #prefixCount}. */
     public int prefixCountBytes(byte[] prefix) {
         Node node = root;
         int consumed = 0;

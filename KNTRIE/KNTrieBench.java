@@ -113,10 +113,7 @@ public class KNTrieBench {
                 bestPut = Math.min(bestPut, benchPut(m, keys));
                 bestGet = Math.min(bestGet, benchGet(m, keys));
                 bestMiss = Math.min(bestMiss, benchGetMiss(m, missKeys));
-                if (m instanceof NavigableMap || m instanceof TreeMap)
-                    bestIter = Math.min(bestIter, benchIterate(m));
-                else
-                    bestIter = Math.min(bestIter, benchIterate(m));
+                bestIter = Math.min(bestIter, benchIterate(m));
                 // Remove bench: re-insert then remove
                 m.clear(); benchPut(m, keys);
                 bestRm = Math.min(bestRm, benchRemove(m, keys));
