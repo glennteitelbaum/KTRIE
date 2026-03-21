@@ -6,6 +6,37 @@ import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.function.*;
 
+/**
+ * KSTrie — ordered string-keyed associative container.
+ * <p>
+ * A trie/B-tree hybrid implementing {@link NavigableMap NavigableMap&lt;String, V&gt;}
+ * with keysuffix sharing and prefix operations. Keys are stored and sorted in
+ * UTF-8 byte order (not Java's UTF-16 code unit order). Compact leaf nodes pack
+ * entries in parallel F/L/O/keysuffix arrays with forward-chain sharing that
+ * eliminates redundant suffix storage. Bitmask nodes provide 256-way fan-out
+ * with EOS (end-of-string) support for variable-length keys.
+ * <p>
+ * <b>Ordering:</b> UTF-8 unsigned byte-lexicographic order. This matches C
+ * {@code strcmp} order for ASCII and produces a well-defined total order for
+ * all Unicode strings. Note: this differs from {@code String.compareTo} which
+ * uses UTF-16 code unit order. All {@code SubMap} range checks use byte order.
+ * <p>
+ * <b>Thread safety:</b> Not thread-safe. Concurrent structural modification
+ * produces undefined behavior. Iterators fail-fast via {@code modCount}.
+ * <p>
+ * <b>Iterator semantics:</b> Live iterators with key reconstruction via parent
+ * walk. {@code Iterator.remove()} is supported.
+ * <p>
+ * <b>Prefix operations:</b> {@code prefixCount}, {@code prefixWalk},
+ * {@code prefixItems}, {@code prefixErase}, {@code prefixCopy}, and
+ * {@code prefixSplit} provide efficient subtree operations not available
+ * in standard {@code NavigableMap}.
+ * <p>
+ * <b>NavigableMap compliance:</b> Full implementation including {@code subMap},
+ * {@code headMap}, {@code tailMap}, {@code descendingMap}, and {@code navigableKeySet}.
+ *
+ * @param <V> the value type
+ */
 public class KSTrie<V> extends AbstractMap<String, V>
                        implements NavigableMap<String, V> {
 
@@ -978,12 +1009,23 @@ public class KSTrie<V> extends AbstractMap<String, V>
     }
 
     static byte[] computeCommonSkip(BuildEntry[] entries) {
-        if (entries.length <= 1) return NO_SKIP; // single entry doesn't need skip
-        // Find common prefix of all suffixes
+        if (entries.length == 0) return NO_SKIP;
+        // Check for EOS entry (suffixLen == 0) — no common skip possible
+        for (var e : entries)
+            if (e.suffixLen() == 0) return NO_SKIP;
+        // Single entry: full suffix becomes skip (entry becomes EOS after trim)
+        if (entries.length == 1) {
+            int klen = entries[0].suffixLen();
+            byte[] full = new byte[klen];
+            full[0] = entries[0].firstByte();
+            if (entries[0].tail() != null)
+                System.arraycopy(entries[0].tail(), 0, full, 1, entries[0].tail().length);
+            return full;
+        }
+        // Multiple entries: find common prefix of all suffixes
         byte[][] suffixes = new byte[entries.length][];
         for (int i = 0; i < entries.length; i++) {
             int klen = entries[i].suffixLen();
-            if (klen == 0) return NO_SKIP; // EOS entry — no common skip
             suffixes[i] = new byte[klen];
             suffixes[i][0] = entries[i].firstByte();
             if (entries[i].tail() != null)
@@ -1256,10 +1298,10 @@ public class KSTrie<V> extends AbstractMap<String, V>
     }
 
     // === higher/lower: find entry, advance via parent ===
-    private SimpleImmutableEntry<String, V> higherImpl(byte[] key) {
+    private SimpleImmutableEntry<String, V> higherImpl(byte[] key, String keyStr) {
         var e = ceilingImpl(key);
         if (e == null) return null;
-        if (!Arrays.equals(e.getKey().getBytes(StandardCharsets.UTF_8), key)) return e;
+        if (!e.getKey().equals(keyStr)) return e;
         // Exact match — descend to the leaf, advance past it
         Node node = root;
         int consumed = 0;
@@ -1271,18 +1313,17 @@ public class KSTrie<V> extends AbstractMap<String, V>
         }
         if (node == CompactNode.SENTINEL) return null;
         CompactNode c = (CompactNode) node;
-        consumed += c.skipLen(); // skip already matched via ceiling
+        consumed += c.skipLen();
         int pos = c.findEntry(key, consumed);
         if (pos < 0) return null;
-        // Advance: next entry in this leaf, or parent walk
         if (pos + 1 < c.count) return makeEntry(c, pos + 1);
         return nextEntryAfter(c);
     }
 
-    private SimpleImmutableEntry<String, V> lowerImpl(byte[] key) {
+    private SimpleImmutableEntry<String, V> lowerImpl(byte[] key, String keyStr) {
         var e = floorImpl(key);
         if (e == null) return null;
-        if (!Arrays.equals(e.getKey().getBytes(StandardCharsets.UTF_8), key)) return e;
+        if (!e.getKey().equals(keyStr)) return e;
         // Exact match — descend, retreat
         Node node = root;
         int consumed = 0;
@@ -1304,8 +1345,8 @@ public class KSTrie<V> extends AbstractMap<String, V>
     // === NavigableMap ===
     @Override public Map.Entry<String, V> ceilingEntry(String key) { return ceilingImpl(key.getBytes(StandardCharsets.UTF_8)); }
     @Override public Map.Entry<String, V> floorEntry(String key) { return floorImpl(key.getBytes(StandardCharsets.UTF_8)); }
-    @Override public Map.Entry<String, V> higherEntry(String key) { return higherImpl(key.getBytes(StandardCharsets.UTF_8)); }
-    @Override public Map.Entry<String, V> lowerEntry(String key) { return lowerImpl(key.getBytes(StandardCharsets.UTF_8)); }
+    @Override public Map.Entry<String, V> higherEntry(String key) { return higherImpl(key.getBytes(StandardCharsets.UTF_8), key); }
+    @Override public Map.Entry<String, V> lowerEntry(String key) { return lowerImpl(key.getBytes(StandardCharsets.UTF_8), key); }
     @Override public String floorKey(String k) { var e = floorEntry(k); return e == null ? null : e.getKey(); }
     @Override public String ceilingKey(String k) { var e = ceilingEntry(k); return e == null ? null : e.getKey(); }
     @Override public String lowerKey(String k) { var e = lowerEntry(k); return e == null ? null : e.getKey(); }

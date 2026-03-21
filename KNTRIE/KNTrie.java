@@ -4,6 +4,32 @@
 import java.util.*;
 import java.util.function.*;
 
+/**
+ * KNTrie — ordered associative container with {@code long} keys.
+ * <p>
+ * A trie/B-tree hybrid implementing {@link NavigableMap NavigableMap&lt;Long, V&gt;}.
+ * Keys are stored in unsigned byte order via XOR sign-bit flip ({@code key ^ Long.MIN_VALUE}).
+ * Compact leaf nodes hold up to {@code COMPACT_MAX} (4096) entries in a sorted flat array
+ * with dup-spread padding for O(1) insert/erase amortization. Bitmask nodes provide
+ * 256-way fan-out with branchless bitmap dispatch.
+ * <p>
+ * <b>Ordering:</b> Natural {@code long} order (equivalent to unsigned byte-lexicographic
+ * order after sign-bit normalization).
+ * <p>
+ * <b>Thread safety:</b> Not thread-safe. Concurrent structural modification produces
+ * undefined behavior. Iterators are live (not snapshots) and fail-fast via {@code modCount}.
+ * <p>
+ * <b>Iterator semantics:</b> Live iterators. {@code Iterator.remove()} is supported.
+ * Structural modification during iteration (other than via the iterator's own {@code remove})
+ * throws {@link ConcurrentModificationException}.
+ * <p>
+ * <b>NavigableMap compliance:</b> Full implementation including {@code subMap},
+ * {@code headMap}, {@code tailMap}, {@code descendingMap}, and {@code navigableKeySet}.
+ * {@code insert_or_assign} returns {@code Pair<boolean, boolean>} rather than
+ * {@code Pair<Iterator, boolean>} — live iterators would be immediately stale.
+ *
+ * @param <V> the value type
+ */
 public class KNTrie<V> extends AbstractMap<Long, V>
                        implements NavigableMap<Long, V> {
 
