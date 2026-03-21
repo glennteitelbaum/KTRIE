@@ -664,11 +664,13 @@ public class KSTrie<V> extends AbstractMap<String, V>
     // === split: compact → bitmask ===
     private void split(CompactNode leaf) {
         BuildEntry[] entries = extractEntries(leaf);
-        int consumed = 0; // relative to this node's position
 
-        // Find common skip among all entries
-        byte[] newSkip = computeCommonSkip(entries);
-        int skipLen = newSkip.length;
+        // Find common skip among entries (relative to after leaf.skip)
+        byte[] entrySkip = computeCommonSkip(entries);
+        int skipLen = entrySkip.length;
+
+        // Bitmask inherits leaf.skip + common entry prefix
+        byte[] bmSkip = mergeSkip(leaf.skip, entrySkip);
 
         // Group by first byte after skip (entry suffix position skipLen)
         Map<Integer, List<BuildEntry>> groups = new LinkedHashMap<>();
@@ -706,7 +708,7 @@ public class KSTrie<V> extends AbstractMap<String, V>
 
         // Build bitmask
         BitmaskNode bm = new BitmaskNode();
-        bm.skip = newSkip;
+        bm.skip = bmSkip;
         int cc = groups.size();
         bm.children = new Node[cc + 2]; // sentinel + children + eos
         bm.children[0] = CompactNode.SENTINEL;
@@ -880,7 +882,8 @@ public class KSTrie<V> extends AbstractMap<String, V>
         BuildEntry[] entries = skip.length > 0
             ? trimSkip(all.toArray(new BuildEntry[0]), skip.length)
             : all.toArray(new BuildEntry[0]);
-        CompactNode c = buildCompact(mergeSkip(bm.skip, skip), entries, entries.length);
+        // skip already includes bm.skip (collectAllEntries prepended it)
+        CompactNode c = buildCompact(skip, entries, entries.length);
         replaceNode(bm, c);
     }
 
@@ -891,14 +894,21 @@ public class KSTrie<V> extends AbstractMap<String, V>
             if (c.skip.length > 0) fullPrefix = concat(prefix, c.skip);
             for (int i = 0; i < c.count; i++) {
                 int klen = c.L(i);
+                byte[] full;
                 if (klen == 0) {
-                    out.add(new BuildEntry((byte) 0, fullPrefix.length, fullPrefix.length > 0 ? fullPrefix : null, c.values[i]));
+                    full = fullPrefix; // EOS: key is exactly the path so far
                 } else {
                     byte[] suffix = new byte[klen];
                     suffix[0] = c.F(i);
                     if (klen > 1) System.arraycopy(c.data, c.ksOff() + c.O(i), suffix, 1, klen - 1);
-                    byte[] full = concat(fullPrefix, suffix);
-                    out.add(new BuildEntry(full[0], full.length, full.length > 1 ? Arrays.copyOfRange(full, 1, full.length) : null, c.values[i]));
+                    full = concat(fullPrefix, suffix);
+                }
+                if (full.length == 0) {
+                    out.add(new BuildEntry((byte) 0, 0, null, c.values[i])); // true EOS
+                } else {
+                    out.add(new BuildEntry(full[0], full.length,
+                        full.length > 1 ? Arrays.copyOfRange(full, 1, full.length) : null,
+                        c.values[i]));
                 }
             }
             return;
@@ -1640,6 +1650,406 @@ public class KSTrie<V> extends AbstractMap<String, V>
         return result;
     }
 
+    // === prefixErase: remove all entries matching prefix, return count ===
+    public int prefixErase(String prefix) {
+        return prefixEraseBytes(prefix.getBytes(StandardCharsets.UTF_8));
+    }
+
+    public int prefixEraseBytes(byte[] prefix) {
+        int[] result = prefixEraseNode(root, prefix, 0);
+        // result[0] = erased count, root may have changed
+        if (result[0] > 0) { size -= result[0]; modCount++; }
+        return result[0];
+    }
+
+    // Returns [erased_count]. Modifies tree in place, updates root if needed.
+    private int[] prefixEraseNode(Node node, byte[] pfx, int consumed) {
+        if (node == CompactNode.SENTINEL) return new int[]{0};
+
+        if (node instanceof CompactNode c) {
+            // Check compact skip
+            if (c.skip.length > 0) {
+                int rem = pfx.length - consumed;
+                if (rem <= c.skip.length) {
+                    // Prefix ends within or at skip
+                    for (int i = 0; i < rem; i++)
+                        if (c.skip[i] != pfx[consumed + i]) return new int[]{0};
+                    // Whole compact matches — erase it
+                    int n = c.count;
+                    replaceNode(c, CompactNode.SENTINEL);
+                    propagateTail(c.parent, -nodeTailTotal(c));
+                    removeEmpty(c.parent);
+                    return new int[]{n};
+                }
+                if (!matchSkip(c.skip, pfx, consumed)) return new int[]{0};
+                consumed += c.skipLen();
+            }
+            if (consumed >= pfx.length) {
+                int n = c.count;
+                replaceNode(c, CompactNode.SENTINEL);
+                propagateTail(c.parent, -nodeTailTotal(c));
+                removeEmpty(c.parent);
+                return new int[]{n};
+            }
+            // Filter compact entries
+            return prefixEraseCompact(c, pfx, consumed);
+        }
+
+        BitmaskNode bm = (BitmaskNode) node;
+        if (bm.skip.length > 0) {
+            int rem = pfx.length - consumed;
+            if (rem <= bm.skip.length) {
+                for (int i = 0; i < rem; i++)
+                    if (bm.skip[i] != pfx[consumed + i]) return new int[]{0};
+                int n = countEntries(bm);
+                replaceNode(bm, CompactNode.SENTINEL);
+                propagateTail(bm.parent, -nodeTailTotal(bm));
+                removeEmpty(bm.parent);
+                return new int[]{n};
+            }
+            if (!matchSkip(bm.skip, pfx, consumed)) return new int[]{0};
+            consumed += bm.skipLen();
+        }
+
+        if (consumed >= pfx.length) {
+            int n = countEntries(bm);
+            replaceNode(bm, CompactNode.SENTINEL);
+            propagateTail(bm.parent, -nodeTailTotal(bm));
+            removeEmpty(bm.parent);
+            return new int[]{n};
+        }
+
+        // Dispatch into child
+        int b = pfx[consumed++] & 0xFF;
+        Node child = bm.dispatch(b);
+        if (child == CompactNode.SENTINEL) return new int[]{0};
+
+        long oldChildTail = nodeTailTotal(child);
+        int[] r = prefixEraseNode(child, pfx, consumed);
+        if (r[0] == 0) return new int[]{0};
+
+        // Unwind: update totalTailBytes, check collapse
+        bm.totalTailBytes -= oldChildTail - nodeTailTotal(
+            bm.hasBit(b) ? bm.children[bm.slotOf(b)] : CompactNode.SENTINEL);
+        propagateTail(bm.parent, -(oldChildTail - nodeTailTotal(
+            bm.hasBit(b) ? bm.children[bm.slotOf(b)] : CompactNode.SENTINEL)));
+        checkCoalesce(bm);
+        return r;
+    }
+
+    private int[] prefixEraseCompact(CompactNode c, byte[] pfx, int consumed) {
+        int rlen = pfx.length - consumed;
+        // Partition entries: kept vs erased
+        List<Integer> kept = new ArrayList<>();
+        int erased = 0;
+        for (int i = 0; i < c.count; i++) {
+            if (entryMatchesPrefix(c, i, pfx, consumed, rlen)) {
+                erased++;
+            } else {
+                kept.add(i);
+            }
+        }
+        if (erased == 0) return new int[]{0};
+
+        long oldTail = nodeTailTotal(c);
+        if (kept.isEmpty()) {
+            replaceNode(c, CompactNode.SENTINEL);
+            propagateTail(c.parent, -oldTail);
+            removeEmpty(c.parent);
+            return new int[]{erased};
+        }
+
+        // Rebuild compact with kept entries
+        BuildEntry[] entries = new BuildEntry[kept.size()];
+        for (int i = 0; i < kept.size(); i++)
+            entries[i] = extractSingleEntry(c, kept.get(i));
+        CompactNode nc = buildCompact(c.skip, entries, entries.length);
+        nc.parent = c.parent; nc.parentByte = c.parentByte;
+        replaceNode(c, nc);
+        propagateTail(nc.parent, nodeTailTotal(nc) - oldTail);
+        checkCoalesce(nc.parent);
+        return new int[]{erased};
+    }
+
+    // === prefixCopy: deep clone matching subtree into new trie ===
+    public KSTrie<V> prefixCopy(String prefix) {
+        return prefixCopyBytes(prefix.getBytes(StandardCharsets.UTF_8));
+    }
+
+    @SuppressWarnings("unchecked")
+    public KSTrie<V> prefixCopyBytes(byte[] prefix) {
+        KSTrie<V> result = new KSTrie<>();
+        Node node = root;
+        int consumed = 0;
+        int pathLen = 0; // bytes consumed by dispatch + skip before entering current node
+
+        while (node instanceof BitmaskNode bm) {
+            if (bm.skip.length > 0) {
+                int rem = prefix.length - consumed;
+                if (rem <= bm.skip.length) {
+                    for (int i = 0; i < rem; i++)
+                        if (bm.skip[i] != prefix[consumed + i]) return result;
+                    result.root = deepClone(bm);
+                    reskipRoot(result, prefix, pathLen);
+                    result.size = countEntries(result.root);
+                    return result;
+                }
+                if (!matchSkip(bm.skip, prefix, consumed)) return result;
+                consumed += bm.skipLen();
+            }
+            if (consumed >= prefix.length) {
+                result.root = deepClone(bm);
+                reskipRoot(result, prefix, pathLen);
+                result.size = countEntries(result.root);
+                return result;
+            }
+            pathLen = consumed + 1; // dispatch byte included
+            int b = prefix[consumed++] & 0xFF;
+            node = bm.dispatch(b);
+        }
+        if (node == CompactNode.SENTINEL) return result;
+        CompactNode c = (CompactNode) node;
+        if (c.skip.length > 0) {
+            int rem = prefix.length - consumed;
+            if (rem <= c.skip.length) {
+                for (int i = 0; i < rem; i++)
+                    if (c.skip[i] != prefix[consumed + i]) return result;
+                result.root = deepClone(c);
+                reskipRoot(result, prefix, pathLen);
+                result.size = countEntries(result.root);
+                return result;
+            }
+            if (!matchSkip(c.skip, prefix, consumed)) return result;
+            consumed += c.skipLen();
+        }
+        if (consumed >= prefix.length) {
+            result.root = deepClone(c);
+            reskipRoot(result, prefix, pathLen);
+            result.size = countEntries(result.root);
+            return result;
+        }
+        // Filter compact entries — entries get prefix prepended
+        result.root = prefixCopyCompact(c, prefix, consumed, pathLen);
+        result.size = countEntries(result.root);
+        return result;
+    }
+
+    private Node prefixCopyCompact(CompactNode c, byte[] pfx, int consumed, int pathLen) {
+        int rlen = pfx.length - consumed;
+        List<BuildEntry> matched = new ArrayList<>();
+        for (int i = 0; i < c.count; i++) {
+            if (entryMatchesPrefix(c, i, pfx, consumed, rlen))
+                matched.add(extractSingleEntry(c, i));
+        }
+        if (matched.isEmpty()) return CompactNode.SENTINEL;
+        // Build with original skip, then reskip
+        CompactNode nc = buildCompact(c.skip, matched.toArray(new BuildEntry[0]), matched.size());
+        // Prepend path to root's skip
+        byte[] pathPrefix = pathLen > 0 ? Arrays.copyOf(pfx, pathLen) : NO_SKIP;
+        nc.skip = mergeSkip(pathPrefix, nc.skip);
+        return nc;
+    }
+
+    // Prepend consumed path bytes to a cloned/stolen root's skip
+    private void reskipRoot(KSTrie<V> trie, byte[] prefix, int pathLen) {
+        if (pathLen == 0 || trie.root == CompactNode.SENTINEL) return;
+        byte[] pathPrefix = Arrays.copyOf(prefix, pathLen);
+        if (trie.root instanceof CompactNode c) {
+            c.skip = mergeSkip(pathPrefix, c.skip);
+        } else if (trie.root instanceof BitmaskNode bm) {
+            bm.skip = mergeSkip(pathPrefix, bm.skip);
+        }
+    }
+
+    // === prefixSplit: steal matching subtree, return as new trie ===
+    public KSTrie<V> prefixSplit(String prefix) {
+        return prefixSplitBytes(prefix.getBytes(StandardCharsets.UTF_8));
+    }
+
+    public KSTrie<V> prefixSplitBytes(byte[] prefix) {
+        KSTrie<V> stolen = new KSTrie<>();
+        int[] result = prefixSplitNode(root, prefix, 0, 0, stolen);
+        // result = [count_stolen, pathLen]
+        if (result[0] > 0) {
+            size -= result[0]; modCount++;
+            reskipRoot(stolen, prefix, result[1]);
+        }
+        return stolen;
+    }
+
+    // Returns [count_stolen, pathLen].
+    private int[] prefixSplitNode(Node node, byte[] pfx, int consumed, int pathLen, KSTrie<V> stolen) {
+        if (node == CompactNode.SENTINEL) return new int[]{0, 0};
+
+        if (node instanceof CompactNode c) {
+            if (c.skip.length > 0) {
+                int rem = pfx.length - consumed;
+                if (rem <= c.skip.length) {
+                    for (int i = 0; i < rem; i++)
+                        if (c.skip[i] != pfx[consumed + i]) return new int[]{0, 0};
+                    int n = c.count;
+                    detachNode(c);
+                    stolen.root = c;
+                    stolen.size = n;
+                    c.parent = null; c.parentByte = PARENT_ROOT;
+                    return new int[]{n, pathLen};
+                }
+                if (!matchSkip(c.skip, pfx, consumed)) return new int[]{0, 0};
+                consumed += c.skipLen();
+            }
+            if (consumed >= pfx.length) {
+                int n = c.count;
+                detachNode(c);
+                stolen.root = c;
+                stolen.size = n;
+                c.parent = null; c.parentByte = PARENT_ROOT;
+                return new int[]{n, pathLen};
+            }
+            return prefixSplitCompact(c, pfx, consumed, pathLen, stolen);
+        }
+
+        BitmaskNode bm = (BitmaskNode) node;
+        if (bm.skip.length > 0) {
+            int rem = pfx.length - consumed;
+            if (rem <= bm.skip.length) {
+                for (int i = 0; i < rem; i++)
+                    if (bm.skip[i] != pfx[consumed + i]) return new int[]{0, 0};
+                int n = countEntries(bm);
+                detachNode(bm);
+                stolen.root = bm;
+                stolen.size = n;
+                bm.parent = null; bm.parentByte = PARENT_ROOT;
+                return new int[]{n, pathLen};
+            }
+            if (!matchSkip(bm.skip, pfx, consumed)) return new int[]{0, 0};
+            consumed += bm.skipLen();
+        }
+        if (consumed >= pfx.length) {
+            int n = countEntries(bm);
+            detachNode(bm);
+            stolen.root = bm;
+            stolen.size = n;
+            bm.parent = null; bm.parentByte = PARENT_ROOT;
+            return new int[]{n, pathLen};
+        }
+
+        int b = pfx[consumed++] & 0xFF;
+        Node child = bm.dispatch(b);
+        if (child == CompactNode.SENTINEL) return new int[]{0, 0};
+
+        long oldChildTail = nodeTailTotal(child);
+        int[] r = prefixSplitNode(child, pfx, consumed, consumed, stolen);
+        if (r[0] == 0) return new int[]{0, 0};
+
+        long newChildTail = bm.hasBit(b) ? nodeTailTotal(bm.children[bm.slotOf(b)]) : 0;
+        long delta = -(oldChildTail - newChildTail);
+        bm.totalTailBytes += delta;
+        propagateTail(bm.parent, delta);
+        checkCoalesce(bm);
+        return r;
+    }
+
+    private int[] prefixSplitCompact(CompactNode c, byte[] pfx, int consumed, int pathLen, KSTrie<V> stolen) {
+        int rlen = pfx.length - consumed;
+        List<Integer> keptIdx = new ArrayList<>();
+        List<BuildEntry> stolenEntries = new ArrayList<>();
+        for (int i = 0; i < c.count; i++) {
+            if (entryMatchesPrefix(c, i, pfx, consumed, rlen))
+                stolenEntries.add(extractSingleEntry(c, i));
+            else
+                keptIdx.add(i);
+        }
+        if (stolenEntries.isEmpty()) return new int[]{0, 0};
+
+        int nstolen = stolenEntries.size();
+        // Build stolen with skip, reskip happens at top level
+        stolen.root = buildCompact(c.skip, stolenEntries.toArray(new BuildEntry[0]), nstolen);
+        stolen.size = nstolen;
+
+        long oldTail = nodeTailTotal(c);
+        if (keptIdx.isEmpty()) {
+            replaceNode(c, CompactNode.SENTINEL);
+            propagateTail(c.parent, -oldTail);
+            removeEmpty(c.parent);
+        } else {
+            BuildEntry[] kept = new BuildEntry[keptIdx.size()];
+            for (int i = 0; i < keptIdx.size(); i++)
+                kept[i] = extractSingleEntry(c, keptIdx.get(i));
+            CompactNode nc = buildCompact(c.skip, kept, kept.length);
+            nc.parent = c.parent; nc.parentByte = c.parentByte;
+            replaceNode(c, nc);
+            propagateTail(nc.parent, nodeTailTotal(nc) - oldTail);
+            checkCoalesce(nc.parent);
+        }
+        return new int[]{nstolen, pathLen};
+    }
+
+    // === Prefix helpers ===
+
+    private boolean entryMatchesPrefix(CompactNode c, int i, byte[] pfx, int consumed, int rlen) {
+        int klen = c.L(i);
+        if (rlen == 0) return true; // empty remaining prefix matches all
+        if (klen == 0) return false; // EOS entry, but prefix has more bytes
+        if (klen < rlen) return false;
+        if ((c.F(i) & 0xFF) != (pfx[consumed] & 0xFF)) return false;
+        if (rlen <= 1) return true;
+        int off = c.ksOff() + c.O(i);
+        for (int j = 0; j < rlen - 1; j++)
+            if ((c.data[off + j] & 0xFF) != (pfx[consumed + 1 + j] & 0xFF)) return false;
+        return true;
+    }
+
+    private BuildEntry extractSingleEntry(CompactNode c, int i) {
+        int klen = c.L(i);
+        byte fb = klen > 0 ? c.F(i) : 0;
+        byte[] tail = null;
+        if (klen > 1) {
+            int off = c.O(i);
+            tail = Arrays.copyOfRange(c.data, c.ksOff() + off, c.ksOff() + off + klen - 1);
+        }
+        return new BuildEntry(fb, klen, tail, c.values[i]);
+    }
+
+    @SuppressWarnings("unchecked")
+    private Node deepClone(Node node) {
+        if (node == CompactNode.SENTINEL) return CompactNode.SENTINEL;
+        if (node instanceof CompactNode c) {
+            CompactNode nc = new CompactNode();
+            nc.skip = c.skip; // NO_SKIP or shared immutable — safe
+            nc.data = c.data.clone();
+            nc.values = c.values.clone();
+            nc.count = c.count;
+            nc.capacity = c.capacity;
+            nc.ksUsed = c.ksUsed;
+            return nc;
+        }
+        BitmaskNode bm = (BitmaskNode) node;
+        BitmaskNode nb = new BitmaskNode();
+        nb.skip = bm.skip;
+        nb.b0 = bm.b0; nb.b1 = bm.b1; nb.b2 = bm.b2; nb.b3 = bm.b3;
+        nb.totalTailBytes = bm.totalTailBytes;
+        nb.children = new Node[bm.children.length];
+        nb.children[0] = CompactNode.SENTINEL;
+        for (int i = 1; i < bm.children.length - 1; i++) {
+            nb.children[i] = deepClone(bm.children[i]);
+            nb.children[i].parent = nb;
+            nb.children[i].parentByte = bm.children[i].parentByte;
+        }
+        Node eosClone = deepClone(bm.eosChild());
+        nb.children[nb.children.length - 1] = eosClone;
+        if (eosClone != CompactNode.SENTINEL) {
+            eosClone.parent = nb; eosClone.parentByte = PARENT_EOS;
+        }
+        return nb;
+    }
+
+    private void detachNode(Node node) {
+        if (node.parent == null) { root = CompactNode.SENTINEL; return; }
+        BitmaskNode p = node.parent;
+        if (node.parentByte == PARENT_EOS) p.setEosChild(CompactNode.SENTINEL);
+        else { p.removeChild(node.parentByte); }
+    }
+
     // === entrySet + Iterator ===
     @Override public Set<Map.Entry<String, V>> entrySet() {
         return new AbstractSet<>() {
@@ -1770,19 +2180,18 @@ public class KSTrie<V> extends AbstractMap<String, V>
         int klen = c.L(i);
         if (rem == 0) return 0; // empty remaining prefix matches everything
         if (klen == 0) return 1; // EOS entry, but we still have prefix bytes
+        if (klen < rem) return 1; // entry too short to match prefix
         int fb = c.F(i) & 0xFF;
         int pb = prefix[consumed] & 0xFF;
-        if (fb != pb) return fb > pb ? -1 : 1; // entry before/after prefix
-        int tail = klen - 1;
+        if (fb != pb) return fb > pb ? -1 : 1;
         int prefTail = rem - 1;
-        int cmpLen = Math.min(tail, prefTail);
         int off = c.ksOff() + c.O(i);
-        for (int j = 0; j < cmpLen; j++) {
+        for (int j = 0; j < prefTail; j++) {
             int a = c.data[off + j] & 0xFF;
             int b = prefix[consumed + 1 + j] & 0xFF;
             if (a != b) return a > b ? -1 : 1;
         }
-        return 0; // prefix matches this far
+        return 0; // entry's suffix starts with the remaining prefix
     }
 
     // === Main — smoke test ===
@@ -1972,6 +2381,117 @@ public class KSTrie<V> extends AbstractMap<String, V>
         t.prefixWalk("", (k, v) -> walked.add(k));
         assert walked.size() == 4 : "walk all=" + walked.size();
         System.out.println("Prefix walk/items: PASS"); System.out.flush();
+
+        // Prefix erase
+        t.clear();
+        t.put("/api/users/1", 1);
+        t.put("/api/users/2", 2);
+        t.put("/api/orders/1", 3);
+        t.put("/static/main.css", 4);
+        t.put("/static/app.js", 5);
+        assert t.size() == 5;
+        int erased = t.prefixErase("/api/users/");
+        assert erased == 2 : "erased=" + erased;
+        assert t.size() == 3;
+        assert t.get("/api/users/1") == null;
+        assert t.get("/api/users/2") == null;
+        assert t.get("/api/orders/1") == 3;
+
+        erased = t.prefixErase("/static/");
+        assert erased == 2;
+        assert t.size() == 1;
+
+        erased = t.prefixErase("/nonexistent/");
+        assert erased == 0;
+        assert t.size() == 1;
+
+        // Erase all
+        erased = t.prefixErase("");
+        assert erased == 1;
+        assert t.size() == 0;
+        System.out.println("Prefix erase: PASS"); System.out.flush();
+
+        // Prefix copy
+        t.clear();
+        t.put("/api/users/1", 1);
+        t.put("/api/users/2", 2);
+        t.put("/api/orders/1", 3);
+        t.put("/static/main.css", 4);
+        KSTrie<Integer> copied = t.prefixCopy("/api/users/");
+        assert copied.size() == 2;
+        assert copied.get("/api/users/1") == 1;
+        assert copied.get("/api/users/2") == 2;
+        assert copied.get("/api/orders/1") == null;
+        // Source unchanged
+        assert t.size() == 4;
+        assert t.get("/api/users/1") == 1;
+
+        // Copy no match
+        KSTrie<Integer> empty = t.prefixCopy("/nonexistent/");
+        assert empty.size() == 0;
+
+        // Copy all
+        KSTrie<Integer> all = t.prefixCopy("");
+        assert all.size() == 4;
+        System.out.println("Prefix copy: PASS"); System.out.flush();
+
+        // Prefix split
+        t.clear();
+        t.put("/api/users/1", 1);
+        t.put("/api/users/2", 2);
+        t.put("/api/orders/1", 3);
+        t.put("/static/main.css", 4);
+        t.put("/static/app.js", 5);
+        KSTrie<Integer> split = t.prefixSplit("/api/users/");
+        assert split.size() == 2 : "split.size=" + split.size();
+        assert split.get("/api/users/1") == 1;
+        assert split.get("/api/users/2") == 2;
+        // Source lost the split entries
+        assert t.size() == 3 : "t.size=" + t.size();
+        assert t.get("/api/users/1") == null;
+        assert t.get("/api/orders/1") == 3;
+        assert t.get("/static/main.css") == 4;
+
+        // Split no match
+        KSTrie<Integer> splitNone = t.prefixSplit("/nonexistent/");
+        assert splitNone.size() == 0;
+        assert t.size() == 3;
+
+        // Split all
+        KSTrie<Integer> splitAll = t.prefixSplit("");
+        assert splitAll.size() == 3;
+        assert t.size() == 0;
+        System.out.println("Prefix split: PASS"); System.out.flush();
+
+        // Prefix ops at scale vs TreeMap
+        t.clear();
+        TreeMap<String, Integer> pfxRef = new TreeMap<>();
+        var pfxRng = new java.util.Random(42);
+        String[] pfxPrefixes = {"/api/v1/", "/api/v2/", "/static/", "/admin/"};
+        for (int i = 0; i < 10000; i++) {
+            String pfx = pfxPrefixes[pfxRng.nextInt(pfxPrefixes.length)];
+            int slen = 4 + pfxRng.nextInt(8);
+            var sb2 = new StringBuilder(pfx);
+            for (int j = 0; j < slen; j++) sb2.append((char)('a' + pfxRng.nextInt(26)));
+            t.put(sb2.toString(), i); pfxRef.put(sb2.toString(), i);
+        }
+        // Copy /api/v1/
+        KSTrie<Integer> v1copy = t.prefixCopy("/api/v1/");
+        int refV1Count = (int) pfxRef.keySet().stream().filter(k -> k.startsWith("/api/v1/")).count();
+        assert v1copy.size() == refV1Count : "v1copy.size=" + v1copy.size() + " ref=" + refV1Count;
+        assert t.size() == pfxRef.size(); // source unchanged
+
+        // Split /static/
+        int refStaticCount = (int) pfxRef.keySet().stream().filter(k -> k.startsWith("/static/")).count();
+        KSTrie<Integer> staticSplit = t.prefixSplit("/static/");
+        assert staticSplit.size() == refStaticCount;
+        assert t.size() == pfxRef.size() - refStaticCount;
+
+        // Erase /admin/
+        int refAdminCount = (int) pfxRef.keySet().stream().filter(k -> k.startsWith("/admin/")).count();
+        int adminErased = t.prefixErase("/admin/");
+        assert adminErased == refAdminCount;
+        System.out.println("Prefix ops at scale: PASS"); System.out.flush();
 
         // Descending map
         t.clear();
