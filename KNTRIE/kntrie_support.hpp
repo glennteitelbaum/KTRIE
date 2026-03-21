@@ -121,7 +121,8 @@ inline constexpr size_t round_up_u64(size_t n) noexcept {
     }
     int bit  = static_cast<int>(std::bit_width(n - 1));
     size_t pow2 = size_t{1} << bit;
-    size_t mid  = pow2 / 2 + pow2 / 4 + 2;  // +2: ensures mid > pow2/2 for smallest sizes
+    static constexpr size_t MIDPOINT_MIN_BIAS = 2;  // ensures mid > pow2/2 for smallest sizes
+    size_t mid  = pow2 / 2 + pow2 / 4 + MIDPOINT_MIN_BIAS;
     return (n <= mid) ? mid : pow2;
 }
 

@@ -8,12 +8,12 @@ namespace gteitelbaum::kntrie_detail {
 // ==========================================================================
 // bitmask_ops  -- unified bitmask node + bitmap_256_t leaf operations
 //
-// Bitmask node (internal): [header(1)][bitmap(4)][sentinel(1)][children(n)][desc(n u16)]
+// Bitmask node (internal): [header(1)][bitmap(4)][sentinel(1)][children(n)][desc(1 u64)]
 //   - Parent pointer targets &node[1] (bitmap), no LEAF_BIT
 //   - sentinel at offset 5 from bitmap = SENTINEL_TAGGED for branchless miss
 //   - real children at offset 5 from bitmap (after sentinel)
 //   - All children are tagged uint64_t values
-//   - desc array: uint64_t per child, stores exact child descendant count
+//   - desc: one uint64_t at end of node, total descendant count for this subtree
 //
 // Bitmap256 leaf (suffix_type=0): [header(1 or 2)][bitmap(4)][values(n)]
 //   - Parent pointer targets &node[0] | LEAF_BIT

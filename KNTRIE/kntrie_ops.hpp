@@ -71,7 +71,7 @@ struct kntrie_ops {
         case 5: if constexpr (MAX_DEPTH > 5) return fn_.template operator()<KEY_BITS - 5 * CHAR_BIT>(); [[fallthrough]];
         case 6: if constexpr (MAX_DEPTH > 6) return fn_.template operator()<KEY_BITS - 6 * CHAR_BIT>(); [[fallthrough]];
         case 7: if constexpr (MAX_DEPTH > 7) return fn_.template operator()<KEY_BITS - 7 * CHAR_BIT>(); [[fallthrough]];
-        default: __builtin_unreachable();
+        default: std::unreachable();
         }
     }
 
@@ -551,7 +551,7 @@ struct kntrie_ops {
                             return split_on_prefix<BITS>(node, hdr, ik, value,
                                                           skip, pos, bld);
                         else
-                            __builtin_unreachable();
+                            std::unreachable();
                     });
                     return {tagged, true, false};
                 }
@@ -752,7 +752,7 @@ struct kntrie_ops {
                             return split_on_prefix<BITS>(node, hdr, ik, default_sv,
                                                           skip, pos, bld);
                         else
-                            __builtin_unreachable();
+                            std::unreachable();
                     });
                     return {tagged, true, false};
                 }
@@ -1231,7 +1231,7 @@ struct kntrie_ops {
             }
             return {std::move(wk), std::move(wv), child.count, child.rep_key};
         }
-        __builtin_unreachable();
+        std::unreachable();
     }
 
     template<int BITS> requires (BITS >= U8_BITS)
@@ -1257,7 +1257,7 @@ struct kntrie_ops {
             }
             return {std::move(wk), std::move(wv), child.count, child.rep_key};
         }
-        __builtin_unreachable();
+        std::unreachable();
     }
 
     template<int BITS> requires (BITS >= U8_BITS)

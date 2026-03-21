@@ -527,7 +527,7 @@ struct node_header {
             return (static_cast<size_t>(slots_off) + slots_t::value_u64s(count)) * U64_BYTES;
         }
         // bitmask: header + desc + bitmap + sentinel + children + eos + skip
-        size_t u64s = 2 + BITMAP_U64 + 1 + count + 1;
+        size_t u64s = 2 + BITMAP_WORDS + 1 + count + 1;
         if (has_skip()) u64s += div_ceil(align_up(skip_bytes(), U64_BYTES), U64_BYTES);
         return u64s * U64_BYTES;
     }
@@ -544,7 +544,7 @@ struct node_header {
 
     // --- Bitmap-typed accessors (read-path: branchless) ---
 
-    static constexpr size_t BITMAP_U64 = CHARMAP::BITMAP_WORDS;
+    static constexpr size_t BITMAP_WORDS = CHARMAP::BITMAP_WORDS;
 
     // Bitmask bitmap at byte 16: after header(8B) + desc(8B)
     static constexpr size_t BITMAP_NODE_OFF = 2;  // u64 offset

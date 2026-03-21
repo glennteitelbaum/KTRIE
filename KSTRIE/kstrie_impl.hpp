@@ -634,8 +634,8 @@ private:
             uint8_t stack_buf[256];
             auto [mapped, heap_buf] = get_mapped<CHARMAP>(key_data, key_len,
                                                   stack_buf, sizeof(stack_buf));
+            std::unique_ptr<uint8_t[]> heap_guard(heap_buf);
             const VALUE* result = find_inner(mapped, key_len);
-            delete[] heap_buf;
             return result;
         }
     }
@@ -813,8 +813,8 @@ public:
             uint8_t stack_buf[256];
             auto [mapped, heap_buf] = get_mapped<CHARMAP>(raw, len,
                                                   stack_buf, sizeof(stack_buf));
+            std::unique_ptr<uint8_t[]> heap_guard(heap_buf);
             bool result = modify_inner(mapped, len, std::forward<F>(fn));
-            delete[] heap_buf;
             return result;
         }
     }
@@ -828,9 +828,9 @@ public:
         uint8_t stack_buf[256];
         auto [mapped, heap_buf] = get_mapped<CHARMAP>(raw, len,
                                               stack_buf, sizeof(stack_buf));
+        std::unique_ptr<uint8_t[]> heap_guard(heap_buf);
 
         erase_info r = erase_node(root_v, mapped, len, 0);
-        delete[] heap_buf;
 
         if (r.status == erase_status::MISSING)
             return 0;
@@ -869,10 +869,10 @@ public:
         uint8_t stack_buf[256];
         auto [mapped, heap_buf] = get_mapped<CHARMAP>(raw, len,
                                               stack_buf, sizeof(stack_buf));
+        std::unique_ptr<uint8_t[]> heap_guard(heap_buf);
 
         erase_info r = erase_when_node(root_v, mapped, len, 0,
                                        std::forward<F>(fn));
-        delete[] heap_buf;
 
         if (r.status == erase_status::MISSING)
             return false;
@@ -1305,9 +1305,9 @@ private:
 
     // ------------------------------------------------------------------
     // fill_layout — recursive walker for collapse_to_compact.
-    // Fills stack-local L/F/O/blob/values arrays directly.
+    // Fills stack-local L/F/O/keysuffix/values arrays directly.
     // prefix_buf[0..prefix_len-1]: bytes to prepend to all entries.
-    // Returns false if blob exceeds 256 bytes or entries exceed max.
+    // Returns false if keysuffix exceeds 256 bytes or entries exceed max.
     // ------------------------------------------------------------------
 
     static constexpr uint32_t MAX_COLLAPSE_ENTRIES = COMPACT_KEYSUFFIX_LIMIT + BITMASK_MAX_CHILDREN;
@@ -1384,7 +1384,7 @@ private:
                     continue;
                 }
 
-                // Chain head or standalone: write blob
+                // Chain head or standalone: write keysuffix bytes
                 if (blob_cursor + new_tail_len > COMPACT_KEYSUFFIX_LIMIT) return false;
 
                 cO[ei] = static_cast<ks_offset_type>(blob_cursor);
@@ -1830,10 +1830,10 @@ private:
         uint8_t stack_buf[256];
         auto [mapped, heap_buf] = get_mapped<CHARMAP>(raw, len,
                                               stack_buf, sizeof(stack_buf));
+        std::unique_ptr<uint8_t[]> heap_guard(heap_buf);
 
         insert_result r = insert_node(root_v, mapped, len, value, 0, mode);
         root_v = r.node;
-        delete[] heap_buf;
 
         if (r.outcome == insert_outcome::INSERTED) {
             size_v++;

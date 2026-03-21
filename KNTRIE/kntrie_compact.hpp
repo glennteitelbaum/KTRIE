@@ -10,9 +10,9 @@
 namespace gteitelbaum::kntrie_detail {
 
 // ==========================================================================
-// AdaptiveSearch  (branchless binary search for pow2 and 3/4 midpoint counts)
+// AdaptiveSearch  (branchless binary search for power-of-2 slot counts)
 //
-// Every compact leaf has power-of-2 or 3/4 midpoint total slots, so the search is a
+// Every compact leaf has power-of-2 total slots, so the search is a
 // pure halving loop — no alignment preamble, no branches.
 // ==========================================================================
 
@@ -58,10 +58,14 @@ struct compact_ops {
     using VST  = typename VT::slot_type;
     using BLD  = builder<VALUE, VT::IS_TRIVIAL, ALLOC>;
 
-    // Suffix type constant for this K
+    // Suffix type constants for key width dispatch
+    static constexpr uint8_t STYPE_U16 = 1;
+    static constexpr uint8_t STYPE_U32 = 2;
+    static constexpr uint8_t STYPE_U64 = 3;
+
     static constexpr uint8_t STYPE =
-        (sizeof(K) == sizeof(uint16_t)) ? 1 :
-        (sizeof(K) == sizeof(uint32_t)) ? 2 : 3;
+        (sizeof(K) == sizeof(uint16_t)) ? STYPE_U16 :
+        (sizeof(K) == sizeof(uint32_t)) ? STYPE_U32 : STYPE_U64;
 
     // --- slot count: next power of 2 ---
 

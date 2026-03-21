@@ -11,16 +11,16 @@ struct kstrie_bitmask;
 // ============================================================================
 // kstrie_compact -- compact (leaf) node operations
 //
-// Node layout:  [header 8B][skip pad][ck_prefix 4B][lengths][firsts]
-//               [pad][offsets][keysuffix][values]
+// Node layout:  [header 8B][ck_prefix 8B][L][F][O][keysuffix region][value slots]
+// Skip bytes are stored at the byte offset recorded in ck_prefix.skip_data_off.
 //
-// lengths[] : u8, full suffix length (0 = empty suffix / exact prefix match)
-// firsts[]  : u8, suffix[0]; 0 for empty suffix
-// offsets[] : u16, start of suffix tail (suffix[1..]) in keysuffix
-// keysuffix : suffix[1..len-1], not compacted on erase
+// L[]       : u8, full suffix length (0 = empty suffix / exact prefix match)
+// F[]       : u8, suffix[0]; 0 for empty suffix
+// O[]       : u16, start of suffix tail (suffix[1..]) in keysuffix region
+// keysuffix : suffix[1..len-1], compacted on erase (chain head / standalone)
 // values    : u64 slots at slots_off * 8
 //
-// Sort order: (first_byte, length, tail) -- lexicographic.
+// Sort order: lexicographic (F[i] primary, then tail bytes, shorter key first on tie).
 // Search: single binary search. O(log N).
 //
 // Invariants (checked only on insert or prefix-shrink):
@@ -75,7 +75,7 @@ struct kstrie_compact {
         uint16_t cap;
         uint16_t keysuffix_used;
         uint16_t skip_data_off;   // byte offset from node start to skip bytes
-        uint16_t reserved_;
+        uint16_t reserved_padding_;  // must remain zero; aligns ck_prefix to 8 bytes
     };
 
     static constexpr size_t CK_PREFIX_OFF = U64_BYTES;  // byte offset: right after header
@@ -212,7 +212,7 @@ struct kstrie_compact {
         p.cap            = cap;
         p.keysuffix_used = 0;
         p.skip_data_off  = static_cast<uint16_t>(ck_skip_off(cap));
-        p.reserved_      = 0;
+        p.reserved_padding_ = 0;
 
         if (h.has_skip()) [[unlikely]]
             std::memcpy(reinterpret_cast<uint8_t*>(node) + p.skip_data_off,
@@ -348,7 +348,7 @@ struct kstrie_compact {
 
     // ------------------------------------------------------------------
     // build_compact -- build a compact node from sorted build_entry array.
-    // Entries must already be in (first_byte, length, tail) order.
+    // Entries must already be in lexicographic order (F[i], then tail bytes).
     // ------------------------------------------------------------------
 
     static uint64_t* build_compact(mem_type& mem,
@@ -373,9 +373,9 @@ struct kstrie_compact {
         uint8_t*  B  = keysuffix(node, h);
         auto* sb = h.get_compact_slots(node);
 
-        // Forward pass: populate L[], F[], values, blob with sharing.
+        // Forward pass: populate L[], F[], values, keysuffix region with sharing.
         // Within a sharing chain (same F, each tail is prefix of next),
-        // only the longest writes to blob. Shorter entries share its O[].
+        // only the longest writes to the keysuffix region. Shorter entries share its O[].
         int chain_start = -1;
         uint16_t cursor = 0;
 
@@ -399,7 +399,7 @@ struct kstrie_compact {
                 continue;  // defer O[i] until longest is written
             }
 
-            // Longest in chain (or standalone): write blob bytes
+            // Longest in chain (or standalone): write keysuffix bytes
             O[i] = static_cast<ks_offset_type>(cursor);
             std::memcpy(B + cursor, entries[i].key + 1, tail);
 
@@ -458,7 +458,7 @@ struct kstrie_compact {
     }
 
     // ------------------------------------------------------------------
-    // compute_insert_delta — exact blob bytes needed for this insert.
+    // compute_insert_delta — exact keysuffix bytes needed for this insert.
     // ------------------------------------------------------------------
 
     static uint16_t compute_insert_delta(const uint64_t* node, const hdr_type& h,
@@ -575,7 +575,7 @@ struct kstrie_compact {
             uint8_t D_buf[COMPACT_KEYSUFFIX_LIMIT];
             if (D_tail > 0) std::memcpy(D_buf, B + chain_off, D_tail);
 
-            // memmove blob from gap_at rightward by N_extra
+            // memmove keysuffix from gap_at rightward by N_extra
             uint16_t bytes_after = np.keysuffix_used - gap_at;
             if (N_extra > 0 && bytes_after > 0)
                 std::memmove(B + gap_at + N_extra, B + gap_at, bytes_after);
@@ -798,7 +798,7 @@ struct kstrie_compact {
             uint8_t fb   = klen > 0 ? suffix[0] : 0;
             uint8_t tail = klen > 0 ? klen - 1 : 0;
 
-            // Pre-check: compute sharing-aware blob delta.
+            // Pre-check: compute sharing-aware keysuffix delta.
             // If ks_used + delta > COMPACT_KEYSUFFIX_LIMIT, must split now.
             if (tail > 0) [[likely]] {
                 uint16_t delta = compute_insert_delta(node, h, pos, klen, fb,
@@ -963,7 +963,7 @@ struct kstrie_compact {
     // ------------------------------------------------------------------
 
     // Stack key buffer size: sum(L[i]) = keysuffix_used + count_with_F_byte.
-    // Upper bound: COMPACT_KEYSUFFIX_LIMIT (max blob) + MAX_COLLAPSE_ENTRIES (max count).
+    // Upper bound: COMPACT_KEYSUFFIX_LIMIT (max keysuffix) + MAX_COLLAPSE_ENTRIES (max count).
     static constexpr size_t PROMOTE_KEY_BUF_SIZE =
         COMPACT_KEYSUFFIX_LIMIT + COMPACT_KEYSUFFIX_LIMIT + BITMASK_MAX_CHILDREN;
 
@@ -1060,7 +1060,7 @@ struct kstrie_compact {
     }
 
     // ------------------------------------------------------------------
-    // erase_in_place -- remove entry at pos by shifting parallel arrays and blob.
+    // erase_in_place -- remove entry at pos by shifting parallel arrays and keysuffix.
     // Blob stays packed: tail bytes of entries after pos shift left by erased_tail.
     // Always fits (result is strictly smaller). No holes.
     // ------------------------------------------------------------------
@@ -1113,7 +1113,7 @@ struct kstrie_compact {
                             O[j] -= reclaim;
                 }
             }
-            // Case A: no blob change
+            // Case A: no keysuffix change
         }
 
         int tail = e - pos - 1;

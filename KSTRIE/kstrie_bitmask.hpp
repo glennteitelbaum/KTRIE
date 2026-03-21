@@ -16,7 +16,6 @@ struct kstrie_bitmask {
 
     static constexpr size_t BITMAP_BYTES = sizeof(bitmap_type);
     static constexpr size_t BITMAP_WORDS = CHARMAP::BITMAP_WORDS;
-    static constexpr size_t BITMAP_U64   = BITMAP_BYTES / U64_BYTES;
 
     // ------------------------------------------------------------------
     // Layout:
@@ -25,7 +24,7 @@ struct kstrie_bitmask {
     // ------------------------------------------------------------------
 
     static constexpr size_t CHILD_BITMAP_OFF = 2;                           // u64 units (after header + desc)
-    static constexpr size_t SENTINEL_OFF     = CHILD_BITMAP_OFF + BITMAP_U64; // after bitmap
+    static constexpr size_t SENTINEL_OFF     = CHILD_BITMAP_OFF + BITMAP_WORDS; // after bitmap
     static constexpr size_t CHILD_SLOTS_OFF  = SENTINEL_OFF + 1;             // after sentinel
 
     // index_size (write-path)
@@ -144,7 +143,7 @@ struct kstrie_bitmask {
     static constexpr size_t needed_u64(uint8_t skip_len,
                                         uint16_t child_count) noexcept {
         // header(1) + desc(1) + bitmap(BU) + sentinel(1) + children(Nc) + eos(1) + skip
-        size_t u64s = 2 + BITMAP_U64 + 1 + child_count + 1;
+        size_t u64s = 2 + BITMAP_WORDS + 1 + child_count + 1;
         if (skip_len > 0)
             u64s += div_ceil(align_up(static_cast<size_t>(skip_len), U64_BYTES),
                              U64_BYTES);

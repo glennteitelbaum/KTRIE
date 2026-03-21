@@ -265,8 +265,8 @@ public:
         uint8_t stack_buf[256];
         auto [mapped, heap_buf] = kstrie_detail::get_mapped<CHARMAP>(
             raw, len, stack_buf, sizeof(stack_buf));
+        std::unique_ptr<uint8_t[]> heap_guard(heap_buf);
         size_t result = impl_v.prefix_count_impl(mapped, len);
-        delete[] heap_buf;
         return result;
     }
 
@@ -277,8 +277,8 @@ public:
         uint8_t stack_buf[256];
         auto [mapped, heap_buf] = kstrie_detail::get_mapped<CHARMAP>(
             raw, len, stack_buf, sizeof(stack_buf));
+        std::unique_ptr<uint8_t[]> heap_guard(heap_buf);
         impl_v.prefix_walk_impl(mapped, len, pfx, std::forward<F>(fn));
-        delete[] heap_buf;
     }
 
     std::vector<std::pair<std::string, VALUE>>
@@ -296,6 +296,7 @@ public:
         uint8_t stack_buf[256];
         auto [mapped, heap_buf] = kstrie_detail::get_mapped<CHARMAP>(
             raw, len, stack_buf, sizeof(stack_buf));
+        std::unique_ptr<uint8_t[]> heap_guard(heap_buf);
         kstrie result;
         auto r = impl_v.prefix_clone(mapped, len, result.impl_v.get_mem());
         if (r.cloned != impl_v.get_sentinel()) {
@@ -304,7 +305,6 @@ public:
                     r.cloned, mapped, r.path_len);
             result.impl_v.set_root(r.cloned, r.count);
         }
-        delete[] heap_buf;
         return result;
     }
 
@@ -314,8 +314,8 @@ public:
         uint8_t stack_buf[256];
         auto [mapped, heap_buf] = kstrie_detail::get_mapped<CHARMAP>(
             raw, len, stack_buf, sizeof(stack_buf));
+        std::unique_ptr<uint8_t[]> heap_guard(heap_buf);
         size_t result = impl_v.prefix_erase(mapped, len);
-        delete[] heap_buf;
         return result;
     }
 
@@ -325,6 +325,7 @@ public:
         uint8_t stack_buf[256];
         auto [mapped, heap_buf] = kstrie_detail::get_mapped<CHARMAP>(
             raw, len, stack_buf, sizeof(stack_buf));
+        std::unique_ptr<uint8_t[]> heap_guard(heap_buf);
         auto r = impl_v.prefix_split_impl(mapped, len);
         kstrie result;
         if (r.stolen != impl_v.get_sentinel()) {
@@ -333,7 +334,6 @@ public:
                     r.stolen, mapped, r.path_len);
             result.impl_v.set_root(r.stolen, r.count);
         }
-        delete[] heap_buf;
         return result;
     }
 
@@ -526,11 +526,11 @@ private:
         uint8_t stack_buf[256];
         auto [mapped, heap_buf] = kstrie_detail::get_mapped<CHARMAP>(raw, len,
                                               stack_buf, sizeof(stack_buf));
+        std::unique_ptr<uint8_t[]> heap_guard(heap_buf);
 
         std::string result;
         const VALUE* val = find_next_impl(impl_v.get_root(), mapped, len,
                                           0, result);
-        delete[] heap_buf;
         return {std::move(result), val};
     }
 
@@ -611,11 +611,11 @@ private:
         uint8_t stack_buf[256];
         auto [mapped, heap_buf] = kstrie_detail::get_mapped<CHARMAP>(raw, len,
                                               stack_buf, sizeof(stack_buf));
+        std::unique_ptr<uint8_t[]> heap_guard(heap_buf);
 
         std::string result;
         const VALUE* val = find_prev_impl(impl_v.get_root(), mapped, len,
                                           0, result);
-        delete[] heap_buf;
         return {std::move(result), val};
     }
 
@@ -694,11 +694,11 @@ private:
         uint8_t stack_buf[256];
         auto [mapped, heap_buf] = kstrie_detail::get_mapped<CHARMAP>(raw, len,
                                               stack_buf, sizeof(stack_buf));
+        std::unique_ptr<uint8_t[]> heap_guard(heap_buf);
 
         std::string result;
         const VALUE* val = find_ge_impl(impl_v.get_root(), mapped, len,
                                         0, result);
-        delete[] heap_buf;
         return {std::move(result), val};
     }
 
@@ -839,6 +839,7 @@ private:
         uint8_t stack_buf[256];
         auto [mapped, heap_buf] = kstrie_detail::get_mapped<CHARMAP>(raw, len,
                                               stack_buf, sizeof(stack_buf));
+        std::unique_ptr<uint8_t[]> heap_guard(heap_buf);
 
         struct right_turn {
             const uint64_t* bm_node;
@@ -924,7 +925,6 @@ private:
             }
 
             if (!v1) {
-                delete[] heap_buf;
                 return {{}, nullptr, {}, nullptr};
             }
 
@@ -946,12 +946,10 @@ private:
                         best_rt.bm_node, best_rt.h, slot), k2);
             }
 
-            delete[] heap_buf;
             return {std::move(k1), v1, std::move(k2), v2};
         }
 
     not_found:
-        delete[] heap_buf;
         return {{}, nullptr, {}, nullptr};
     }
 
