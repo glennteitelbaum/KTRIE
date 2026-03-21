@@ -765,6 +765,291 @@ TEST(test_memory_decreases) {
 }
 
 // ============================================================================
+// 15. lower_bound / upper_bound / equal_range / count
+// ============================================================================
+
+TEST(test_lower_bound) {
+    kstrie<int> t;
+    t.insert("apple", 1); t.insert("banana", 2); t.insert("cherry", 3);
+
+    auto it = t.lower_bound("banana");
+    assert(it != t.end() && it.key() == "banana");
+
+    it = t.lower_bound("b");
+    assert(it != t.end() && it.key() == "banana");
+
+    it = t.lower_bound("d");
+    assert(it == t.end());
+
+    it = t.lower_bound("");
+    assert(it != t.end() && it.key() == "apple");
+}
+
+TEST(test_upper_bound) {
+    kstrie<int> t;
+    t.insert("apple", 1); t.insert("banana", 2); t.insert("cherry", 3);
+
+    auto it = t.upper_bound("banana");
+    assert(it != t.end() && it.key() == "cherry");
+
+    it = t.upper_bound("cherry");
+    assert(it == t.end());
+
+    it = t.upper_bound("a");
+    assert(it != t.end() && it.key() == "apple");
+}
+
+TEST(test_equal_range) {
+    kstrie<int> t;
+    t.insert("apple", 1); t.insert("banana", 2); t.insert("cherry", 3);
+
+    auto [lo, hi] = t.equal_range("banana");
+    assert(lo != t.end() && lo.key() == "banana");
+    assert(hi != t.end() && hi.key() == "cherry");
+
+    auto [lo2, hi2] = t.equal_range("blueberry");
+    assert(lo2 == hi2); // not found: both at insertion point
+}
+
+TEST(test_count) {
+    kstrie<int> t;
+    t.insert("apple", 1); t.insert("banana", 2);
+    assert(t.count("apple") == 1);
+    assert(t.count("missing") == 0);
+    assert(t.count("") == 0);
+    t.insert("", 99);
+    assert(t.count("") == 1);
+}
+
+// ============================================================================
+// 16. lower_bound/upper_bound at scale vs std::map
+// ============================================================================
+
+TEST(test_bounds_vs_map) {
+    kstrie<int> t;
+    std::map<std::string, int> ref;
+    std::mt19937 rng(42);
+    for (int i = 0; i < 5000; i++) {
+        int len = 3 + rng() % 10;
+        std::string s;
+        for (int j = 0; j < len; j++) s += ('a' + rng() % 26);
+        t.insert_or_assign(s, i);
+        ref[s] = i;
+    }
+    // Probe with 1000 random keys
+    std::mt19937 prng(123);
+    for (int i = 0; i < 1000; i++) {
+        int len = 3 + prng() % 10;
+        std::string probe;
+        for (int j = 0; j < len; j++) probe += ('a' + prng() % 26);
+
+        auto ti = t.lower_bound(probe);
+        auto ri = ref.lower_bound(probe);
+        if (ri == ref.end()) {
+            assert(ti == t.end());
+        } else {
+            assert(ti != t.end());
+            assert(ti.key() == ri->first);
+        }
+
+        auto tu = t.upper_bound(probe);
+        auto ru = ref.upper_bound(probe);
+        if (ru == ref.end()) {
+            assert(tu == t.end());
+        } else {
+            assert(tu != t.end());
+            assert(tu.key() == ru->first);
+        }
+    }
+}
+
+// ============================================================================
+// 17. Binary keys (null bytes, high bytes)
+// ============================================================================
+
+TEST(test_binary_keys) {
+    kstrie<int> t;
+    std::string k1{'\0', '\0', '\x01'};
+    std::string k2{'\0', '\x01', '\x00'};
+    std::string k3{'\xff', '\xfe', '\xfd'};
+    std::string k4{'\x80'};
+
+    t.insert(k1, 1); t.insert(k2, 2); t.insert(k3, 3); t.insert(k4, 4);
+    assert(t.size() == 4);
+    assert(t.find(k1).value() == 1);
+    assert(t.find(k2).value() == 2);
+    assert(t.find(k3).value() == 3);
+    assert(t.find(k4).value() == 4);
+
+    // Verify order: k1 < k2 < k4 < k3 (byte lexicographic)
+    auto it = t.begin();
+    assert(it.key() == k1); ++it;
+    assert(it.key() == k2); ++it;
+    assert(it.key() == k4); ++it;
+    assert(it.key() == k3); ++it;
+    assert(it == t.end());
+
+    assert(t.erase(k2) == 1);
+    assert(t.size() == 3);
+    assert(t.find(k2) == t.end());
+}
+
+// ============================================================================
+// 18. Long keys (stress keysuffix / skip handling)
+// ============================================================================
+
+TEST(test_long_keys) {
+    kstrie<int> t;
+    // Keys with 200-byte shared prefix, diverging at the end
+    std::string prefix(200, 'x');
+    for (int i = 0; i < 100; i++) {
+        std::string k = prefix + std::string(1, static_cast<char>(i));
+        t.insert(k, i);
+    }
+    assert(t.size() == 100);
+    for (int i = 0; i < 100; i++) {
+        std::string k = prefix + std::string(1, static_cast<char>(i));
+        auto it = t.find(k);
+        assert(it != t.end() && it.value() == i);
+    }
+    // Iteration order
+    auto it = t.begin();
+    for (int i = 0; i < 100; i++) {
+        assert(it != t.end());
+        assert(it.value() == i);
+        ++it;
+    }
+    assert(it == t.end());
+}
+
+TEST(test_very_long_keys) {
+    kstrie<int> t;
+    // Single key of 10000 bytes
+    std::string k(10000, 'a');
+    t.insert(k, 42);
+    assert(t.size() == 1);
+    assert(t.find(k).value() == 42);
+    // Slightly different key
+    std::string k2 = k; k2[9999] = 'b';
+    t.insert(k2, 99);
+    assert(t.size() == 2);
+    assert(t.find(k).value() == 42);
+    assert(t.find(k2).value() == 99);
+}
+
+// ============================================================================
+// 19. Interleaved insert/erase stress
+// ============================================================================
+
+TEST(test_interleaved_insert_erase) {
+    kstrie<int> t;
+    std::map<std::string, int> ref;
+    std::mt19937 rng(777);
+
+    for (int round = 0; round < 10; round++) {
+        // Insert 1000
+        for (int i = 0; i < 1000; i++) {
+            int len = 1 + rng() % 15;
+            std::string s;
+            for (int j = 0; j < len; j++) s += ('a' + rng() % 5); // small alphabet = lots of sharing
+            t.insert_or_assign(s, round * 1000 + i);
+            ref[s] = round * 1000 + i;
+        }
+        // Erase ~half
+        std::vector<std::string> keys;
+        for (auto& [k, v] : ref) keys.push_back(k);
+        for (auto& k : keys) {
+            if (rng() % 2 == 0) { t.erase(k); ref.erase(k); }
+        }
+        assert(t.size() == ref.size());
+    }
+    // Verify all remaining entries
+    auto ti = t.begin();
+    auto ri = ref.begin();
+    while (ti != t.end() && ri != ref.end()) {
+        assert(ti.key() == ri->first);
+        assert(ti.value() == ri->second);
+        ++ti; ++ri;
+    }
+    assert(ti == t.end() && ri == ref.end());
+}
+
+// ============================================================================
+// 20. Keysuffix sharing integrity after mutation
+// ============================================================================
+
+TEST(test_sharing_integrity) {
+    kstrie<int> t;
+    // Insert keys that form sharing chains
+    t.insert("abc", 1);
+    t.insert("abcd", 2);
+    t.insert("abcde", 3);
+    t.insert("abcdef", 4);
+    t.insert("abd", 5);
+    assert(t.size() == 5);
+
+    // Verify all readable
+    assert(t.find("abc").value() == 1);
+    assert(t.find("abcd").value() == 2);
+    assert(t.find("abcde").value() == 3);
+    assert(t.find("abcdef").value() == 4);
+    assert(t.find("abd").value() == 5);
+
+    // Erase middle of chain
+    t.erase("abcd");
+    assert(t.size() == 4);
+    assert(t.find("abcd") == t.end());
+    // Others still correct
+    assert(t.find("abc").value() == 1);
+    assert(t.find("abcde").value() == 3);
+    assert(t.find("abcdef").value() == 4);
+    assert(t.find("abd").value() == 5);
+
+    // Insert back
+    t.insert("abcd", 22);
+    assert(t.find("abcd").value() == 22);
+    assert(t.size() == 5);
+}
+
+// ============================================================================
+// 21. Prefix ops with empty key present
+// ============================================================================
+
+TEST(test_prefix_with_empty_key) {
+    kstrie<int> t;
+    t.insert("", 0);
+    t.insert("a", 1);
+    t.insert("ab", 2);
+    t.insert("abc", 3);
+    t.insert("b", 4);
+
+    assert(t.prefix_count("") == 5);  // everything
+    assert(t.prefix_count("a") == 3); // a, ab, abc
+    assert(t.prefix_count("ab") == 2); // ab, abc
+    assert(t.prefix_count("abc") == 1);
+    assert(t.prefix_count("b") == 1);
+
+    // Walk with empty prefix = all entries
+    std::vector<std::string> walked;
+    t.prefix_walk("", [&](std::string_view k, const int&) { walked.push_back(std::string(k)); });
+    assert(walked.size() == 5);
+    assert(walked[0] == "");
+    assert(walked[1] == "a");
+}
+
+TEST(test_prefix_erase_with_empty_key) {
+    kstrie<int> t;
+    t.insert("", 0);
+    t.insert("a", 1);
+    t.insert("ab", 2);
+
+    auto n = t.prefix_erase("a");
+    assert(n == 2); // erases "a" and "ab"
+    assert(t.size() == 1);
+    assert(t.find("").value() == 0);
+}
+
+// ============================================================================
 // main
 // ============================================================================
 
@@ -839,6 +1124,30 @@ int main() {
     RUN(test_clear);
     RUN(test_prefix_sharing_collapse);
     RUN(test_memory_decreases);
+
+    printf("\nBounds/Count:\n");
+    RUN(test_lower_bound);
+    RUN(test_upper_bound);
+    RUN(test_equal_range);
+    RUN(test_count);
+    RUN(test_bounds_vs_map);
+
+    printf("\nBinary keys:\n");
+    RUN(test_binary_keys);
+
+    printf("\nLong keys:\n");
+    RUN(test_long_keys);
+    RUN(test_very_long_keys);
+
+    printf("\nStress:\n");
+    RUN(test_interleaved_insert_erase);
+
+    printf("\nSharing integrity:\n");
+    RUN(test_sharing_integrity);
+
+    printf("\nPrefix with empty key:\n");
+    RUN(test_prefix_with_empty_key);
+    RUN(test_prefix_erase_with_empty_key);
 
     printf("\n=== ALL %d TESTS PASSED ===\n", pass_count);
 }
