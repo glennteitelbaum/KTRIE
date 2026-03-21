@@ -819,6 +819,39 @@ public:
         }
     }
 
+    // Single-walk modify-or-insert: fn(VALUE&) on hit, insert default on miss.
+    // Returns true if key existed (fn applied), false if inserted.
+    template<typename F>
+    bool modify_or_insert_dispatch(std::string_view key, F&& fn,
+                                    const VALUE& default_val) {
+        const uint8_t* raw = reinterpret_cast<const uint8_t*>(key.data());
+        uint32_t len = static_cast<uint32_t>(key.size());
+
+        uint8_t stack_buf[256];
+        auto [mapped, raw_buf] = get_mapped<CHARMAP>(raw, len,
+                                              stack_buf, sizeof(stack_buf));
+        std::unique_ptr<uint8_t[]> heap_guard(raw_buf);
+
+        if (root_v == compact_type::sentinel()) {
+            // Empty trie: insert default, don't call fn
+            insert_result r = insert_node(root_v, mapped, len, default_val,
+                                           0, insert_mode::INSERT);
+            root_v = r.node;
+            if (r.outcome == insert_outcome::INSERTED) size_v++;
+            return false;
+        }
+
+        insert_result r = modify_or_insert_node(root_v, mapped, len,
+                                                 default_val, 0,
+                                                 std::forward<F>(fn));
+        root_v = r.node;
+        if (r.outcome == insert_outcome::INSERTED) {
+            size_v++;
+            return false;
+        }
+        return true;  // UPDATED means fn was applied
+    }
+
     size_type erase(std::string_view key) {
         if (root_v == compact_type::sentinel()) return 0;
 
@@ -1976,6 +2009,142 @@ private:
             uint64_t old_ct = node_tail_total(child);
             insert_result r = insert_node(child, key_data, key_len, value,
                                            consumed, mode);
+            if (r.node != child)
+                bitmask_type::replace_child(node, h, byte, r.node);
+            node[NODE_TOTAL_TAIL] += node_tail_total(r.node) - old_ct;
+            if (r.outcome == insert_outcome::INSERTED)
+                node[NODE_TOTAL_TAIL] += h.skip_bytes();
+            return {node, r.outcome};
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // modify_or_insert_node -- single-walk: fn(VALUE&) on hit at compact
+    // leaf, insert default_val on miss at any point.
+    // Mirrors insert_node exactly; only the compact leaf call differs.
+    // ------------------------------------------------------------------
+
+    template<typename F>
+    insert_result modify_or_insert_node(uint64_t* node, const uint8_t* key_data,
+                                         uint32_t key_len, const VALUE& default_val,
+                                         uint32_t consumed, F&& fn) {
+        hdr_type h = hdr_type::from_node(node);
+
+        auto mr = skip_type::match_prefix(node, h, key_data, key_len, consumed);
+
+        if (h.is_compact())
+            return compact_type::modify_or_insert(
+                node, h, key_data, key_len, default_val, consumed, mr,
+                std::forward<F>(fn), mem_v);
+
+        // --- Bitmask cases: identical to insert_node with default_val ---
+
+        if (mr.status == skip_type::match_status::MISMATCH) {
+            const uint8_t* skip_data = hdr_type::get_skip(node, h);
+            uint32_t old_skip = h.skip_bytes();
+            uint32_t match_len = mr.match_len;
+
+            uint8_t skip_copy[256];
+            std::memcpy(skip_copy, skip_data, old_skip);
+
+            uint8_t old_byte = skip_copy[match_len];
+            uint8_t new_byte = key_data[consumed + match_len];
+
+            uint32_t new_old_skip = old_skip - match_len - 1;
+            uint64_t* old_reskipped = bitmask_type::reskip(
+                node, h, mem_v, static_cast<uint8_t>(new_old_skip),
+                skip_copy + match_len + 1);
+
+            uint32_t new_consumed = consumed + match_len + 1;
+            uint64_t* leaf = add_child(key_data + new_consumed,
+                                       key_len - new_consumed, default_val);
+
+            uint8_t bucket_idx[2];
+            uint64_t* children[2];
+            if (old_byte < new_byte) {
+                bucket_idx[0] = old_byte;  bucket_idx[1] = new_byte;
+                children[0] = old_reskipped; children[1] = leaf;
+            } else {
+                bucket_idx[0] = new_byte;  bucket_idx[1] = old_byte;
+                children[0] = leaf;        children[1] = old_reskipped;
+            }
+            uint64_t* parent = bitmask_type::create_with_children(
+                mem_v, static_cast<uint8_t>(match_len), skip_copy,
+                bucket_idx, children, 2);
+            parent[NODE_TOTAL_TAIL] = node_tail_total(old_reskipped)
+                                   + node_tail_total(leaf);
+            return {parent, insert_outcome::INSERTED};
+        }
+
+        if (mr.status == skip_type::match_status::KEY_EXHAUSTED) {
+            const uint8_t* skip_data = hdr_type::get_skip(node, h);
+            uint32_t old_skip = h.skip_bytes();
+            uint32_t match_len = mr.match_len;
+
+            uint8_t skip_copy[256];
+            std::memcpy(skip_copy, skip_data, old_skip);
+
+            uint8_t old_byte = skip_copy[match_len];
+
+            uint32_t new_old_skip = old_skip - match_len - 1;
+            uint64_t* old_reskipped = bitmask_type::reskip(
+                node, h, mem_v, static_cast<uint8_t>(new_old_skip),
+                skip_copy + match_len + 1);
+
+            uint8_t bucket_idx[1] = {old_byte};
+            uint64_t* children[1] = {old_reskipped};
+            uint64_t* parent = bitmask_type::create_with_children(
+                mem_v, static_cast<uint8_t>(match_len), skip_copy,
+                bucket_idx, children, 1);
+            parent[NODE_TOTAL_TAIL] = node_tail_total(old_reskipped);
+
+            uint64_t eos_raw = slots_type::make_raw(default_val, mem_v.alloc_v);
+            typename compact_type::build_entry eos_be{nullptr, 0, eos_raw};
+            uint64_t* eos_node = compact_type::build_compact(mem_v, 0, nullptr, &eos_be, 1);
+            bitmask_type::set_eos_child(parent, hdr_type::from_node(parent), eos_node);
+            return {parent, insert_outcome::INSERTED};
+        }
+
+        // MATCHED
+        consumed = mr.consumed;
+
+        if (consumed == key_len) {
+            uint64_t* eos = bitmask_type::eos_child(node, h);
+            if (eos != compact_type::sentinel()) {
+                uint64_t old_et = node_tail_total(eos);
+                insert_result r = modify_or_insert_node(eos, key_data, key_len,
+                                                         default_val, consumed,
+                                                         std::forward<F>(fn));
+                if (r.node != eos)
+                    bitmask_type::set_eos_child(node, h, r.node);
+                node[NODE_TOTAL_TAIL] += node_tail_total(r.node) - old_et;
+                if (r.outcome == insert_outcome::INSERTED)
+                    node[NODE_TOTAL_TAIL] += h.skip_bytes();
+                return {node, r.outcome};
+            }
+            // No EOS child — insert default
+            uint64_t raw = slots_type::make_raw(default_val, mem_v.alloc_v);
+            typename compact_type::build_entry be{nullptr, 0, raw};
+            uint64_t* eos_node = compact_type::build_compact(mem_v, 0, nullptr, &be, 1);
+            bitmask_type::set_eos_child(node, h, eos_node);
+            node[NODE_TOTAL_TAIL] += node_tail_total(eos_node) + h.skip_bytes();
+            return {node, insert_outcome::INSERTED};
+        }
+
+        {
+            uint8_t byte = key_data[consumed++];
+            uint64_t* child = bitmask_type::dispatch(node, h, byte);
+            if (child == compact_type::sentinel()) {
+                uint64_t* new_child = add_child(key_data + consumed,
+                                                 key_len - consumed, default_val);
+                node = bitmask_type::insert_child(node, h, mem_v, byte, new_child);
+                node[NODE_TOTAL_TAIL] += node_tail_total(new_child) + h.skip_bytes();
+                return {node, insert_outcome::INSERTED};
+            }
+            uint64_t old_ct = node_tail_total(child);
+            insert_result r = modify_or_insert_node(child, key_data, key_len,
+                                                     default_val, consumed,
+                                                     std::forward<F>(fn));
             if (r.node != child)
                 bitmask_type::replace_child(node, h, byte, r.node);
             node[NODE_TOTAL_TAIL] += node_tail_total(r.node) - old_ct;

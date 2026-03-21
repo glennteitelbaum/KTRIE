@@ -297,6 +297,66 @@ struct kstrie_compact {
     }
 
     // ------------------------------------------------------------------
+    // modify_or_insert -- single-walk: fn(VALUE&) on hit, insert default on miss.
+    // Returns {node, UPDATED} on hit, {node, INSERTED} on miss.
+    // Mirrors the MATCHED hot path of insert() for the miss case.
+    // ------------------------------------------------------------------
+
+    template<typename F>
+    static insert_result modify_or_insert(uint64_t* node, hdr_type& h,
+                                           const uint8_t* key_data,
+                                           uint32_t key_len,
+                                           const VALUE& default_val,
+                                           uint32_t consumed,
+                                           match_result mr,
+                                           F&& fn,
+                                           mem_type& mem) {
+        if (mr.status == match_status::MATCHED) {
+            uint32_t suffix_len = key_len - mr.consumed;
+            const uint8_t* suffix = key_data + mr.consumed;
+
+            auto [found, pos] = find_pos(node, h, suffix, suffix_len);
+
+            if (found) {
+                // Hit: apply fn in place
+                auto* sb = h.get_compact_slots(node);
+                VALUE* vp = slots::load_value(sb, pos);
+                fn(*vp);
+                return {node, insert_outcome::UPDATED};
+            }
+
+            // Miss: insert default_val (same as insert hot path)
+            if (suffix_len > COMPACT_SUFFIX_LEN_MAX) [[unlikely]]
+                return rebuild_with_new(node, h, key_data, key_len, default_val,
+                                        consumed, mr, mem);
+
+            uint8_t klen = static_cast<uint8_t>(suffix_len);
+            uint8_t fb   = klen > 0 ? suffix[0] : 0;
+            uint8_t tail = klen > 0 ? klen - 1 : 0;
+
+            if (tail > 0) [[likely]] {
+                uint16_t delta = compute_insert_delta(node, h, pos, klen, fb,
+                                                      suffix + 1, tail);
+                if (get_prefix(node, h).keysuffix_used + delta > COMPACT_KEYSUFFIX_LIMIT) [[unlikely]]
+                    return rebuild_with_new(node, h, key_data, key_len, default_val,
+                                            consumed, mr, mem);
+            }
+
+            uint64_t raw = slots::make_raw(default_val, mem.alloc_v);
+            node = insert_at(node, h, mem, pos,
+                              klen, fb,
+                              (tail > 0 ? suffix + 1 : nullptr), tail,
+                              raw);
+            h = hdr_type::from_node(node);
+            return finalize(node, h, mem);
+        }
+
+        // MISMATCH / KEY_EXHAUSTED: insert default_val
+        return rebuild_with_new(node, h, key_data, key_len, default_val,
+                                consumed, mr, mem);
+    }
+
+    // ------------------------------------------------------------------
     // erase_when_pos -- find key, test predicate, return pos if true
     // Returns {found_and_passed, pos}
     // ------------------------------------------------------------------

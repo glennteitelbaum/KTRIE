@@ -94,14 +94,11 @@ public:
     }
 
     // With default: if key exists, apply fn(value&), return true.
-    // If missing, insert default_val as-is, return false.
-    // Two walks on miss (modify miss + insert).
+    // If missing, insert default_val as-is (fn not called), return false.
+    // Single walk — no redundant traversal.
     template<typename F>
     bool modify(std::string_view key, F&& fn, const VALUE& default_val) {
-        if (impl_v.modify_dispatch(key, std::forward<F>(fn)))
-            return true;
-        impl_v.insert(key, default_val);
-        return false;
+        return impl_v.modify_or_insert_dispatch(key, std::forward<F>(fn), default_val);
     }
 
     // Single-walk conditional erase: find key, test fn(const VALUE&),
