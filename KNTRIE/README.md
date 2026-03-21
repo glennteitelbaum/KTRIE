@@ -37,5 +37,5 @@ Performance charts:
 
 
 
-*Note: This was done vibe coding with Claude Opus 4.6*
+*Note: This was done using AI-assisted development with Claude Opus 4.6*
 
