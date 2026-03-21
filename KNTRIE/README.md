@@ -1,8 +1,8 @@
-### KNTRIE
+# KNTRIE
 
 
 
-A KTRIE for Integral keys
+## A KTRIE for Integral keys
 
 
 
@@ -10,7 +10,7 @@ A KTRIE for Integral keys
 
 
 
-A **sorted**, **compressed** associative container for integer keys (`uint8\_t` through `uint64\_t`, signed and unsigned). Follows the `std::map` interface. **Header-only**
+A **sorted**, **compressed** associative container for integer keys (`uint16\_t` through `uint64\_t`, signed and unsigned). Follows the `std::map` interface. **Header-only**
 
 
 * [KTRIE Concepts](../ktrie_concepts.md)
@@ -19,7 +19,7 @@ A **sorted**, **compressed** associative container for integer keys (`uint8\_t` 
 
 
 
-Performance charts:
+## Performance charts:
 
 
 
