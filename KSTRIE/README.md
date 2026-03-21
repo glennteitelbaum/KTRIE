@@ -26,4 +26,4 @@ Performance charts:
 
 * [100K elements vs std::map and std::unordered_map](https://glennteitelbaum.github.io/KTRIE/KSTRIE/bench_kstrie.html)
 
-*Note: This was done vibe coding with Claude Opus 4.6*
+*Note: This was done using AI-assisted development with Claude Opus 4.6*
