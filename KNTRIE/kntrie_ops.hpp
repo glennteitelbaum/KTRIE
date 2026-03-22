@@ -127,7 +127,7 @@ struct kntrie_ops {
     }
 
     // ==================================================================
-    // set_leaf_fns_for: set all 5 fn pointers from node's actual data NK
+    // set_leaf_fns_for: set all 3 fn pointers from node's actual data NK
     // Reads NK from depth_t.shift (data layout), NOT from template BITS.
     // ==================================================================
 
@@ -141,15 +141,12 @@ struct kntrie_ops {
             // bitmap
             if (has_skip) {
                 set_find_fn(node, &BO::template find_fn_bitmap<true>);
-                set_find_next(node, &BO::template find_next_fn_bitmap<true>);
-                set_find_prev(node, &BO::template find_prev_fn_bitmap<true>);
+                set_find_adv(node, &BO::template find_adv_fn_bitmap<true>);
             } else {
                 set_find_fn(node, &BO::template find_fn_bitmap<false>);
-                set_find_next(node, &BO::template find_next_fn_bitmap<false>);
-                set_find_prev(node, &BO::template find_prev_fn_bitmap<false>);
+                set_find_adv(node, &BO::template find_adv_fn_bitmap<false>);
             }
-            set_find_first(node, &BO::find_first_fn_bitmap);
-            set_find_last(node, &BO::find_last_fn_bitmap);
+            set_find_edge(node, &BO::find_edge_fn_bitmap);
         } else if (nk_bits <= U16_BITS) {
             using CO = compact_ops<uint16_t, VALUE, ALLOC>;
             CO::set_leaf_fns(node, has_skip);

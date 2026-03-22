@@ -80,7 +80,7 @@ public:
         }
 
         iterator& operator++() {
-            auto r = impl_v->next_pos(leaf_v, pos_v);
+            auto r = impl_v->advance_pos(leaf_v, pos_v, kntrie_detail::dir_t::FWD);
             leaf_v = r.node;
             pos_v  = r.pos;
             return *this;
@@ -89,10 +89,10 @@ public:
 
         iterator& operator--() {
             if (!leaf_v) {
-                auto r = impl_v->last_pos();
+                auto r = impl_v->edge_pos(kntrie_detail::dir_t::BWD);
                 leaf_v = r.node; pos_v = r.pos;
             } else {
-                auto r = impl_v->prev_pos(leaf_v, pos_v);
+                auto r = impl_v->advance_pos(leaf_v, pos_v, kntrie_detail::dir_t::BWD);
                 leaf_v = r.node; pos_v = r.pos;
             }
             return *this;
@@ -270,22 +270,15 @@ public:
     }
 
     iterator lower_bound(const KEY& key) {
-        auto r = impl_.find_with_pos(to_unsigned(key));
-        if (r.found) return iterator(&impl_, r.node, r.pos);
-        // Key not found — next entry is lower_bound
-        // Need to find next. Use find_with_pos miss then advance.
-        // For now: linear scan from begin (correct but slow for miss).
-        // TODO: add find_next_pos to impl for single-walk lower_bound on miss.
-        auto it = begin();
-        UK uk = to_unsigned(key);
-        while (it != end() && to_unsigned((*it).first) < uk) ++it;
-        return it;
+        auto r = impl_.lower_bound_pos(to_unsigned(key));
+        if (!r.found) return end();
+        return iterator(&impl_, r.node, r.pos);
     }
 
     iterator upper_bound(const KEY& key) {
-        auto it = lower_bound(key);
-        if (it != end() && (*it).first == key) ++it;
-        return it;
+        auto r = impl_.upper_bound_pos(to_unsigned(key));
+        if (!r.found) return end();
+        return iterator(&impl_, r.node, r.pos);
     }
 
     std::pair<iterator, iterator> equal_range(const KEY& key) {
@@ -315,14 +308,14 @@ public:
     // ==================================================================
 
     iterator begin() noexcept {
-        return iterator(&impl_, impl_.first_pos());
+        return iterator(&impl_, impl_.edge_pos(kntrie_detail::dir_t::FWD));
     }
     iterator end() noexcept {
         return iterator(&impl_, nullptr, 0);
     }
     const_iterator begin() const noexcept {
         return const_iterator(const_cast<impl_t*>(&impl_),
-                              const_cast<impl_t&>(impl_).first_pos());
+                              const_cast<impl_t&>(impl_).edge_pos(kntrie_detail::dir_t::FWD));
     }
     const_iterator end() const noexcept {
         return const_iterator(const_cast<impl_t*>(&impl_), nullptr, 0);

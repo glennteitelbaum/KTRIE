@@ -427,7 +427,7 @@ iter_prev_loop()         (lines 1229-1261)
 These built a stack-local `path[]` during descent then walked back.
 Parent pointers replace this.
 
-### 3.3 Keep (used by live iterator)
+### 3.3 Keep (used by live iterator) — N/A (reference list, no code changes)
 
 ```
 find_loop()              -- branchless descent for point lookup
@@ -583,7 +583,7 @@ Bool specialization: `operator*` returns `pair<const KEY, bool_ref>`
 instead of `pair<const KEY, VALUE&>`. The arrow proxy works the same
 way — `bool_ref::operator=` writes through to the packed u64.
 
-### 6.3 Full std::map interface — PARTIAL (all methods written; lower_bound/upper_bound use duplicate pos functions that need replacing — §7.2 fn-ptr signature change to leaf_pos_t is the blocker)
+### 6.3 Full std::map interface — DONE (lower_bound/upper_bound use lower_bound_pos/upper_bound_pos, linear scan removed)
 
 Below is the complete public API. Items marked **new** don't exist
 today. Items marked **rework** exist but change signature or
@@ -842,7 +842,7 @@ This eliminates:
 `lower_bound_pos`/`upper_bound_pos` call the fn-ptr `find_next`/
 `find_ge` at the leaf — no separate dispatch layer.
 
-### 7.3 `bm_ptr` convention
+### 7.3 bm_ptr convention — DONE (HEADER_U64=2, bm_to_node uses it)
 
 Adding `parent_ptr` at `node[1]` pushes bitmap to `node[2]`.
 
@@ -877,7 +877,7 @@ inline void set_bm_parent(uint64_t* node, uint64_t* parent) {
 }
 ```
 
-### 7.4 `erase_at` upward walk
+### 7.4 erase_at — DONE (reconstruct_ik + erase_ik two-walk)
 
 Current erase descends by key recursively and propagates size/coalesce
 on the unwind. `erase_at(leaf, pos)` starts at the bottom and walks
@@ -901,7 +901,7 @@ The parent pointer chain provides the walk path. At each bitmask,
 the `parent_byte` in the child's header tells which slot the child
 occupies — no bitmap search needed to find the child's position.
 
-### 7.5 Capacity and allocation
+### 7.5 Capacity and allocation — DONE (has_room, size_u64, entries==count)
 
 Compact leaves are no longer power-of-2 sized. They use the same
 size-class allocator (`round_up_u64` / `BIN_SIZES`) that bitmask
@@ -917,7 +917,7 @@ One comparison. No stored capacity field. No inversion. The grow
 target uses the same `GROW_NUMER / GROW_DENOM` headroom as today,
 and `round_up_u64` snaps it to the next size class.
 
-### 7.6 Iterator invalidation
+### 7.6 Iterator invalidation — DONE (documented in kntrie.hpp iterator comment)
 
 Same contract as `std::unordered_map`: any modification to the
 container may invalidate iterators. Insert may realloc a leaf
@@ -933,7 +933,7 @@ invalidate) but matches the flat-storage reality. Users who need
 stable iterators across mutations should use `find()` after each
 mutation.
 
-### 7.7 Direction collapse — 5 fn ptrs → 3
+### 7.7 Direction collapse — DONE (5 fn ptrs → 3, dir_t FWD/BWD, bitmap+compact+bitmask+impl+kntrie.hpp all collapsed, leaf header 8→6 u64)
 
 Collapse `find_next`/`find_prev` into `find_adv(node, ik, dir)` and
 `find_first`/`find_last` into `find_edge(node, dir)`. Saves 2 fn ptrs
@@ -1034,6 +1034,13 @@ static inline const adv_fn_t ADV_TABLE[2] = {
   only at leaf: `lower` calls `find_fn` then `find_adv(FWD)`;
   `upper` calls `find_adv(FWD)` directly
 - `operator++` / `operator--` → `advance_pos(FWD)` / `advance_pos(BWD)`
+
+#### No entries==0 guards in edge/adv functions
+
+A leaf in the trie always has at least one entry — erase deallocates
+the leaf when the last entry is removed. An empty leaf cannot exist.
+`find_edge_fn`, `find_adv_fn`, `descend_edge_loop` all omit the
+`entries == 0` check — it is dead code.
 
 #### What stays separate
 

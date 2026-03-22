@@ -511,75 +511,60 @@ struct bitmask_ops {
     }
 
     // ==================================================================
-    // find_next_fn_bitmap — first entry with byte > suffix → leaf_pos_t
+    // find_adv_fn_bitmap — directional advance → leaf_pos_t
+    // FWD: first entry with byte > suffix. BWD: last with byte < suffix.
     // ==================================================================
 
     template<bool DO_SKIP>
-    static leaf_pos_t find_next_fn_bitmap(uint64_t* node, uint64_t ik) noexcept {
+    static leaf_pos_t find_adv_fn_bitmap(uint64_t* node, uint64_t ik, dir_t dir) noexcept {
         constexpr size_t hs = LEAF_HEADER_U64;
         depth_t d = get_depth(node);
 
         if constexpr (DO_SKIP) {
             int cmp = skip_cmp(leaf_prefix(node), d, ik);
-            if (cmp > 0) return {};
-            if (cmp < 0) {
-                uint8_t byte = bm(node, hs).first_set_bit();
-                return {node, static_cast<uint16_t>(byte), true};
+            // FWD: cmp>0 means all entries > ik → miss at this leaf
+            //      cmp<0 means all entries < ik → return edge
+            // BWD: reversed
+            if (dir == dir_t::FWD) {
+                if (cmp > 0) return {};
+                if (cmp < 0) {
+                    uint8_t byte = bm(node, hs).first_set_bit();
+                    return {node, static_cast<uint16_t>(byte), true};
+                }
+            } else {
+                if (cmp < 0) return {};
+                if (cmp > 0) {
+                    uint8_t byte = bm(node, hs).last_set_bit();
+                    return {node, static_cast<uint16_t>(byte), true};
+                }
             }
         }
 
         uint8_t suffix = static_cast<uint8_t>(d.suffix(ik));
-        if (suffix >= static_cast<uint8_t>(d.nk_max())) [[unlikely]]
-            return {};
 
-        auto r = bm(node, hs).next_set_after(suffix);
-        if (!r.found) [[unlikely]] return {};
-        return {node, static_cast<uint16_t>(r.idx), true};
-    }
-
-    // ==================================================================
-    // find_prev_fn_bitmap — last entry with byte < suffix → leaf_pos_t
-    // ==================================================================
-
-    template<bool DO_SKIP>
-    static leaf_pos_t find_prev_fn_bitmap(uint64_t* node, uint64_t ik) noexcept {
-        constexpr size_t hs = LEAF_HEADER_U64;
-        depth_t d = get_depth(node);
-
-        if constexpr (DO_SKIP) {
-            int cmp = skip_cmp(leaf_prefix(node), d, ik);
-            if (cmp < 0) return {};
-            if (cmp > 0) {
-                uint8_t byte = bm(node, hs).last_set_bit();
-                return {node, static_cast<uint16_t>(byte), true};
-            }
+        if (dir == dir_t::FWD) {
+            if (suffix >= static_cast<uint8_t>(d.nk_max())) [[unlikely]] return {};
+            auto r = bm(node, hs).next_set_after(suffix);
+            if (!r.found) [[unlikely]] return {};
+            return {node, static_cast<uint16_t>(r.idx), true};
+        } else {
+            if (suffix == 0) [[unlikely]] return {};
+            auto r = bm(node, hs).prev_set_before(suffix);
+            if (!r.found) [[unlikely]] return {};
+            return {node, static_cast<uint16_t>(r.idx), true};
         }
-
-        uint8_t suffix = static_cast<uint8_t>(d.suffix(ik));
-        if (suffix == 0) [[unlikely]] return {};
-
-        auto r = bm(node, hs).prev_set_before(suffix);
-        if (!r.found) [[unlikely]] return {};
-        return {node, static_cast<uint16_t>(r.idx), true};
     }
 
     // ==================================================================
-    // find_first_fn_bitmap — minimum entry → leaf_pos_t
+    // find_edge_fn_bitmap — edge entry → leaf_pos_t
+    // FWD: first set bit. BWD: last set bit.
     // ==================================================================
 
-    static leaf_pos_t find_first_fn_bitmap(uint64_t* node) noexcept {
+    static leaf_pos_t find_edge_fn_bitmap(uint64_t* node, dir_t dir) noexcept {
         constexpr size_t hs = LEAF_HEADER_U64;
-        uint8_t idx = bm(node, hs).first_set_bit();
-        return {node, static_cast<uint16_t>(idx), true};
-    }
-
-    // ==================================================================
-    // find_last_fn_bitmap — maximum entry → leaf_pos_t
-    // ==================================================================
-
-    static leaf_pos_t find_last_fn_bitmap(uint64_t* node) noexcept {
-        constexpr size_t hs = LEAF_HEADER_U64;
-        uint8_t idx = bm(node, hs).last_set_bit();
+        uint8_t idx = (dir == dir_t::FWD)
+            ? bm(node, hs).first_set_bit()
+            : bm(node, hs).last_set_bit();
         return {node, static_cast<uint16_t>(idx), true};
     }
 
@@ -1122,26 +1107,17 @@ public:
         return fn(node, ik);
     }
 
-    // descend_first_loop: walk to minimum leaf → leaf_pos_t via fn-ptr
-    static leaf_pos_t descend_first_loop(uint64_t ptr) noexcept {
+    // descend_edge_loop: walk to min (FWD) or max (BWD) leaf → leaf_pos_t
+    static leaf_pos_t descend_edge_loop(uint64_t ptr, dir_t dir) noexcept {
         while (!(ptr & LEAF_BIT))
-            ptr = bm_first_child(ptr);
+            ptr = (dir == dir_t::FWD) ? bm_first_child(ptr) : bm_last_child(ptr);
         uint64_t* node = untag_leaf_mut(ptr);
-        auto fn = get_find_first(node);
-        return fn(node);
-    }
-
-    // descend_last_loop: walk to maximum leaf → leaf_pos_t via fn-ptr
-    static leaf_pos_t descend_last_loop(uint64_t ptr) noexcept {
-        while (!(ptr & LEAF_BIT))
-            ptr = bm_last_child(ptr);
-        uint64_t* node = untag_leaf_mut(ptr);
-        auto fn = get_find_last(node);
-        return fn(node);
+        auto fn = get_find_edge(node);
+        return fn(node, dir);
     }
 
     // ==================================================================
-    // Bitmap leaf type check — for next_pos/prev_pos dispatch
+    // Bitmap leaf type check — for advance_pos dispatch
     // ==================================================================
 
     static constexpr uint8_t BITMAP_SHIFT_THRESHOLD = U64_BITS - U8_BITS;  // 56
