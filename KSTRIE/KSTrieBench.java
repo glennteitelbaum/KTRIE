@@ -3,6 +3,7 @@
 // javac KSTrie.java KSTrieBench.java && java -ea -Xmx2g KSTrieBench
 
 import java.util.*;
+import java.util.stream.*;
 
 public class KSTrieBench {
 
@@ -200,14 +201,18 @@ public class KSTrieBench {
         System.out.println("--- Random alpha keys (len 5-20) ---");
         for (int n : SIZES) {
             String[] keys = randomKeys(n, 42, 5, 20);
-            String[] miss = randomKeys(n, 999, 5, 20);
+            var hitSet = new HashSet<>(Arrays.asList(keys));
+            String[] miss = Arrays.stream(randomKeys(n * 2, 999, 5, 20))
+                .filter(k -> !hitSet.contains(k)).limit(n).toArray(String[]::new);
             runConfig("random alpha", n, keys, miss);
         }
 
         System.out.println("\n--- URL-like keys (shared prefixes) ---");
         for (int n : SIZES) {
             String[] keys = urlKeys(n, 42);
-            String[] miss = urlKeys(n, 999);
+            var hitSet = new HashSet<>(Arrays.asList(keys));
+            String[] miss = Arrays.stream(urlKeys(n * 2, 999))
+                .filter(k -> !hitSet.contains(k)).limit(n).toArray(String[]::new);
             runConfig("URL-like", n, keys, miss);
         }
 
