@@ -1001,8 +1001,7 @@ Replaces both `find_first_fn` and `find_last_fn`:
 ```cpp
 static leaf_pos_t find_edge_fn(uint64_t* node, dir_t dir) {
     unsigned entries = get_header(node)->entries();
-    if (entries == 0) return {};
-    uint16_t pos = (dir == dir_t::FWD) ? 0 : entries - 1;
+    uint16_t pos = (dir == dir_t::FWD) ? 0 : static_cast<uint16_t>(entries - 1);
     return {node, pos, true};
 }
 ```

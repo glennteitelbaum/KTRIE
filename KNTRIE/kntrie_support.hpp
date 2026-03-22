@@ -50,13 +50,11 @@ inline constexpr size_t DESC_U64       = 1;            // descendants count at e
 // --- Leaf node layout indices ---
 inline constexpr size_t LEAF_HDR_IDX    = 0;           // node_header_t
 inline constexpr size_t LEAF_FIND_FN    = 1;           // find exact match fn
-inline constexpr size_t LEAF_NEXT_FN    = 2;           // iter next fn
-inline constexpr size_t LEAF_PREV_FN    = 3;           // iter prev fn
-inline constexpr size_t LEAF_FIRST_FN   = 4;           // descend first (min entry) fn
-inline constexpr size_t LEAF_LAST_FN    = 5;           // descend last (max entry) fn
-inline constexpr size_t LEAF_PREFIX     = 6;           // left-aligned key prefix
-inline constexpr size_t LEAF_PARENT_PTR = 7;           // parent bitmask node pointer
-inline constexpr size_t LEAF_HEADER_U64 = 8;           // total header u64s
+inline constexpr size_t LEAF_ADV_FN     = 2;           // directional advance fn (next/prev)
+inline constexpr size_t LEAF_EDGE_FN    = 3;           // edge fn (first/last)
+inline constexpr size_t LEAF_PREFIX     = 4;           // left-aligned key prefix
+inline constexpr size_t LEAF_PARENT_PTR = 5;           // parent bitmask node pointer
+inline constexpr size_t LEAF_HEADER_U64 = 6;           // total header u64s
 
 // --- Bitmask node child layout ---
 inline constexpr size_t BM_SENTINEL_U64   = 1;         // sentinel child at children[0]
@@ -310,6 +308,10 @@ inline void set_bm_parent(uint64_t* node, uint64_t* parent) noexcept {
 // Leaf result types
 // ==========================================================================
 
+// Direction type: +1 for forward, -1 for backward.
+// Enables arithmetic: pos + static_cast<int>(dir), suffix + dir, etc.
+enum class dir_t : int8_t { FWD = +1, BWD = -1 };
+
 // Live iterator position: pointer into a leaf + slot index.
 // For compact leaves: pos = array index (0..entries-1).
 // For bitmap leaves: pos = byte value (0-255).
@@ -326,15 +328,15 @@ struct insert_pos_result_t {
     bool      inserted = false;
 };
 
-// All 5 leaf function pointers return leaf_pos_t.
-// find_fn: exact match. Returns {leaf, pos, true} or {nullptr, 0, false}.
-using find_fn_t  = leaf_pos_t (*)(uint64_t*, uint64_t) noexcept;
+// 3 leaf function pointers, all return leaf_pos_t.
+// find_fn: exact match.
+using find_fn_t = leaf_pos_t (*)(uint64_t*, uint64_t) noexcept;
 
-// iter fn: directional search (next/prev). Returns {leaf, pos, found}.
-using iter_fn_t  = leaf_pos_t (*)(uint64_t*, uint64_t) noexcept;
+// adv_fn: directional search (next if FWD, prev if BWD).
+using adv_fn_t  = leaf_pos_t (*)(uint64_t*, uint64_t, dir_t) noexcept;
 
-// edge fn: min/max entry. No search key needed.
-using edge_fn_t  = leaf_pos_t (*)(uint64_t*) noexcept;
+// edge_fn: edge entry (first if FWD, last if BWD).
+using edge_fn_t = leaf_pos_t (*)(uint64_t*, dir_t) noexcept;
 
 // ==========================================================================
 // Leaf node accessors
@@ -353,7 +355,7 @@ inline void set_leaf_parent(uint64_t* node, uint64_t* parent) noexcept {
     node[LEAF_PARENT_PTR] = static_cast<uint64_t>(reinterpret_cast<std::uintptr_t>(parent));
 }
 
-// Fn pointer accessors — no longer templated (leaf_pos_t is type-erased)
+// Fn pointer accessors
 inline find_fn_t get_find_fn(const uint64_t* node) noexcept {
     return reinterpret_cast<find_fn_t>(node[LEAF_FIND_FN]);
 }
@@ -361,32 +363,18 @@ inline void set_find_fn(uint64_t* node, find_fn_t fn) noexcept {
     node[LEAF_FIND_FN] = reinterpret_cast<uint64_t>(fn);
 }
 
-inline iter_fn_t get_find_next(const uint64_t* node) noexcept {
-    return reinterpret_cast<iter_fn_t>(node[LEAF_NEXT_FN]);
+inline adv_fn_t get_find_adv(const uint64_t* node) noexcept {
+    return reinterpret_cast<adv_fn_t>(node[LEAF_ADV_FN]);
 }
-inline void set_find_next(uint64_t* node, iter_fn_t fn) noexcept {
-    node[LEAF_NEXT_FN] = reinterpret_cast<uint64_t>(fn);
-}
-
-inline iter_fn_t get_find_prev(const uint64_t* node) noexcept {
-    return reinterpret_cast<iter_fn_t>(node[LEAF_PREV_FN]);
-}
-inline void set_find_prev(uint64_t* node, iter_fn_t fn) noexcept {
-    node[LEAF_PREV_FN] = reinterpret_cast<uint64_t>(fn);
+inline void set_find_adv(uint64_t* node, adv_fn_t fn) noexcept {
+    node[LEAF_ADV_FN] = reinterpret_cast<uint64_t>(fn);
 }
 
-inline edge_fn_t get_find_first(const uint64_t* node) noexcept {
-    return reinterpret_cast<edge_fn_t>(node[LEAF_FIRST_FN]);
+inline edge_fn_t get_find_edge(const uint64_t* node) noexcept {
+    return reinterpret_cast<edge_fn_t>(node[LEAF_EDGE_FN]);
 }
-inline void set_find_first(uint64_t* node, edge_fn_t fn) noexcept {
-    node[LEAF_FIRST_FN] = reinterpret_cast<uint64_t>(fn);
-}
-
-inline edge_fn_t get_find_last(const uint64_t* node) noexcept {
-    return reinterpret_cast<edge_fn_t>(node[LEAF_LAST_FN]);
-}
-inline void set_find_last(uint64_t* node, edge_fn_t fn) noexcept {
-    node[LEAF_LAST_FN] = reinterpret_cast<uint64_t>(fn);
+inline void set_find_edge(uint64_t* node, edge_fn_t fn) noexcept {
+    node[LEAF_EDGE_FN] = reinterpret_cast<uint64_t>(fn);
 }
 
 // --- depth_t node accessors ---
@@ -654,24 +642,11 @@ struct bitmap_256_t {
 // Bool slots — packed bit storage for VALUE=bool specialization
 //
 // Wraps a uint64_t* pointing into a node's packed bit region.
-// Sentinels are private — all const bool* returns go through ptr/ptr_at.
 // ==========================================================================
 
 struct bool_slots {
-private:
-    static inline constexpr bool TRUE_VAL  = true;
-    static inline constexpr bool FALSE_VAL = false;
-
 public:
     uint64_t* data;
-
-    static const bool* ptr(bool v) noexcept {
-        return v ? &TRUE_VAL : &FALSE_VAL;
-    }
-
-    const bool* ptr_at(unsigned i) const noexcept {
-        return ptr((data[i / U64_BITS] >> (i % U64_BITS)) & 1);
-    }
 
     bool get(unsigned i) const noexcept {
         return (data[i / U64_BITS] >> (i % U64_BITS)) & 1;
@@ -846,14 +821,6 @@ struct value_traits {
             std::allocator_traits<VA>::construct(va, p, val);
             return p;
         }
-    }
-
-    // --- as_ptr: slot_type → const VALUE* ---
-
-    static const VALUE* as_ptr(const slot_type& s) noexcept {
-        if constexpr (IS_BOOL)        return bool_slots::ptr(s);
-        else if constexpr (IS_TRIVIAL) return reinterpret_cast<const VALUE*>(&s);
-        else                           return s;
     }
 
     // --- destroy: release resources held by slot ---
