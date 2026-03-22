@@ -10,7 +10,6 @@
 #include <type_traits>
 #include <utility>
 #include <algorithm>
-#include <cassert>
 
 namespace gteitelbaum::kntrie_detail {
 

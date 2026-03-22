@@ -3,7 +3,6 @@
 
 #include <array>
 #include <bit>
-#include <cassert>
 #include <climits>
 #include <cstddef>
 #include <cstdint>

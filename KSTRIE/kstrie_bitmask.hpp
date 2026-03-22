@@ -131,7 +131,6 @@ struct kstrie_bitmask {
     static void replace_child(uint64_t* node, const hdr_type& h,
                               uint8_t idx, uint64_t* new_child) noexcept {
         const bitmap_type* bm = get_bitmap(node, h);
-        assert(bm->has_bit(idx));
         int slot = bm->count_below(idx);
         slots::store_child(child_slots(node), slot, new_child);
     }
@@ -264,7 +263,6 @@ struct kstrie_bitmask {
     static uint64_t* remove_child(uint64_t* node, hdr_type& h,
                                     uint8_t idx) noexcept {
         bitmap_type* bm = get_bitmap(node, h);
-        assert(bm->has_bit(idx));
         int pos = bm->count_below(idx);
         // Save eos + skip
         uint64_t* old_eos = eos_child(node, h);
