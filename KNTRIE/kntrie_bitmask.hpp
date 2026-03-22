@@ -8,8 +8,8 @@ namespace gteitelbaum::kntrie_detail {
 // ==========================================================================
 // bitmask_ops  -- unified bitmask node + bitmap_256_t leaf operations
 //
-// Bitmask node (internal): [header(1)][bitmap(4)][sentinel(1)][children(n)][desc(1 u64)]
-//   - Parent pointer targets &node[1] (bitmap), no LEAF_BIT
+// Bitmask node (internal): [header(1)][parent_ptr(1)][bitmap(4)][sentinel(1)][children(n)][desc(1 u64)]
+//   - Parent pointer at node[1], bitmap starts at node[2] (= node + HEADER_U64)
 //   - sentinel at offset 5 from bitmap = SENTINEL_TAGGED for branchless miss
 //   - real children at offset 5 from bitmap (after sentinel)
 //   - All children are tagged uint64_t values
@@ -486,127 +486,101 @@ struct bitmask_ops {
     // Non-bool uses slot (ordinal position) to index bl_vals.
     // ==================================================================
 
-    static const VALUE* bm_val_ptr_at(const uint64_t* node, size_t hs,
-                                        uint8_t idx, int slot) noexcept {
-        if constexpr (VT::IS_BOOL)
-            return bool_slots::ptr(val_bm(node, hs).has_bit(idx));
-        else
-            return VT::as_ptr(bl_vals(node, hs)[slot]);
+    // Mutable value reference at slot for live iterators (non-bool only).
+    static VALUE& bl_val_ref_at(uint64_t* node, size_t hs, int slot) noexcept {
+        return *reinterpret_cast<VALUE*>(&bl_vals_mut(node, hs)[slot]);
     }
 
     // ==================================================================
-    // find_fn_bitmap — exact match, returns VALUE* or null
+    // find_fn_bitmap — exact match → leaf_pos_t (pos = byte value)
     // ==================================================================
 
     template<bool DO_SKIP>
-    static const VALUE* find_fn_bitmap(const uint64_t* node,
-                                         uint64_t ik) noexcept {
+    static leaf_pos_t find_fn_bitmap(uint64_t* node, uint64_t ik) noexcept {
         constexpr size_t hs = LEAF_HEADER_U64;
         depth_t d = get_depth(node);
 
         if constexpr (DO_SKIP) {
             if (!skip_eq(leaf_prefix(node), d, ik)) [[unlikely]]
-                return nullptr;
+                return {};
         }
 
         uint8_t suffix = static_cast<uint8_t>(d.suffix(ik));
-        const bitmap_256_t& bmp = bm(node, hs);
-
-        if (!bmp.has_bit(suffix)) [[unlikely]] return nullptr;
-        int slot = bmp.find_slot<slot_mode::FAST_EXIT>(suffix);
-        return bm_val_ptr_at(node, hs, suffix, slot);
+        if (!bm(node, hs).has_bit(suffix)) [[unlikely]] return {};
+        return {node, static_cast<uint16_t>(suffix), true};
     }
 
     // ==================================================================
-    // find_next_fn_bitmap — first entry with key > ik
+    // find_next_fn_bitmap — first entry with byte > suffix → leaf_pos_t
     // ==================================================================
 
     template<bool DO_SKIP>
-    static leaf_result_t<VALUE> find_next_fn_bitmap(const uint64_t* node,
-                                                      uint64_t ik) noexcept {
+    static leaf_pos_t find_next_fn_bitmap(uint64_t* node, uint64_t ik) noexcept {
         constexpr size_t hs = LEAF_HEADER_U64;
         depth_t d = get_depth(node);
-        uint64_t pfx = leaf_prefix(node);
 
         if constexpr (DO_SKIP) {
-            int cmp = skip_cmp(pfx, d, ik);
-            if (cmp > 0) return {0, nullptr, false};
+            int cmp = skip_cmp(leaf_prefix(node), d, ik);
+            if (cmp > 0) return {};
             if (cmp < 0) {
-                const bitmap_256_t& bmp = bm(node, hs);
-                uint8_t idx = bmp.first_set_bit();
-                return {d.to_ik(pfx, idx), bm_val_ptr_at(node, hs, idx, 0), true};
+                uint8_t byte = bm(node, hs).first_set_bit();
+                return {node, static_cast<uint16_t>(byte), true};
             }
         }
 
         uint8_t suffix = static_cast<uint8_t>(d.suffix(ik));
-        const bitmap_256_t& bmp = bm(node, hs);
-
         if (suffix >= static_cast<uint8_t>(d.nk_max())) [[unlikely]]
-            return {0, nullptr, false};
+            return {};
 
-        auto r = bmp.next_set_after(suffix);
-        if (!r.found) [[unlikely]] return {0, nullptr, false};
-        return {d.to_ik(pfx, r.idx), bm_val_ptr_at(node, hs, r.idx, r.slot), true};
+        auto r = bm(node, hs).next_set_after(suffix);
+        if (!r.found) [[unlikely]] return {};
+        return {node, static_cast<uint16_t>(r.idx), true};
     }
 
     // ==================================================================
-    // find_prev_fn_bitmap — last entry with key < ik
+    // find_prev_fn_bitmap — last entry with byte < suffix → leaf_pos_t
     // ==================================================================
 
     template<bool DO_SKIP>
-    static leaf_result_t<VALUE> find_prev_fn_bitmap(const uint64_t* node,
-                                                      uint64_t ik) noexcept {
+    static leaf_pos_t find_prev_fn_bitmap(uint64_t* node, uint64_t ik) noexcept {
         constexpr size_t hs = LEAF_HEADER_U64;
         depth_t d = get_depth(node);
-        uint64_t pfx = leaf_prefix(node);
 
         if constexpr (DO_SKIP) {
-            int cmp = skip_cmp(pfx, d, ik);
-            if (cmp < 0) return {0, nullptr, false};
+            int cmp = skip_cmp(leaf_prefix(node), d, ik);
+            if (cmp < 0) return {};
             if (cmp > 0) {
-                const bitmap_256_t& bmp = bm(node, hs);
-                uint8_t idx = bmp.last_set_bit();
-                int slot = bmp.find_slot<slot_mode::FAST_EXIT>(idx);
-                return {d.to_ik(pfx, idx), bm_val_ptr_at(node, hs, idx, slot), true};
+                uint8_t byte = bm(node, hs).last_set_bit();
+                return {node, static_cast<uint16_t>(byte), true};
             }
         }
 
         uint8_t suffix = static_cast<uint8_t>(d.suffix(ik));
-        const bitmap_256_t& bmp = bm(node, hs);
+        if (suffix == 0) [[unlikely]] return {};
 
-        if (suffix == 0) [[unlikely]]
-            return {0, nullptr, false};
-
-        auto r = bmp.prev_set_before(suffix);
-        if (!r.found) [[unlikely]] return {0, nullptr, false};
-        return {d.to_ik(pfx, r.idx), bm_val_ptr_at(node, hs, r.idx, r.slot), true};
+        auto r = bm(node, hs).prev_set_before(suffix);
+        if (!r.found) [[unlikely]] return {};
+        return {node, static_cast<uint16_t>(r.idx), true};
     }
 
     // ==================================================================
-    // find_first_fn_bitmap — minimum entry (no template)
+    // find_first_fn_bitmap — minimum entry → leaf_pos_t
     // ==================================================================
 
-    static leaf_result_t<VALUE> find_first_fn_bitmap(const uint64_t* node) noexcept {
+    static leaf_pos_t find_first_fn_bitmap(uint64_t* node) noexcept {
         constexpr size_t hs = LEAF_HEADER_U64;
-        depth_t d = get_depth(node);
-        uint64_t pfx = leaf_prefix(node);
-        const bitmap_256_t& bmp = bm(node, hs);
-        uint8_t idx = bmp.first_set_bit();
-        return {d.to_ik(pfx, idx), bm_val_ptr_at(node, hs, idx, 0), true};
+        uint8_t idx = bm(node, hs).first_set_bit();
+        return {node, static_cast<uint16_t>(idx), true};
     }
 
     // ==================================================================
-    // find_last_fn_bitmap — maximum entry (no template)
+    // find_last_fn_bitmap — maximum entry → leaf_pos_t
     // ==================================================================
 
-    static leaf_result_t<VALUE> find_last_fn_bitmap(const uint64_t* node) noexcept {
+    static leaf_pos_t find_last_fn_bitmap(uint64_t* node) noexcept {
         constexpr size_t hs = LEAF_HEADER_U64;
-        depth_t d = get_depth(node);
-        uint64_t pfx = leaf_prefix(node);
-        const bitmap_256_t& bmp = bm(node, hs);
-        uint8_t idx = bmp.last_set_bit();
-        int slot = bmp.find_slot<slot_mode::FAST_EXIT>(idx);
-        return {d.to_ik(pfx, idx), bm_val_ptr_at(node, hs, idx, slot), true};
+        uint8_t idx = bm(node, hs).last_set_bit();
+        return {node, static_cast<uint16_t>(idx), true};
     }
 
     // ==================================================================
@@ -1159,105 +1133,47 @@ public:
     // Read/iter loop functions — called by kntrie_impl
     // ==================================================================
 
-    // find_loop: branchless bitmask descent, fn-ptr dispatch at leaf
-    static const VALUE* find_loop(uint64_t ptr, uint64_t ik,
-                                   uint64_t shifted) noexcept {
+    // find_loop: branchless bitmask descent, fn-ptr dispatch at leaf → leaf_pos_t
+    static leaf_pos_t find_loop(uint64_t ptr, uint64_t ik,
+                                 uint64_t shifted) noexcept {
         int depth = 0;
         while (!(ptr & LEAF_BIT)) [[likely]] {
             ptr = bm_child(ptr, static_cast<uint8_t>(shifted >> (U64_TOP_BYTE_SHIFT - depth * CHAR_BIT)));
             ++depth;
         }
         if (ptr & NOT_FOUND_BIT) [[unlikely]]
-            return nullptr;
-        const uint64_t* node = untag_leaf(ptr);
-        auto fn = get_find_fn<VALUE>(node);
+            return {};
+        uint64_t* node = untag_leaf_mut(ptr);
+        auto fn = get_find_fn(node);
         return fn(node, ik);
     }
 
-    // descend_first_loop: walk to minimum leaf
-    static leaf_result_t<VALUE> descend_first_loop(uint64_t ptr) noexcept {
+    // descend_first_loop: walk to minimum leaf → leaf_pos_t via fn-ptr
+    static leaf_pos_t descend_first_loop(uint64_t ptr) noexcept {
         while (!(ptr & LEAF_BIT))
             ptr = bm_first_child(ptr);
-        const uint64_t* node = untag_leaf(ptr);
-        auto fn = get_find_first<VALUE>(node);
+        uint64_t* node = untag_leaf_mut(ptr);
+        auto fn = get_find_first(node);
         return fn(node);
     }
 
-    // descend_last_loop: walk to maximum leaf
-    static leaf_result_t<VALUE> descend_last_loop(uint64_t ptr) noexcept {
+    // descend_last_loop: walk to maximum leaf → leaf_pos_t via fn-ptr
+    static leaf_pos_t descend_last_loop(uint64_t ptr) noexcept {
         while (!(ptr & LEAF_BIT))
             ptr = bm_last_child(ptr);
-        const uint64_t* node = untag_leaf(ptr);
-        auto fn = get_find_last<VALUE>(node);
+        uint64_t* node = untag_leaf_mut(ptr);
+        auto fn = get_find_last(node);
         return fn(node);
     }
 
-    // iter_next_loop: find smallest key > ik
-    // HOT: iterative descent with FAST_EXIT, save path.
-    // Try find_next on leaf. COLD: walk path backward for next sibling.
-    // shifted is never mutated; byte at each depth recovered via single shift.
-    static leaf_result_t<VALUE> iter_next_loop(uint64_t ptr, uint64_t ik,
-                                                 uint64_t shifted) noexcept {
-        uint64_t path[8];
-        int depth = 0;
+    // ==================================================================
+    // Bitmap leaf type check — for next_pos/prev_pos dispatch
+    // ==================================================================
 
-        while (!(ptr & LEAF_BIT)) [[likely]] {
-            path[depth] = ptr;
-            uint8_t byte = static_cast<uint8_t>(shifted >> (U64_TOP_BYTE_SHIFT - depth * CHAR_BIT));
-            auto [child, slot] = bm_child_exact(ptr, byte);
-            if (slot < 0) [[unlikely]] goto walk_back;
-            ptr = child;
-            ++depth;
-        }
+    static constexpr uint8_t BITMAP_SHIFT_THRESHOLD = U64_BITS - U8_BITS;  // 56
 
-        {
-            const uint64_t* node = untag_leaf(ptr);
-            auto r = get_find_next<VALUE>(node)(node, ik);
-            if (r.found) [[likely]] return r;
-        }
-
-    walk_back:
-        for (int i = depth - 1; i >= 0; --i) {
-            uint8_t byte = static_cast<uint8_t>(shifted >> (U64_TOP_BYTE_SHIFT - i * CHAR_BIT));
-            auto [sib, sfound] = bm_next_sibling(path[i], byte);
-            if (sfound) [[unlikely]]
-                return descend_first_loop(sib);
-        }
-        return {0, nullptr, false};
-    }
-
-    // iter_prev_loop: find largest key < ik
-    // HOT: iterative descent with FAST_EXIT, save path.
-    // Try find_prev on leaf. COLD: walk path backward for prev sibling.
-    // shifted is never mutated; byte at each depth recovered via single shift.
-    static leaf_result_t<VALUE> iter_prev_loop(uint64_t ptr, uint64_t ik,
-                                                 uint64_t shifted) noexcept {
-        uint64_t path[8];
-        int depth = 0;
-
-        while (!(ptr & LEAF_BIT)) [[likely]] {
-            path[depth] = ptr;
-            uint8_t byte = static_cast<uint8_t>(shifted >> (U64_TOP_BYTE_SHIFT - depth * CHAR_BIT));
-            auto [child, slot] = bm_child_exact(ptr, byte);
-            if (slot < 0) [[unlikely]] goto walk_back;
-            ptr = child;
-            ++depth;
-        }
-
-        {
-            const uint64_t* node = untag_leaf(ptr);
-            auto r = get_find_prev<VALUE>(node)(node, ik);
-            if (r.found) [[likely]] return r;
-        }
-
-    walk_back:
-        for (int i = depth - 1; i >= 0; --i) {
-            uint8_t byte = static_cast<uint8_t>(shifted >> (U64_TOP_BYTE_SHIFT - i * CHAR_BIT));
-            auto [sib, sfound] = bm_prev_sibling(path[i], byte);
-            if (sfound) [[unlikely]]
-                return descend_last_loop(sib);
-        }
-        return {0, nullptr, false};
+    static bool is_bitmap_leaf(const uint64_t* node) noexcept {
+        return get_depth(node).shift >= BITMAP_SHIFT_THRESHOLD;
     }
 };
 

@@ -43,8 +43,8 @@ inline constexpr size_t BITMAP_WORDS   = 4;           // 256-bit bitmap = 4 × u
 inline constexpr size_t BYTE_VALUES    = 1u << CHAR_BIT;  // 256
 
 inline constexpr size_t COMPACT_MAX    = 4096;
-inline constexpr size_t HEADER_U64     = 1;            // bitmask node header is 1 u64
-inline constexpr unsigned SCAN_MAX     = 16;           // TS ≤ 16: linear scan; > 16: binary search
+inline constexpr size_t HEADER_U64     = 2;            // bitmask node: header(1) + parent_ptr(1)
+inline constexpr size_t BM_PARENT_IDX  = 1;            // parent pointer at node[1]
 inline constexpr size_t DESC_U64       = 1;            // descendants count at end of bitmask node
 
 // --- Leaf node layout indices ---
@@ -55,7 +55,8 @@ inline constexpr size_t LEAF_PREV_FN    = 3;           // iter prev fn
 inline constexpr size_t LEAF_FIRST_FN   = 4;           // descend first (min entry) fn
 inline constexpr size_t LEAF_LAST_FN    = 5;           // descend last (max entry) fn
 inline constexpr size_t LEAF_PREFIX     = 6;           // left-aligned key prefix
-inline constexpr size_t LEAF_HEADER_U64 = 7;           // = LEAF_PREFIX + 1
+inline constexpr size_t LEAF_PARENT_PTR = 7;           // parent bitmask node pointer
+inline constexpr size_t LEAF_HEADER_U64 = 8;           // total header u64s
 
 // --- Bitmask node child layout ---
 inline constexpr size_t BM_SENTINEL_U64   = 1;         // sentinel child at children[0]
@@ -73,9 +74,6 @@ inline constexpr size_t MAX_COMBINED_SKIP = MAX_SKIP * 2;
 
 // --- Root structure ---
 inline constexpr int ROOT_CONSUMED_BYTES = 2;          // 1 root dispatch byte + 1 leaf minimum
-
-// --- Compact thresholds ---
-inline constexpr size_t DUP_SCAN_MAX = 64;             // linear dup scan threshold
 
 // --- Growth/shrink ---
 inline constexpr size_t SHRINK_FACTOR = 2;
@@ -137,7 +135,7 @@ inline constexpr bool should_shrink_u64(size_t allocated, size_t needed) noexcep
 //   [0..1]   depth_v     (packed depth_t: is_skip:1 skip:3 consumed:6 shift:6)
 //   [2..3]   entries     (uint16_t)
 //   [4..5]   alloc_u64   (uint16_t)
-//   [6..7]   total_slots (uint16_t, compact leaf slot count)
+//   [6..7]   parent_byte (uint16_t, dispatch byte in parent bitmask)
 //
 // depth_t fields:
 //   - Leaf: full depth info (is_skip, skip, consumed, shift)
@@ -185,7 +183,9 @@ struct node_header_t {
     uint16_t depth_v       = 0;  // packed depth_t (is_skip:1 skip:3 consumed:6 shift:6)
     uint16_t entries_v     = 0;
     uint16_t alloc_u64_v   = 0;
-    uint16_t total_slots_v = 0;
+    uint16_t parent_byte_v = 0;  // dispatch byte in parent bitmask (ROOT_BYTE = root)
+
+    static constexpr uint16_t ROOT_BYTE = 256;
 
     // --- depth (leaf: full info; bitmask: only skip used) ---
     depth_t depth() const noexcept {
@@ -209,8 +209,10 @@ struct node_header_t {
     unsigned alloc_u64() const noexcept { return alloc_u64_v; }
     void set_alloc_u64(unsigned n) noexcept { alloc_u64_v = static_cast<uint16_t>(n); }
 
-    unsigned total_slots() const noexcept { return total_slots_v; }
-    void set_total_slots(unsigned n) noexcept { total_slots_v = static_cast<uint16_t>(n); }
+    // --- parent tracking ---
+    uint16_t parent_byte() const noexcept { return parent_byte_v; }
+    void set_parent_byte(uint16_t b) noexcept { parent_byte_v = b; }
+    bool is_root() const noexcept { return parent_byte_v == ROOT_BYTE; }
 };
 static_assert(sizeof(node_header_t) == 8);
 
@@ -271,14 +273,14 @@ using nk_for_bits_t = std::conditional_t<(BITS > U32_BITS), uint64_t,
 
 
 // --- Tagged pointer helpers ---
-// Bitmask ptr: points to bitmap (node+1), no LEAF_BIT. Use directly.
+// Bitmask ptr: points to bitmap (node+HEADER_U64), no LEAF_BIT. Use directly.
 // Leaf ptr: points to header (node+0), has LEAF_BIT. Strip unconditionally.
 
 inline uint64_t tag_leaf(const uint64_t* node) noexcept {
     return static_cast<uint64_t>(reinterpret_cast<std::uintptr_t>(node)) | LEAF_BIT;
 }
 inline uint64_t tag_bitmask(const uint64_t* node) noexcept {
-    return static_cast<uint64_t>(reinterpret_cast<std::uintptr_t>(node + 1));
+    return static_cast<uint64_t>(reinterpret_cast<std::uintptr_t>(node + HEADER_U64));
 }
 inline const uint64_t* untag_leaf(uint64_t tagged) noexcept {
     return reinterpret_cast<const uint64_t*>(static_cast<std::uintptr_t>(tagged ^ LEAF_BIT));
@@ -287,10 +289,18 @@ inline uint64_t* untag_leaf_mut(uint64_t tagged) noexcept {
     return reinterpret_cast<uint64_t*>(static_cast<std::uintptr_t>(tagged ^ LEAF_BIT));
 }
 inline uint64_t* bm_to_node(uint64_t ptr) noexcept {
-    return reinterpret_cast<uint64_t*>(static_cast<std::uintptr_t>(ptr)) - 1;
+    return reinterpret_cast<uint64_t*>(static_cast<std::uintptr_t>(ptr)) - HEADER_U64;
 }
 inline const uint64_t* bm_to_node_const(uint64_t ptr) noexcept {
-    return reinterpret_cast<const uint64_t*>(static_cast<std::uintptr_t>(ptr)) - 1;
+    return reinterpret_cast<const uint64_t*>(static_cast<std::uintptr_t>(ptr)) - HEADER_U64;
+}
+
+// --- Bitmask parent pointer accessors ---
+inline uint64_t* bm_parent(uint64_t* node) noexcept {
+    return reinterpret_cast<uint64_t*>(static_cast<std::uintptr_t>(node[BM_PARENT_IDX]));
+}
+inline void set_bm_parent(uint64_t* node, uint64_t* parent) noexcept {
+    node[BM_PARENT_IDX] = static_cast<uint64_t>(reinterpret_cast<std::uintptr_t>(parent));
 }
 
 // Dynamic header size: only for bitmask nodes (always 1 u64).
@@ -300,25 +310,31 @@ inline const uint64_t* bm_to_node_const(uint64_t ptr) noexcept {
 // Leaf result types
 // ==========================================================================
 
-// Leaf result: full reconstructed key + value.
-template<typename VALUE>
-struct leaf_result_t {
-    uint64_t      key;     // full IK, left-aligned in u64
-    const VALUE*  value;
-    bool          found;
+// Live iterator position: pointer into a leaf + slot index.
+// For compact leaves: pos = array index (0..entries-1).
+// For bitmap leaves: pos = byte value (0-255).
+struct leaf_pos_t {
+    uint64_t* node  = nullptr;  // compact leaf (null = end)
+    uint16_t  pos   = 0;        // index into keys/values arrays
+    bool      found = false;
 };
 
-// find_fn: exact match. Returns value ptr (null = miss).
-template<typename VALUE>
-using find_fn_t = const VALUE* (*)(const uint64_t*, uint64_t) noexcept;
+// Insert result carrying position for live iterators.
+struct insert_pos_result_t {
+    uint64_t* leaf     = nullptr;
+    uint16_t  pos      = 0;
+    bool      inserted = false;
+};
 
-// iter fn: directional search. Returns {key, value, found}.
-template<typename VALUE>
-using iter_fn_t = leaf_result_t<VALUE> (*)(const uint64_t*, uint64_t) noexcept;
+// All 5 leaf function pointers return leaf_pos_t.
+// find_fn: exact match. Returns {leaf, pos, true} or {nullptr, 0, false}.
+using find_fn_t  = leaf_pos_t (*)(uint64_t*, uint64_t) noexcept;
+
+// iter fn: directional search (next/prev). Returns {leaf, pos, found}.
+using iter_fn_t  = leaf_pos_t (*)(uint64_t*, uint64_t) noexcept;
 
 // edge fn: min/max entry. No search key needed.
-template<typename VALUE>
-using edge_fn_t = leaf_result_t<VALUE> (*)(const uint64_t*) noexcept;
+using edge_fn_t  = leaf_pos_t (*)(uint64_t*) noexcept;
 
 // ==========================================================================
 // Leaf node accessors
@@ -330,50 +346,46 @@ inline uint64_t leaf_prefix(const uint64_t* node) noexcept {
 inline void set_leaf_prefix(uint64_t* node, uint64_t pfx) noexcept {
     node[LEAF_PREFIX] = pfx;
 }
-
-// Fn pointer accessors
-template<typename VALUE>
-inline find_fn_t<VALUE> get_find_fn(const uint64_t* node) noexcept {
-    return reinterpret_cast<find_fn_t<VALUE>>(node[LEAF_FIND_FN]);
+inline uint64_t* leaf_parent(uint64_t* node) noexcept {
+    return reinterpret_cast<uint64_t*>(static_cast<std::uintptr_t>(node[LEAF_PARENT_PTR]));
 }
-template<typename VALUE>
-inline void set_find_fn(uint64_t* node, find_fn_t<VALUE> fn) noexcept {
+inline void set_leaf_parent(uint64_t* node, uint64_t* parent) noexcept {
+    node[LEAF_PARENT_PTR] = static_cast<uint64_t>(reinterpret_cast<std::uintptr_t>(parent));
+}
+
+// Fn pointer accessors — no longer templated (leaf_pos_t is type-erased)
+inline find_fn_t get_find_fn(const uint64_t* node) noexcept {
+    return reinterpret_cast<find_fn_t>(node[LEAF_FIND_FN]);
+}
+inline void set_find_fn(uint64_t* node, find_fn_t fn) noexcept {
     node[LEAF_FIND_FN] = reinterpret_cast<uint64_t>(fn);
 }
 
-template<typename VALUE>
-inline iter_fn_t<VALUE> get_find_next(const uint64_t* node) noexcept {
-    return reinterpret_cast<iter_fn_t<VALUE>>(node[LEAF_NEXT_FN]);
+inline iter_fn_t get_find_next(const uint64_t* node) noexcept {
+    return reinterpret_cast<iter_fn_t>(node[LEAF_NEXT_FN]);
 }
-template<typename VALUE>
-inline void set_find_next(uint64_t* node, iter_fn_t<VALUE> fn) noexcept {
+inline void set_find_next(uint64_t* node, iter_fn_t fn) noexcept {
     node[LEAF_NEXT_FN] = reinterpret_cast<uint64_t>(fn);
 }
 
-template<typename VALUE>
-inline iter_fn_t<VALUE> get_find_prev(const uint64_t* node) noexcept {
-    return reinterpret_cast<iter_fn_t<VALUE>>(node[LEAF_PREV_FN]);
+inline iter_fn_t get_find_prev(const uint64_t* node) noexcept {
+    return reinterpret_cast<iter_fn_t>(node[LEAF_PREV_FN]);
 }
-template<typename VALUE>
-inline void set_find_prev(uint64_t* node, iter_fn_t<VALUE> fn) noexcept {
+inline void set_find_prev(uint64_t* node, iter_fn_t fn) noexcept {
     node[LEAF_PREV_FN] = reinterpret_cast<uint64_t>(fn);
 }
 
-template<typename VALUE>
-inline edge_fn_t<VALUE> get_find_first(const uint64_t* node) noexcept {
-    return reinterpret_cast<edge_fn_t<VALUE>>(node[LEAF_FIRST_FN]);
+inline edge_fn_t get_find_first(const uint64_t* node) noexcept {
+    return reinterpret_cast<edge_fn_t>(node[LEAF_FIRST_FN]);
 }
-template<typename VALUE>
-inline void set_find_first(uint64_t* node, edge_fn_t<VALUE> fn) noexcept {
+inline void set_find_first(uint64_t* node, edge_fn_t fn) noexcept {
     node[LEAF_FIRST_FN] = reinterpret_cast<uint64_t>(fn);
 }
 
-template<typename VALUE>
-inline edge_fn_t<VALUE> get_find_last(const uint64_t* node) noexcept {
-    return reinterpret_cast<edge_fn_t<VALUE>>(node[LEAF_LAST_FN]);
+inline edge_fn_t get_find_last(const uint64_t* node) noexcept {
+    return reinterpret_cast<edge_fn_t>(node[LEAF_LAST_FN]);
 }
-template<typename VALUE>
-inline void set_find_last(uint64_t* node, edge_fn_t<VALUE> fn) noexcept {
+inline void set_find_last(uint64_t* node, edge_fn_t fn) noexcept {
     node[LEAF_LAST_FN] = reinterpret_cast<uint64_t>(fn);
 }
 

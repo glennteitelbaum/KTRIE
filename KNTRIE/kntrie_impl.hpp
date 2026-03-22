@@ -259,21 +259,51 @@ public:
         return find_value(key) != nullptr;
     }
 
+    // Find returning {leaf*, pos, found} for live iterators.
+    // Same descent as find_value but returns position instead of VALUE*.
+    leaf_pos_t find_with_pos(const KEY& key) const noexcept {
+        uint64_t ik = key_to_u64(key);
+        if ((ik ^ root_prefix_v) & root_prefix_mask()) [[unlikely]] return {};
+
+        // Bitmask descent (same as BO::find_loop)
+        uint64_t ptr = root_ptr_v;
+        uint64_t shifted = ik << root_skip_bits_v;
+        int depth = 0;
+        while (!(ptr & LEAF_BIT)) [[likely]] {
+            ptr = BO::bm_child(ptr, static_cast<uint8_t>(shifted >> (U64_TOP_BYTE_SHIFT - depth * CHAR_BIT)));
+            ++depth;
+        }
+        if (ptr & NOT_FOUND_BIT) [[unlikely]] return {};
+
+        uint64_t* node = untag_leaf_mut(ptr);
+        return OPS::find_pos_for_leaf(node, ik);
+    }
+
+    // ==================================================================
+    // Position accessors — for live iterators to read key/value
+    // ==================================================================
+
+    KEY key_at_pos(const uint64_t* leaf, uint16_t pos) const noexcept {
+        uint64_t ik = OPS::reconstruct_ik(leaf, pos);
+        IK internal = static_cast<IK>(ik >> (U64_BITS - IK_BITS));
+        return KO::to_key(internal);
+    }
+
+    static VALUE& value_ref_at_pos(uint64_t* leaf, uint16_t pos) noexcept {
+        return OPS::value_ref_at(leaf, pos);
+    }
+
+    static const VALUE& value_cref_at_pos(const uint64_t* leaf, uint16_t pos) noexcept {
+        return OPS::value_cref_at(leaf, pos);
+    }
+
 public:
     // ==================================================================
     // Insert / Insert-or-assign / Assign
     // ==================================================================
 
-    struct impl_insert_result_t {
-        bool inserted;
-        const VALUE* existing;   // non-null on dup: pointer to existing value in leaf
-    };
-
     std::pair<bool, bool> insert(const KEY& key, const VALUE& value) {
         return insert_dispatch<true, false>(key, value);
-    }
-    impl_insert_result_t insert_ex(const KEY& key, const VALUE& value) {
-        return insert_dispatch_ex<true, false>(key, value);
     }
 
     std::pair<bool, bool> insert_or_assign(const KEY& key, const VALUE& value) {
@@ -284,14 +314,41 @@ public:
         return insert_dispatch<false, true>(key, value);
     }
 
+    // Insert returning {leaf, pos, inserted} for live iterators.
+    // Two-walk: insert then find_with_pos (second walk is cache-hot).
+    insert_pos_result_t insert_with_pos(const KEY& key, const VALUE& value) {
+        auto [ok, inserted] = insert_dispatch<true, false>(key, value);
+        auto lp = find_with_pos(key);
+        return {lp.node, lp.pos, inserted};
+    }
+
+    // Insert-or-assign returning {leaf, pos, was_new_insert}.
+    insert_pos_result_t upsert_with_pos(const KEY& key, const VALUE& value) {
+        auto [ok, inserted] = insert_dispatch<true, true>(key, value);
+        auto lp = find_with_pos(key);
+        return {lp.node, lp.pos, inserted};
+    }
+
     // ==================================================================
     // Erase
     // ==================================================================
 
     bool erase(const KEY& key) {
         if (size_v == 0) [[unlikely]] return false;
-        uint64_t ik = key_to_u64(key);
+        return erase_ik(key_to_u64(key));
+    }
 
+    // Erase by leaf position — reconstruct key from {leaf, pos},
+    // then delegate to key-based erase. Caller must advance iterator
+    // before calling.
+    bool erase_at(uint64_t* leaf, uint16_t pos) {
+        if (size_v == 0) [[unlikely]] return false;
+        uint64_t ik = OPS::reconstruct_ik(leaf, pos);
+        return erase_ik(ik);
+    }
+
+private:
+    bool erase_ik(uint64_t ik) {
         if ((ik ^ root_prefix_v) & root_prefix_mask()) [[unlikely]] return false;
 
         uint64_t old_root_ptr = root_ptr_v;
@@ -314,36 +371,7 @@ public:
         }
         return erased;
     }
-
-    // Conditional erase: find key, test fn(const VALUE&), erase if true.
-    // Returns true if erased, false if not found or predicate failed.
-    template<typename F>
-    bool erase_when(const KEY& key, F&& fn) {
-        if (size_v == 0) [[unlikely]] return false;
-        uint64_t ik = key_to_u64(key);
-
-        if ((ik ^ root_prefix_v) & root_prefix_mask()) [[unlikely]] return false;
-
-        uint64_t old_root_ptr = root_ptr_v;
-        auto r = OPS::erase_when_node(root_ptr_v, ik, ik << root_skip_bits_v,
-                                       root_skip_bytes(), std::forward<F>(fn), bld_v);
-        if (r.erased) [[likely]] {
-            root_ptr_v = r.tagged_ptr ? r.tagged_ptr : BO::SENTINEL_TAGGED;
-            --size_v;
-            if (size_v == 0) [[unlikely]] {
-                root_ptr_v = BO::SENTINEL_TAGGED;
-                root_prefix_v = 0;
-                set_root(0);
-            } else {
-                if (root_ptr_v != old_root_ptr) [[unlikely]] normalize_root();
-                if (size_v <= COMPACT_MAX && !(root_ptr_v & LEAF_BIT)
-                    && root_ptr_v != BO::SENTINEL_TAGGED) [[unlikely]]
-                    coalesce_bm_to_leaf();
-            }
-            return true;
-        }
-        return false;
-    }
+public:
 
     // ==================================================================
     // Stats / Memory
@@ -400,70 +428,199 @@ public:
     }
 
     // ==================================================================
-    // Iterator support
+    // Live position API — for live iterators
     // ==================================================================
 
-    struct iter_result_t { KEY key; VALUE value; bool found; };
-
-    iter_result_t to_iter_result(const leaf_result_t<NORM_V>& r) const noexcept {
-        IK internal = static_cast<IK>(r.key >> (U64_BITS - IK_BITS));
-        return {KO::to_key(internal),
-                *reinterpret_cast<const VALUE*>(r.value), true};
+    leaf_pos_t first_pos() const noexcept {
+        if (size_v == 0) [[unlikely]] return {};
+        return BO::descend_first_loop(root_ptr_v);
     }
 
-    iter_result_t iter_first() const noexcept {
-        if (size_v == 0) [[unlikely]] return {KEY{}, VALUE{}, false};
-        auto r = BO::descend_first_loop(root_ptr_v);
-        if (!r.found) [[unlikely]] return {KEY{}, VALUE{}, false};
-        return to_iter_result(r);
+    leaf_pos_t last_pos() const noexcept {
+        if (size_v == 0) [[unlikely]] return {};
+        return BO::descend_last_loop(root_ptr_v);
     }
 
-    iter_result_t iter_last() const noexcept {
-        if (size_v == 0) [[unlikely]] return {KEY{}, VALUE{}, false};
-        auto r = BO::descend_last_loop(root_ptr_v);
-        if (!r.found) [[unlikely]] return {KEY{}, VALUE{}, false};
-        return to_iter_result(r);
+    // Advance: hot path is pos+1 within same leaf (compact) or
+    // next_set_after (bitmap). Cold path: walk parent chain.
+    leaf_pos_t next_pos(uint64_t* leaf, uint16_t pos) const noexcept {
+        // Try within same leaf
+        if (BO::is_bitmap_leaf(leaf)) {
+            constexpr size_t hs = LEAF_HEADER_U64;
+            auto adj = BO::bm(leaf, hs).next_set_after(static_cast<uint8_t>(pos));
+            if (adj.found) return {leaf, static_cast<uint16_t>(adj.idx), true};
+        } else {
+            unsigned entries = get_header(leaf)->entries();
+            if (pos + 1 < entries) return {leaf, static_cast<uint16_t>(pos + 1), true};
+        }
+
+        // Walk parent chain
+        uint64_t* node = leaf;
+        bool is_leaf_node = true;
+        while (true) {
+            auto* h = get_header(node);
+            if (h->is_root()) return {};  // end
+
+            uint8_t byte = static_cast<uint8_t>(h->parent_byte());
+            uint64_t* parent_node = is_leaf_node ? leaf_parent(node) : bm_parent(node);
+            uint64_t parent_bm_ptr = tag_bitmask(parent_node);
+            auto [sib, found] = BO::bm_next_sibling(parent_bm_ptr, byte);
+            if (found) return BO::descend_first_loop(sib);
+
+            node = parent_node;
+            is_leaf_node = false;
+        }
     }
 
-    iter_result_t iter_next(KEY key) const noexcept {
+    // Retreat: hot path is pos-1 within same leaf (compact) or
+    // prev_set_before (bitmap). Cold path: walk parent chain.
+    leaf_pos_t prev_pos(uint64_t* leaf, uint16_t pos) const noexcept {
+        // Try within same leaf
+        if (BO::is_bitmap_leaf(leaf)) {
+            constexpr size_t hs = LEAF_HEADER_U64;
+            auto adj = BO::bm(leaf, hs).prev_set_before(static_cast<uint8_t>(pos));
+            if (adj.found) return {leaf, static_cast<uint16_t>(adj.idx), true};
+        } else {
+            if (pos > 0) return {leaf, static_cast<uint16_t>(pos - 1), true};
+        }
+
+        // Walk parent chain
+        uint64_t* node = leaf;
+        bool is_leaf_node = true;
+        while (true) {
+            auto* h = get_header(node);
+            if (h->is_root()) return {};  // before begin
+
+            uint8_t byte = static_cast<uint8_t>(h->parent_byte());
+            uint64_t* parent_node = is_leaf_node ? leaf_parent(node) : bm_parent(node);
+            uint64_t parent_bm_ptr = tag_bitmask(parent_node);
+            auto [sib, found] = BO::bm_prev_sibling(parent_bm_ptr, byte);
+            if (found) return BO::descend_last_loop(sib);
+
+            node = parent_node;
+            is_leaf_node = false;
+        }
+    }
+
+    // ==================================================================
+    // Parent walk helpers — factored from next_pos/prev_pos cold paths
+    // ==================================================================
+
+    leaf_pos_t walk_parent_forward(uint64_t* node, bool is_leaf_node) const noexcept {
+        while (true) {
+            auto* h = get_header(node);
+            if (h->is_root()) return {};
+            uint8_t byte = static_cast<uint8_t>(h->parent_byte());
+            uint64_t* parent_node = is_leaf_node ? leaf_parent(node) : bm_parent(node);
+            uint64_t parent_bm_ptr = tag_bitmask(parent_node);
+            auto [sib, found] = BO::bm_next_sibling(parent_bm_ptr, byte);
+            if (found) return BO::descend_first_loop(sib);
+            node = parent_node;
+            is_leaf_node = false;
+        }
+    }
+
+    leaf_pos_t walk_parent_backward(uint64_t* node, bool is_leaf_node) const noexcept {
+        while (true) {
+            auto* h = get_header(node);
+            if (h->is_root()) return {};
+            uint8_t byte = static_cast<uint8_t>(h->parent_byte());
+            uint64_t* parent_node = is_leaf_node ? leaf_parent(node) : bm_parent(node);
+            uint64_t parent_bm_ptr = tag_bitmask(parent_node);
+            auto [sib, found] = BO::bm_prev_sibling(parent_bm_ptr, byte);
+            if (found) return BO::descend_last_loop(sib);
+            node = parent_node;
+            is_leaf_node = false;
+        }
+    }
+
+    // ==================================================================
+    // lower_bound_pos — first entry >= key, returns leaf_pos_t
+    //
+    // Tracked descent via bm_child_exact. On sentinel miss, try next
+    // sibling at that bitmask, then walk parents. At leaf, find_ge_pos.
+    // ==================================================================
+
+    leaf_pos_t lower_bound_pos(const KEY& key) const noexcept {
+        if (size_v == 0) [[unlikely]] return {};
         uint64_t ik = key_to_u64(key);
+
+        // Root prefix check
         uint64_t diff = (ik ^ root_prefix_v) & root_prefix_mask();
-        leaf_result_t<NORM_V> r;
         if (diff) [[unlikely]] {
             int shift = std::countl_zero(diff) & BYTE_BOUNDARY_MASK;
             uint8_t kb = static_cast<uint8_t>(ik >> (U64_TOP_BYTE_SHIFT - shift));
             uint8_t pb = static_cast<uint8_t>(root_prefix_v >> (U64_TOP_BYTE_SHIFT - shift));
-            if (kb < pb) [[likely]]
-                r = BO::descend_first_loop(root_ptr_v);
-            else
-                r = {0, nullptr, false};
-        } else {
-            r = BO::iter_next_loop(root_ptr_v, ik, ik << root_skip_bits_v);
+            if (kb < pb) return first_pos();  // all entries > key
+            return {};  // all entries < key
         }
-        if (!r.found) [[unlikely]] return {KEY{}, VALUE{}, false};
-        return to_iter_result(r);
+
+        // Tracked descent
+        uint64_t ptr = root_ptr_v;
+        uint64_t shifted = ik << root_skip_bits_v;
+        int depth = 0;
+
+        while (!(ptr & LEAF_BIT)) [[likely]] {
+            uint8_t byte = static_cast<uint8_t>(shifted >> (U64_TOP_BYTE_SHIFT - depth * CHAR_BIT));
+            auto [child, slot] = BO::bm_child_exact(ptr, byte);
+            if (slot < 0) [[unlikely]] {
+                // Byte not found — try next sibling at this bitmask
+                auto [sib, found] = BO::bm_next_sibling(ptr, byte);
+                if (found) return BO::descend_first_loop(sib);
+                // Walk parent from this bitmask node
+                uint64_t* bm_node = bm_to_node(ptr);
+                return walk_parent_forward(bm_node, false);
+            }
+            ptr = child;
+            ++depth;
+        }
+
+        // Reached leaf — find first entry >= ik
+        uint64_t* leaf = untag_leaf_mut(ptr);
+        auto r = OPS::find_ge_pos_for_leaf(leaf, ik);
+        if (r.found) return r;
+        return walk_parent_forward(leaf, true);
     }
 
-    iter_result_t iter_prev(KEY key) const noexcept {
+    // ==================================================================
+    // upper_bound_pos — first entry > key, returns leaf_pos_t
+    // ==================================================================
+
+    leaf_pos_t upper_bound_pos(const KEY& key) const noexcept {
+        if (size_v == 0) [[unlikely]] return {};
         uint64_t ik = key_to_u64(key);
+
         uint64_t diff = (ik ^ root_prefix_v) & root_prefix_mask();
-        leaf_result_t<NORM_V> r;
         if (diff) [[unlikely]] {
             int shift = std::countl_zero(diff) & BYTE_BOUNDARY_MASK;
             uint8_t kb = static_cast<uint8_t>(ik >> (U64_TOP_BYTE_SHIFT - shift));
             uint8_t pb = static_cast<uint8_t>(root_prefix_v >> (U64_TOP_BYTE_SHIFT - shift));
-            if (kb > pb) [[likely]]
-                r = BO::descend_last_loop(root_ptr_v);
-            else
-                r = {0, nullptr, false};
-        } else {
-            r = BO::iter_prev_loop(root_ptr_v, ik, ik << root_skip_bits_v);
+            if (kb < pb) return first_pos();
+            return {};
         }
-        if (!r.found) [[unlikely]] return {KEY{}, VALUE{}, false};
-        return to_iter_result(r);
-    }
 
-private:
+        uint64_t ptr = root_ptr_v;
+        uint64_t shifted = ik << root_skip_bits_v;
+        int depth = 0;
+
+        while (!(ptr & LEAF_BIT)) [[likely]] {
+            uint8_t byte = static_cast<uint8_t>(shifted >> (U64_TOP_BYTE_SHIFT - depth * CHAR_BIT));
+            auto [child, slot] = BO::bm_child_exact(ptr, byte);
+            if (slot < 0) [[unlikely]] {
+                auto [sib, found] = BO::bm_next_sibling(ptr, byte);
+                if (found) return BO::descend_first_loop(sib);
+                uint64_t* bm_node = bm_to_node(ptr);
+                return walk_parent_forward(bm_node, false);
+            }
+            ptr = child;
+            ++depth;
+        }
+
+        uint64_t* leaf = untag_leaf_mut(ptr);
+        auto r = OPS::find_next_pos_for_leaf(leaf, ik);
+        if (r.found) return r;
+        return walk_parent_forward(leaf, true);
+    }
 
     template<bool INSERT, bool ASSIGN>
     std::pair<bool, bool> insert_dispatch(const KEY& key, const VALUE& value) {
@@ -515,116 +672,6 @@ private:
         return {true, false};
     }
 
-    template<bool INSERT, bool ASSIGN>
-    impl_insert_result_t insert_dispatch_ex(const KEY& key, const VALUE& value) {
-        uint64_t ik = key_to_u64(key);
-
-        NVST sv;
-        if constexpr (std::is_same_v<VALUE, NORM_V>) {
-            sv = bld_v.store_value(value);
-        } else {
-            static_assert(sizeof(VALUE) <= sizeof(NVST));
-            sv = NVST{};
-            std::memcpy(&sv, &value, sizeof(VALUE));
-        }
-
-        if (size_v == 0) [[unlikely]] {
-            if constexpr (!INSERT) { bld_v.destroy_value(sv); return {false, nullptr}; }
-            set_root(0);
-        }
-
-        if (root_skip_bits_v > 0) [[unlikely]] {
-            uint64_t diff = (ik ^ root_prefix_v) & root_prefix_mask();
-            if (diff) [[unlikely]] {
-                if constexpr (!INSERT) { bld_v.destroy_value(sv); return {false, nullptr}; }
-                int clz = std::countl_zero(diff);
-                uint8_t div_pos = static_cast<uint8_t>(clz / CHAR_BIT);
-                reduce_root_skip(div_pos);
-            }
-        }
-
-        uint64_t old_root_ptr = root_ptr_v;
-        auto r = OPS::template insert_node<INSERT, ASSIGN>(
-            root_ptr_v, ik, ik << root_skip_bits_v, root_skip_bytes(), sv, bld_v);
-        if (r.tagged_ptr != root_ptr_v) [[unlikely]] root_ptr_v = r.tagged_ptr;
-
-        if (r.inserted) [[likely]] {
-            ++size_v;
-            if (root_ptr_v != old_root_ptr) [[unlikely]] {
-                normalize_root();
-                if (size_v <= COMPACT_MAX && !(root_ptr_v & LEAF_BIT)) [[unlikely]]
-                    coalesce_bm_to_leaf();
-            }
-            return {true, nullptr};
-        }
-        bld_v.destroy_value(sv);
-        return {false,
-                reinterpret_cast<const VALUE*>(r.existing_value)};
-    }
-
-    // ==================================================================
-    // Modify — single-walk read-modify-write
-    // fn is void(VALUE&). modify_existing is hit-only.
-    // modify_or_insert handles miss by inserting fn(default_val).
-    // ==================================================================
-public:
-    template<typename F>
-    bool modify_existing(const KEY& key, F&& fn) {
-        if (size_v == 0) [[unlikely]] return false;
-        uint64_t ik = key_to_u64(key);
-        if (root_skip_bits_v > 0) [[unlikely]] {
-            uint64_t diff = (ik ^ root_prefix_v) & root_prefix_mask();
-            if (diff) [[unlikely]] return false;
-        }
-        return OPS::modify_node(root_ptr_v, ik, ik << root_skip_bits_v,
-                                root_skip_bytes(), std::forward<F>(fn));
-    }
-
-    template<typename F>
-    bool modify_or_insert(const KEY& key, F&& fn, const VALUE& default_val) {
-        uint64_t ik = key_to_u64(key);
-
-        // Convert default to normalized slot
-        NVST sv;
-        if constexpr (std::is_same_v<VALUE, NORM_V>) {
-            sv = bld_v.store_value(default_val);
-        } else {
-            static_assert(sizeof(VALUE) <= sizeof(NVST));
-            sv = NVST{};
-            std::memcpy(&sv, &default_val, sizeof(VALUE));
-        }
-
-        // First insert: root at skip=0
-        if (size_v == 0) [[unlikely]]
-            set_root(0);
-
-        if (root_skip_bits_v > 0) [[unlikely]] {
-            uint64_t diff = (ik ^ root_prefix_v) & root_prefix_mask();
-            if (diff) [[unlikely]] {
-                int clz = std::countl_zero(diff);
-                uint8_t div_pos = static_cast<uint8_t>(clz / CHAR_BIT);
-                reduce_root_skip(div_pos);
-            }
-        }
-
-        uint64_t old_root_ptr = root_ptr_v;
-        auto r = OPS::modify_or_insert_node(
-            root_ptr_v, ik, ik << root_skip_bits_v, root_skip_bytes(),
-            std::forward<F>(fn), sv, bld_v);
-        if (r.tagged_ptr != root_ptr_v) [[unlikely]] root_ptr_v = r.tagged_ptr;
-
-        if (r.inserted) [[unlikely]] {
-            ++size_v;
-            if (root_ptr_v != old_root_ptr) [[unlikely]] {
-                normalize_root();
-                if (size_v <= COMPACT_MAX && !(root_ptr_v & LEAF_BIT)) [[unlikely]]
-                    coalesce_bm_to_leaf();
-            }
-            return false;  // inserted, not updated
-        }
-        bld_v.destroy_value(sv);  // default_sv unused on hit
-        return true;  // updated existing
-    }
 private:
 
     // ==================================================================

@@ -4,7 +4,7 @@
 #include "kntrie_impl.hpp"
 #include <stdexcept>
 #include <iterator>
-#include <vector>
+#include <initializer_list>
 
 namespace gteitelbaum {
 
@@ -36,89 +36,80 @@ public:
     using allocator_type  = ALLOC;
 
     // ==================================================================
-    // Iterator — snapshot-based, bidirectional
+    // Iterator — live, bidirectional
     //
-    // IMPORTANT: Iterators are snapshots. operator*() returns a copy of
-    // the key/value pair, not a reference into the trie. Modifications
-    // via insert_or_assign do not update existing iterators. Each ++/--
-    // re-descends from the root. Concurrent reads are safe; concurrent
-    // read+write or write+write requires external synchronization.
+    // Points into the trie structure. operator*() returns a pair with a
+    // reference to the value, not a copy. Invalidated by any modification
+    // to the container (same as std::unordered_map).
     // ==================================================================
 
-    class const_iterator {
+    class iterator {
         friend class kntrie;
-        const impl_t* parent_v = nullptr;
-        UK    ukey_v{};
-        VALUE value_v{};
-        bool  is_valid_v = false;
+        impl_t*   impl_v = nullptr;
+        uint64_t* leaf_v = nullptr;
+        uint16_t  pos_v  = 0;
 
-        const_iterator(const impl_t* p, UK uk, VALUE v, bool valid)
-            : parent_v(p), ukey_v(uk), value_v(v), is_valid_v(valid) {}
+        iterator(impl_t* p, uint64_t* leaf, uint16_t pos)
+            : impl_v(p), leaf_v(leaf), pos_v(pos) {}
 
-        static const_iterator from_result(const impl_t* p,
-                                           const typename impl_t::iter_result_t& r) {
-            return const_iterator(p, r.key, r.value, r.found);
-        }
+        iterator(impl_t* p, kntrie_detail::leaf_pos_t lp)
+            : impl_v(p), leaf_v(lp.node), pos_v(lp.pos) {}
 
     public:
         using iterator_category = std::bidirectional_iterator_tag;
         using value_type        = std::pair<const KEY, VALUE>;
         using difference_type   = std::ptrdiff_t;
-        using pointer           = void;
-        using reference         = std::pair<const KEY, VALUE>;
+        using reference         = std::pair<const KEY, VALUE&>;
 
-        const_iterator() = default;
+        struct arrow_proxy {
+            std::pair<const KEY, VALUE&> p;
+            auto* operator->() noexcept { return &p; }
+        };
+        using pointer = arrow_proxy;
 
-        KEY          key()   const noexcept { return from_unsigned(ukey_v); }
-        const VALUE& value() const noexcept { return value_v; }
+        iterator() = default;
 
-        std::pair<const KEY, VALUE> operator*() const noexcept {
-            return {from_unsigned(ukey_v), value_v};
+        reference operator*() const noexcept {
+            KEY k = impl_v->key_at_pos(leaf_v, pos_v);
+            VALUE& v = impl_t::value_ref_at_pos(leaf_v, pos_v);
+            return {from_unsigned(to_unsigned(k)), v};
         }
 
-        const_iterator& operator++() {
-            auto r = parent_v->iter_next(ukey_v);
-            ukey_v  = r.key;
-            value_v = r.value;
-            is_valid_v = r.found;
+        arrow_proxy operator->() const noexcept {
+            return {**this};
+        }
+
+        iterator& operator++() {
+            auto r = impl_v->next_pos(leaf_v, pos_v);
+            leaf_v = r.node;
+            pos_v  = r.pos;
             return *this;
         }
+        iterator operator++(int) { auto t = *this; ++(*this); return t; }
 
-        const_iterator operator++(int) {
-            auto tmp = *this;
-            ++(*this);
-            return tmp;
-        }
-
-        const_iterator& operator--() {
-            auto r = is_valid_v ? parent_v->iter_prev(ukey_v)
-                                : parent_v->iter_last();
-            ukey_v     = r.key;
-            value_v    = r.value;
-            is_valid_v = r.found;
+        iterator& operator--() {
+            if (!leaf_v) {
+                auto r = impl_v->last_pos();
+                leaf_v = r.node; pos_v = r.pos;
+            } else {
+                auto r = impl_v->prev_pos(leaf_v, pos_v);
+                leaf_v = r.node; pos_v = r.pos;
+            }
             return *this;
         }
+        iterator operator--(int) { auto t = *this; --(*this); return t; }
 
-        const_iterator operator--(int) {
-            auto tmp = *this;
-            --(*this);
-            return tmp;
+        bool operator==(const iterator& o) const noexcept {
+            return leaf_v == o.leaf_v && pos_v == o.pos_v;
         }
-
-        bool operator==(const const_iterator& o) const noexcept {
-            if (!is_valid_v && !o.is_valid_v) return true;
-            if (is_valid_v != o.is_valid_v) return false;
-            return ukey_v == o.ukey_v;
-        }
-
-        bool operator!=(const const_iterator& o) const noexcept {
+        bool operator!=(const iterator& o) const noexcept {
             return !(*this == o);
         }
     };
 
-    using iterator               = const_iterator;
-    using const_reverse_iterator = std::reverse_iterator<const_iterator>;
-    using reverse_iterator       = const_reverse_iterator;
+    using const_iterator         = iterator;
+    using reverse_iterator       = std::reverse_iterator<iterator>;
+    using const_reverse_iterator = reverse_iterator;
 
     // ==================================================================
     // Construction / Destruction
@@ -152,7 +143,7 @@ public:
     friend void swap(kntrie& a, kntrie& b) noexcept { a.swap(b); }
 
     // ==================================================================
-    // Size
+    // Capacity
     // ==================================================================
 
     [[nodiscard]] bool      empty() const noexcept { return impl_.empty(); }
@@ -165,68 +156,47 @@ public:
     }
 
     // ==================================================================
-    // Modifiers
+    // Element access
+    // ==================================================================
+
+    VALUE& at(const KEY& key) {
+        auto r = impl_.find_with_pos(to_unsigned(key));
+        if (!r.found) throw std::out_of_range("kntrie::at");
+        return impl_t::value_ref_at_pos(r.node, r.pos);
+    }
+    const VALUE& at(const KEY& key) const {
+        auto r = impl_.find_with_pos(to_unsigned(key));
+        if (!r.found) throw std::out_of_range("kntrie::at");
+        return impl_t::value_cref_at_pos(r.node, r.pos);
+    }
+
+    VALUE& operator[](const KEY& key) {
+        auto r = impl_.insert_with_pos(to_unsigned(key), VALUE{});
+        return impl_t::value_ref_at_pos(r.leaf, r.pos);
+    }
+
+    // ==================================================================
+    // Modifiers — insert family
     // ==================================================================
 
     std::pair<iterator, bool> insert(const value_type& kv) {
-        UK uk = to_unsigned(kv.first);
-        auto r = impl_.insert_ex(uk, kv.second);
-        if (r.inserted) return {const_iterator(&impl_, uk, kv.second, true), true};
-        return {const_iterator(&impl_, uk, r.existing ? *r.existing : kv.second, true), false};
+        auto r = impl_.insert_with_pos(to_unsigned(kv.first), kv.second);
+        return {iterator(&impl_, r.leaf, r.pos), r.inserted};
     }
+
     std::pair<iterator, bool> insert(const KEY& key, const VALUE& value) {
-        UK uk = to_unsigned(key);
-        auto r = impl_.insert_ex(uk, value);
-        if (r.inserted) return {const_iterator(&impl_, uk, value, true), true};
-        return {const_iterator(&impl_, uk, r.existing ? *r.existing : value, true), false};
-    }
-    // Returns {was_new, was_assigned} — differs from std::map which returns
-    // {iterator, bool}. Snapshot iterators make returning an iterator here
-    // incorrect (it would be immediately stale).
-    std::pair<bool, bool> insert_or_assign(const KEY& key, const VALUE& value) {
-        return impl_.insert_or_assign(to_unsigned(key), value);
-    }
-    std::pair<bool, bool> assign(const KEY& key, const VALUE& value) {
-        return impl_.assign(to_unsigned(key), value);
+        auto r = impl_.insert_with_pos(to_unsigned(key), value);
+        return {iterator(&impl_, r.leaf, r.pos), r.inserted};
     }
 
-    // Single-walk read-modify-write with dup propagation.
-    // fn is void(VALUE&) — modifies the value in place.
-    // Returns true if key existed and was modified.
-    template<typename F>
-    bool modify(const KEY& key, F&& fn) {
-        return impl_.modify_existing(to_unsigned(key), [&fn](auto& slot) {
-            fn(reinterpret_cast<VALUE&>(slot));
-        });
+    std::pair<iterator, bool> insert(value_type&& kv) {
+        auto r = impl_.insert_with_pos(to_unsigned(kv.first), std::move(kv.second));
+        return {iterator(&impl_, r.leaf, r.pos), r.inserted};
     }
 
-    // With default: if key exists, apply fn(value&), return true.
-    // If missing, insert default_val as-is, return false.
-    // Single walk — fn is never called on the default.
-    template<typename F>
-    bool modify(const KEY& key, F&& fn, const VALUE& default_val) {
-        return impl_.modify_or_insert(to_unsigned(key), [&fn](auto& slot) {
-            fn(reinterpret_cast<VALUE&>(slot));
-        }, default_val);
+    iterator insert(const_iterator, const value_type& kv) {
+        return insert(kv).first;
     }
-
-    template<typename... Args>
-    std::pair<iterator, bool> emplace(Args&&... args) {
-        value_type kv(std::forward<Args>(args)...);
-        return insert(kv);
-    }
-
-    // try_emplace: INSERT=true, ASSIGN=false — same as insert
-    template<typename... Args>
-    std::pair<iterator, bool> try_emplace(const KEY& key, Args&&... args) {
-        VALUE v(std::forward<Args>(args)...);
-        UK uk = to_unsigned(key);
-        auto r = impl_.insert_ex(uk, v);
-        if (r.inserted) return {const_iterator(&impl_, uk, v, true), true};
-        return {const_iterator(&impl_, uk, *r.existing, true), false};
-    }
-
-    iterator insert(const_iterator, const value_type& kv) { return insert(kv).first; }
 
     template<typename InputIt>
     requires (!std::is_integral_v<InputIt>)
@@ -234,118 +204,136 @@ public:
         for (; first != last; ++first) insert(*first);
     }
 
-    void clear() noexcept { impl_.clear(); }
-    size_type erase(const KEY& key) { return impl_.erase(to_unsigned(key)) ? 1 : 0; }
+    void insert(std::initializer_list<value_type> il) {
+        for (auto& kv : il) insert(kv);
+    }
 
-    iterator erase(const_iterator pos) {
-        KEY k = pos.key();
-        auto next = pos;
-        ++next;
-        impl_.erase(to_unsigned(k));
+    std::pair<iterator, bool> insert_or_assign(const KEY& key, const VALUE& value) {
+        auto r = impl_.upsert_with_pos(to_unsigned(key), value);
+        return {iterator(&impl_, r.leaf, r.pos), r.inserted};
+    }
+
+    template<typename... Args>
+    std::pair<iterator, bool> emplace(Args&&... args) {
+        value_type kv(std::forward<Args>(args)...);
+        return insert(std::move(kv));
+    }
+
+    template<typename... Args>
+    std::pair<iterator, bool> try_emplace(const KEY& key, Args&&... args) {
+        VALUE v(std::forward<Args>(args)...);
+        auto r = impl_.insert_with_pos(to_unsigned(key), std::move(v));
+        return {iterator(&impl_, r.leaf, r.pos), r.inserted};
+    }
+
+    // ==================================================================
+    // Modifiers — erase
+    // ==================================================================
+
+    size_type erase(const KEY& key) {
+        return impl_.erase(to_unsigned(key)) ? 1 : 0;
+    }
+
+    iterator erase(iterator pos) {
+        auto next = pos; ++next;
+        impl_.erase_at(pos.leaf_v, pos.pos_v);
         return next;
     }
 
-    iterator erase(const_iterator first, const_iterator last) {
-        while (first != last) {
-            KEY k = first.key();
-            ++first;
-            impl_.erase(to_unsigned(k));
-        }
+    iterator erase(iterator first, iterator last) {
+        while (first != last) first = erase(first);
         return last;
     }
 
-    // Single-walk conditional erase: find key, test fn(const VALUE&),
-    // erase only if predicate returns true.
-    // Returns true if erased, false if not found or predicate failed.
-    template<typename F>
-    bool erase_when(const KEY& key, F&& fn) {
-        return impl_.erase_when(to_unsigned(key), [&fn](const auto& slot) {
-            return fn(reinterpret_cast<const VALUE&>(slot));
-        });
-    }
+    void clear() noexcept { impl_.clear(); }
 
     // ==================================================================
     // Lookup
     // ==================================================================
 
-    bool contains(const KEY& key) const noexcept { return impl_.contains(to_unsigned(key)); }
-    size_type count(const KEY& key) const noexcept { return contains(key) ? 1 : 0; }
+    bool contains(const KEY& key) const noexcept {
+        return impl_.contains(to_unsigned(key));
+    }
+    size_type count(const KEY& key) const noexcept {
+        return contains(key) ? 1 : 0;
+    }
 
-    // at() is intentionally absent. The kntrie stores values in compact nodes
-    // with dup-slot padding — multiple physical copies of each value exist for
-    // in-place mutation. Returning VALUE& would allow writes that update one
-    // copy but not the others, corrupting the dup invariant. Use find()
-    // (returns snapshot iterator) or operator[] for writes.
+    iterator find(const KEY& key) {
+        auto r = impl_.find_with_pos(to_unsigned(key));
+        if (!r.found) return end();
+        return iterator(&impl_, r.node, r.pos);
+    }
+    const_iterator find(const KEY& key) const {
+        auto r = impl_.find_with_pos(to_unsigned(key));
+        if (!r.found) return end();
+        return const_iterator(const_cast<impl_t*>(&impl_), r.node, r.pos);
+    }
+
+    iterator lower_bound(const KEY& key) {
+        auto r = impl_.find_with_pos(to_unsigned(key));
+        if (r.found) return iterator(&impl_, r.node, r.pos);
+        // Key not found — next entry is lower_bound
+        // Need to find next. Use find_with_pos miss then advance.
+        // For now: linear scan from begin (correct but slow for miss).
+        // TODO: add find_next_pos to impl for single-walk lower_bound on miss.
+        auto it = begin();
+        UK uk = to_unsigned(key);
+        while (it != end() && to_unsigned((*it).first) < uk) ++it;
+        return it;
+    }
+
+    iterator upper_bound(const KEY& key) {
+        auto it = lower_bound(key);
+        if (it != end() && (*it).first == key) ++it;
+        return it;
+    }
+
+    std::pair<iterator, iterator> equal_range(const KEY& key) {
+        return {lower_bound(key), upper_bound(key)};
+    }
 
     // ==================================================================
-    // value_proxy — returned by operator[], routes writes through insert
+    // Observers
     // ==================================================================
 
-    class value_proxy {
-        friend class kntrie;
-        kntrie& trie_r;
-        UK      key_v;
-        value_proxy(kntrie& t, UK k) : trie_r(t), key_v(k) {}
-    public:
-        value_proxy& operator=(const VALUE& v) {
-            trie_r.impl_.insert_or_assign(key_v, v);
-            return *this;
-        }
-        operator VALUE() const {
-            const VALUE* p = trie_r.impl_.find_value(key_v);
-            if (p) return *p;
-            trie_r.impl_.insert(key_v, VALUE{});
-            return *trie_r.impl_.find_value(key_v);
+    struct key_compare {
+        bool operator()(const KEY& a, const KEY& b) const noexcept {
+            return (static_cast<UK>(a) ^ SIGN_BIT) < (static_cast<UK>(b) ^ SIGN_BIT);
         }
     };
+    key_compare key_comp() const noexcept { return {}; }
 
-    value_proxy operator[](const KEY& key) {
-        return value_proxy{*this, to_unsigned(key)};
-    }
+    struct value_compare {
+        bool operator()(const value_type& a, const value_type& b) const noexcept {
+            return key_compare{}(a.first, b.first);
+        }
+    };
+    value_compare value_comp() const noexcept { return {}; }
 
     // ==================================================================
     // Iterators
     // ==================================================================
 
+    iterator begin() noexcept {
+        return iterator(&impl_, impl_.first_pos());
+    }
+    iterator end() noexcept {
+        return iterator(&impl_, nullptr, 0);
+    }
     const_iterator begin() const noexcept {
-        return const_iterator::from_result(&impl_, impl_.iter_first());
+        return const_iterator(const_cast<impl_t*>(&impl_),
+                              const_cast<impl_t&>(impl_).first_pos());
     }
     const_iterator end() const noexcept {
-        const_iterator it;
-        it.parent_v = &impl_;
-        return it;
+        return const_iterator(const_cast<impl_t*>(&impl_), nullptr, 0);
     }
     const_iterator cbegin() const noexcept { return begin(); }
     const_iterator cend()   const noexcept { return end(); }
 
-    const_reverse_iterator rbegin()  const noexcept { return const_reverse_iterator(end()); }
-    const_reverse_iterator rend()    const noexcept { return const_reverse_iterator(begin()); }
-    const_reverse_iterator crbegin() const noexcept { return rbegin(); }
-    const_reverse_iterator crend()   const noexcept { return rend(); }
-
-    const_iterator find(const KEY& key) const noexcept {
-        UK uk = to_unsigned(key);
-        const VALUE* v = impl_.find_value(uk);
-        if (!v) return end();
-        return const_iterator(&impl_, uk, *v, true);
-    }
-
-    const_iterator lower_bound(const KEY& k) const noexcept {
-        UK uk = to_unsigned(k);
-        const VALUE* v = impl_.find_value(uk);
-        if (v) return const_iterator(&impl_, uk, *v, true);
-        auto r = impl_.iter_next(uk);
-        return const_iterator::from_result(&impl_, r);
-    }
-
-    const_iterator upper_bound(const KEY& k) const noexcept {
-        auto r = impl_.iter_next(to_unsigned(k));
-        return const_iterator::from_result(&impl_, r);
-    }
-
-    std::pair<const_iterator, const_iterator> equal_range(const KEY& k) const noexcept {
-        return {lower_bound(k), upper_bound(k)};
-    }
+    reverse_iterator rbegin()  noexcept { return reverse_iterator(end()); }
+    reverse_iterator rend()    noexcept { return reverse_iterator(begin()); }
+    const_reverse_iterator crbegin() const noexcept { return const_reverse_iterator(end()); }
+    const_reverse_iterator crend()   const noexcept { return const_reverse_iterator(begin()); }
 
     // ==================================================================
     // Debug / Stats
@@ -359,8 +347,6 @@ public:
     const impl_t& impl() const noexcept { return impl_; }
 
 private:
-    const VALUE* find_value(const KEY& key) const noexcept { return impl_.find_value(to_unsigned(key)); }
-
     impl_t impl_;
 };
 

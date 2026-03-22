@@ -152,14 +152,133 @@ struct kntrie_ops {
             set_find_last<VALUE>(node, &BO::find_last_fn_bitmap);
         } else if (nk_bits <= U16_BITS) {
             using CO = compact_ops<uint16_t, VALUE, ALLOC>;
-            CO::set_leaf_fns(node, get_header(node)->total_slots(), has_skip);
+            CO::set_leaf_fns(node, has_skip);
         } else if (nk_bits <= U32_BITS) {
             using CO = compact_ops<uint32_t, VALUE, ALLOC>;
-            CO::set_leaf_fns(node, get_header(node)->total_slots(), has_skip);
+            CO::set_leaf_fns(node, has_skip);
         } else {
             using CO = compact_ops<uint64_t, VALUE, ALLOC>;
-            CO::set_leaf_fns(node, get_header(node)->total_slots(), has_skip);
+            CO::set_leaf_fns(node, has_skip);
         }
+    }
+
+    // ==================================================================
+    // find_pos_for_leaf — runtime NK dispatch, returns {leaf*, pos, found}
+    // ==================================================================
+
+    static leaf_pos_t find_pos_for_leaf(uint64_t* node, uint64_t ik) noexcept {
+        depth_t d = get_depth(node);
+        uint8_t nk_bits = U64_BITS - d.shift;
+        if (nk_bits <= U8_BITS) {
+            return BO::bitmap_find_pos(node, ik);
+        } else if (nk_bits <= U16_BITS) {
+            return compact_ops<uint16_t, VALUE, ALLOC>::find_pos(node, ik);
+        } else if (nk_bits <= U32_BITS) {
+            return compact_ops<uint32_t, VALUE, ALLOC>::find_pos(node, ik);
+        } else {
+            return compact_ops<uint64_t, VALUE, ALLOC>::find_pos(node, ik);
+        }
+    }
+
+    // find_next_pos_for_leaf — first entry > ik at leaf, runtime dispatch
+    static leaf_pos_t find_next_pos_for_leaf(uint64_t* node, uint64_t ik) noexcept {
+        depth_t d = get_depth(node);
+        uint8_t nk_bits = U64_BITS - d.shift;
+        if (nk_bits <= U8_BITS) {
+            return BO::bitmap_find_next_pos(node, ik);
+        } else if (nk_bits <= U16_BITS) {
+            return compact_ops<uint16_t, VALUE, ALLOC>::find_next_pos(node, ik);
+        } else if (nk_bits <= U32_BITS) {
+            return compact_ops<uint32_t, VALUE, ALLOC>::find_next_pos(node, ik);
+        } else {
+            return compact_ops<uint64_t, VALUE, ALLOC>::find_next_pos(node, ik);
+        }
+    }
+
+    // find_ge_pos_for_leaf — first entry >= ik at leaf, runtime dispatch
+    static leaf_pos_t find_ge_pos_for_leaf(uint64_t* node, uint64_t ik) noexcept {
+        depth_t d = get_depth(node);
+        uint8_t nk_bits = U64_BITS - d.shift;
+        if (nk_bits <= U8_BITS) {
+            return BO::bitmap_find_ge_pos(node, ik);
+        } else if (nk_bits <= U16_BITS) {
+            return compact_ops<uint16_t, VALUE, ALLOC>::find_ge_pos(node, ik);
+        } else if (nk_bits <= U32_BITS) {
+            return compact_ops<uint32_t, VALUE, ALLOC>::find_ge_pos(node, ik);
+        } else {
+            return compact_ops<uint64_t, VALUE, ALLOC>::find_ge_pos(node, ik);
+        }
+    }
+
+    // find_prev_pos_for_leaf — last entry < ik at leaf, runtime dispatch
+    static leaf_pos_t find_prev_pos_for_leaf(uint64_t* node, uint64_t ik) noexcept {
+        depth_t d = get_depth(node);
+        uint8_t nk_bits = U64_BITS - d.shift;
+        if (nk_bits <= U8_BITS) {
+            return BO::bitmap_find_prev_pos(node, ik);
+        } else if (nk_bits <= U16_BITS) {
+            return compact_ops<uint16_t, VALUE, ALLOC>::find_prev_pos(node, ik);
+        } else if (nk_bits <= U32_BITS) {
+            return compact_ops<uint32_t, VALUE, ALLOC>::find_prev_pos(node, ik);
+        } else {
+            return compact_ops<uint64_t, VALUE, ALLOC>::find_prev_pos(node, ik);
+        }
+    }
+
+    // ==================================================================
+    // reconstruct_ik — rebuild full u64 IK from leaf + position
+    // ==================================================================
+
+    static uint64_t reconstruct_ik(const uint64_t* node, uint16_t pos) noexcept {
+        depth_t d = get_depth(node);
+        uint64_t pfx = leaf_prefix(node);
+        constexpr size_t hs = LEAF_HEADER_U64;
+        uint8_t nk_bits = U64_BITS - d.shift;
+        if (nk_bits <= U8_BITS) {
+            // bitmap leaf — pos is the bit index (byte value)
+            return d.to_ik(pfx, static_cast<uint64_t>(pos));
+        } else if (nk_bits <= U16_BITS) {
+            auto suf = reinterpret_cast<const uint16_t*>(node + hs)[pos];
+            return d.to_ik(pfx, static_cast<uint64_t>(suf));
+        } else if (nk_bits <= U32_BITS) {
+            auto suf = reinterpret_cast<const uint32_t*>(node + hs)[pos];
+            return d.to_ik(pfx, static_cast<uint64_t>(suf));
+        } else {
+            auto suf = reinterpret_cast<const uint64_t*>(node + hs)[pos];
+            return d.to_ik(pfx, suf);
+        }
+    }
+
+    // ==================================================================
+    // value_ref_at — mutable VALUE& from leaf + pos for live iterators.
+    // For bitmap leaves, pos is the byte value; slot computed via popcount.
+    // ==================================================================
+
+    static VALUE& value_ref_at(uint64_t* node, uint16_t pos) noexcept {
+        depth_t d = get_depth(node);
+        constexpr size_t hs = LEAF_HEADER_U64;
+        uint8_t nk_bits = U64_BITS - d.shift;
+        if (nk_bits <= U8_BITS) {
+            // bitmap leaf: pos is byte value, compute slot
+            int slot = BO::bm(node, hs).template find_slot<slot_mode::FAST_EXIT>(
+                static_cast<uint8_t>(pos));
+            return BO::bl_val_ref_at(node, hs, slot);
+        }
+        unsigned entries = get_header(node)->entries();
+        if (nk_bits <= U16_BITS) {
+            return *reinterpret_cast<VALUE*>(
+                &compact_ops<uint16_t, VALUE, ALLOC>::vals_mut(node, entries, hs)[pos]);
+        } else if (nk_bits <= U32_BITS) {
+            return *reinterpret_cast<VALUE*>(
+                &compact_ops<uint32_t, VALUE, ALLOC>::vals_mut(node, entries, hs)[pos]);
+        } else {
+            return *reinterpret_cast<VALUE*>(
+                &compact_ops<uint64_t, VALUE, ALLOC>::vals_mut(node, entries, hs)[pos]);
+        }
+    }
+
+    static const VALUE& value_cref_at(const uint64_t* node, uint16_t pos) noexcept {
+        return value_ref_at(const_cast<uint64_t*>(node), pos);
     }
 
     // ==================================================================
@@ -652,222 +771,6 @@ struct kntrie_ops {
         }
         return result;
     }
-
-
-    // ==================================================================
-    // Modify — single-walk read-modify-write with dup propagation
-    //
-    // fn is void(VALUE&). modify_node handles hit-only (returns false
-    // on miss). modify_or_insert_node handles both hit (apply fn) and
-    // miss (insert pre-computed value) in a single descent.
-    // ==================================================================
-
-    template<typename F>
-    static bool modify_node(uint64_t ptr, uint64_t ik,
-                            uint64_t shifted, uint8_t depth,
-                            F&& fn) {
-        // SENTINEL
-        if (ptr == BO::SENTINEL_TAGGED) [[unlikely]]
-            return false;
-
-        // LEAF
-        if (ptr & LEAF_BIT) [[unlikely]] {
-            uint64_t* node = untag_leaf_mut(ptr);
-            auto* hdr = get_header(node);
-            uint8_t skip = hdr->skip();
-
-            uint64_t pfx_shifted = leaf_prefix(node) << (CHAR_BIT * depth);
-            for (uint8_t pos = 0; pos < skip; ++pos) {
-                uint8_t expected = static_cast<uint8_t>(shifted >> U64_TOP_BYTE_SHIFT);
-                uint8_t actual = static_cast<uint8_t>(pfx_shifted >> U64_TOP_BYTE_SHIFT);
-                if (expected != actual) [[unlikely]]
-                    return false;
-                shifted <<= CHAR_BIT;
-                pfx_shifted <<= CHAR_BIT;
-                depth++;
-            }
-
-            return depth_switch(depth, [&]<int BITS>() {
-                return leaf_modify<BITS>(node, hdr, ik, std::forward<F>(fn));
-            });
-        }
-
-        // BITMASK
-        uint64_t* node = bm_to_node(ptr);
-        auto* hdr = get_header(node);
-        uint8_t sc = hdr->skip();
-
-        for (uint8_t pos = 0; pos < sc; ++pos) {
-            uint8_t expected = static_cast<uint8_t>(shifted >> U64_TOP_BYTE_SHIFT);
-            uint8_t actual = BO::skip_byte(node, pos);
-            if (expected != actual) [[unlikely]]
-                return false;
-            shifted <<= CHAR_BIT;
-            depth++;
-        }
-
-        uint8_t ti = static_cast<uint8_t>(shifted >> U64_TOP_BYTE_SHIFT);
-
-        typename BO::child_lookup cl;
-        if (sc > 0) [[unlikely]]
-            cl = BO::chain_lookup(node, sc, ti);
-        else
-            cl = BO::lookup(node, ti);
-
-        if (!cl.found) [[unlikely]]
-            return false;
-
-        return modify_node(cl.child, ik, shifted << CHAR_BIT, depth + 1,
-                           std::forward<F>(fn));
-    }
-
-    // --- Single-walk modify-or-insert: on hit apply fn(value&),
-    //     on miss insert default_val directly. fn is never called on miss.
-    template<typename F>
-    static insert_result_t modify_or_insert_node(
-            uint64_t ptr, uint64_t ik, uint64_t shifted, uint8_t depth,
-            F&& fn, VST default_sv, BLD& bld) {
-
-        // SENTINEL → insert default
-        if (ptr == BO::SENTINEL_TAGGED) [[unlikely]] {
-            auto tagged = depth_switch(depth, [&]<int BITS>() {
-                return tag_leaf(make_single_leaf<BITS>(ik, default_sv, bld));
-            });
-            return {tagged, true, false};
-        }
-
-        // LEAF
-        if (ptr & LEAF_BIT) [[unlikely]] {
-            uint64_t* node = untag_leaf_mut(ptr);
-            auto* hdr = get_header(node);
-            uint8_t skip = hdr->skip();
-
-            uint64_t pfx_shifted = leaf_prefix(node) << (CHAR_BIT * depth);
-            for (uint8_t pos = 0; pos < skip; ++pos) {
-                uint8_t expected = static_cast<uint8_t>(shifted >> U64_TOP_BYTE_SHIFT);
-                uint8_t actual = static_cast<uint8_t>(pfx_shifted >> U64_TOP_BYTE_SHIFT);
-                if (expected != actual) [[unlikely]] {
-                    auto tagged = depth_switch(depth, [&]<int BITS>() -> uint64_t {
-                        if constexpr (BITS > U8_BITS)
-                            return split_on_prefix<BITS>(node, hdr, ik, default_sv,
-                                                          skip, pos, bld);
-                        else
-                            std::unreachable();
-                    });
-                    return {tagged, true, false};
-                }
-                shifted <<= CHAR_BIT;
-                pfx_shifted <<= CHAR_BIT;
-                depth++;
-            }
-
-            return depth_switch(depth, [&]<int BITS>() {
-                return leaf_modify_or_insert<BITS>(
-                    node, hdr, ik, std::forward<F>(fn), default_sv, bld);
-            });
-        }
-
-        // BITMASK
-        uint64_t* node = bm_to_node(ptr);
-        auto* hdr = get_header(node);
-        uint8_t sc = hdr->skip();
-
-        for (uint8_t pos = 0; pos < sc; ++pos) {
-            uint8_t expected = static_cast<uint8_t>(shifted >> U64_TOP_BYTE_SHIFT);
-            uint8_t actual = BO::skip_byte(node, pos);
-            if (expected != actual) [[unlikely]] {
-                auto tagged = depth_switch(depth, [&]<int BITS>() {
-                    return split_skip_at<BITS>(node, hdr, sc, pos,
-                                                ik, default_sv, bld);
-                });
-                return {tagged, true, false};
-            }
-            shifted <<= CHAR_BIT;
-            depth++;
-        }
-
-        uint8_t ti = static_cast<uint8_t>(shifted >> U64_TOP_BYTE_SHIFT);
-
-        typename BO::child_lookup cl;
-        if (sc > 0) [[unlikely]]
-            cl = BO::chain_lookup(node, sc, ti);
-        else
-            cl = BO::lookup(node, ti);
-
-        if (!cl.found) [[unlikely]] {
-            auto leaf_tagged = depth_switch(depth + 1, [&]<int BITS>() {
-                return tag_leaf(make_single_leaf<BITS>(ik, default_sv, bld));
-            });
-            uint64_t* nn;
-            if (sc > 0) [[unlikely]]
-                nn = BO::chain_add_child(node, hdr, sc, ti, leaf_tagged, bld);
-            else
-                nn = BO::add_child(node, hdr, ti, leaf_tagged, bld);
-            inc_descendants(nn, get_header(nn));
-            return {tag_bitmask(nn), true, false};
-        }
-
-        auto cr = modify_or_insert_node(
-            cl.child, ik, shifted << CHAR_BIT, depth + 1,
-            std::forward<F>(fn), default_sv, bld);
-
-        if (cr.tagged_ptr != cl.child) [[unlikely]] {
-            if (sc > 0) [[unlikely]]
-                BO::chain_set_child(node, sc, cl.slot, cr.tagged_ptr);
-            else
-                BO::set_child(node, cl.slot, cr.tagged_ptr);
-        }
-        if (cr.inserted) [[likely]]
-            inc_descendants(node, hdr);
-        return {tag_bitmask(node), cr.inserted, false};
-    }
-
-    // --- Leaf modify: hit-only ---
-    template<int BITS, typename F>
-    static bool leaf_modify(uint64_t* node, node_header_t* hdr,
-                            uint64_t ik, F&& fn) {
-        using NK = nk_for_bits_t<BITS>;
-        NK suffix = leaf_ops_t<BITS>::template to_suffix<BITS>(ik);
-
-        if constexpr (sizeof(NK) == sizeof(uint8_t)) {
-            return BO::bitmap_modify(node, static_cast<uint8_t>(suffix),
-                                     std::forward<F>(fn));
-        } else {
-            using CO = compact_ops<NK, VALUE, ALLOC>;
-            return CO::modify_existing(node, hdr, suffix,
-                                       std::forward<F>(fn));
-        }
-    }
-
-    // --- Leaf modify-or-insert: try modify, insert default on miss ---
-    template<int BITS, typename F>
-    static insert_result_t leaf_modify_or_insert(
-            uint64_t* node, node_header_t* hdr, uint64_t ik,
-            F&& fn, VST default_sv, BLD& bld) {
-        using NK = nk_for_bits_t<BITS>;
-        NK suffix = leaf_ops_t<BITS>::template to_suffix<BITS>(ik);
-
-        if constexpr (sizeof(NK) == sizeof(uint8_t)) {
-            if (BO::bitmap_modify(node, static_cast<uint8_t>(suffix),
-                                  std::forward<F>(fn)))
-                return {tag_leaf(node), false, false};
-            return BO::template bitmap_insert<true, false>(
-                node, static_cast<uint8_t>(suffix), default_sv, bld);
-        } else {
-            using CO = compact_ops<NK, VALUE, ALLOC>;
-            if (CO::modify_existing(node, hdr, suffix, std::forward<F>(fn)))
-                return {tag_leaf(node), false, false};
-            insert_result_t result = CO::template insert<true, false>(
-                node, hdr, suffix, default_sv, bld);
-            if (result.needs_split) [[unlikely]] {
-                return {convert_to_bitmask_tagged<BITS>(node, hdr, ik, default_sv, bld),
-                        true, false};
-            }
-            return result;
-        }
-    }
-
-
     // ==================================================================
     // Erase — runtime-recursive, depth-based
     // ==================================================================
@@ -1009,148 +912,6 @@ struct kntrie_ops {
             return CO::erase(node, hdr, suffix, bld);
         }
     }
-
-    // ==================================================================
-    // Conditional erase — same descent as erase_node, predicate gate
-    // at the leaf. fn is bool(const VALUE&), erase only if true.
-    // ==================================================================
-
-    template<typename F>
-    static erase_result_t erase_when_node(uint64_t ptr, uint64_t ik,
-                                           uint64_t shifted, uint8_t depth,
-                                           F&& fn, BLD& bld) {
-        if (ptr == BO::SENTINEL_TAGGED) [[unlikely]]
-            return {ptr, false, 0};
-
-        // LEAF
-        if (ptr & LEAF_BIT) [[unlikely]] {
-            uint64_t* node = untag_leaf_mut(ptr);
-            auto* hdr = get_header(node);
-            uint8_t skip = hdr->skip();
-
-            uint64_t pfx_shifted = leaf_prefix(node) << (CHAR_BIT * depth);
-            for (uint8_t pos = 0; pos < skip; ++pos) {
-                uint8_t expected = static_cast<uint8_t>(shifted >> U64_TOP_BYTE_SHIFT);
-                uint8_t actual = static_cast<uint8_t>(pfx_shifted >> U64_TOP_BYTE_SHIFT);
-                if (expected != actual) [[unlikely]]
-                    return {tag_leaf(node), false, 0};
-                shifted <<= CHAR_BIT;
-                pfx_shifted <<= CHAR_BIT;
-                depth++;
-            }
-
-            return depth_switch(depth, [&]<int BITS>() {
-                return leaf_erase_when<BITS>(node, hdr, ik,
-                                             std::forward<F>(fn), bld);
-            });
-        }
-
-        // BITMASK — identical to erase_node
-        uint64_t* node = bm_to_node(ptr);
-        auto* hdr = get_header(node);
-        uint8_t sc = hdr->skip();
-
-        for (uint8_t pos = 0; pos < sc; ++pos) {
-            uint8_t expected = static_cast<uint8_t>(shifted >> U64_TOP_BYTE_SHIFT);
-            uint8_t actual = BO::skip_byte(node, pos);
-            if (expected != actual) [[unlikely]]
-                return {tag_bitmask(node), false, 0};
-            shifted <<= CHAR_BIT;
-            depth++;
-        }
-
-        uint8_t ti = static_cast<uint8_t>(shifted >> U64_TOP_BYTE_SHIFT);
-
-        typename BO::child_lookup cl;
-        if (sc > 0) [[unlikely]]
-            cl = BO::chain_lookup(node, sc, ti);
-        else
-            cl = BO::lookup(node, ti);
-
-        if (!cl.found) [[unlikely]]
-            return {tag_bitmask(node), false, 0};
-
-        auto cr = erase_when_node(cl.child, ik, shifted << CHAR_BIT,
-                                   depth + 1, std::forward<F>(fn), bld);
-
-        if (!cr.erased) [[unlikely]]
-            return {tag_bitmask(node), false, 0};
-
-        if (cr.tagged_ptr) [[likely]] {
-            if (cr.tagged_ptr != cl.child) [[unlikely]] {
-                if (sc > 0) [[unlikely]]
-                    BO::chain_set_child(node, sc, cl.slot, cr.tagged_ptr);
-                else
-                    BO::set_child(node, cl.slot, cr.tagged_ptr);
-            }
-            uint64_t exact = dec_descendants(node, hdr);
-            if (exact <= COMPACT_MAX) [[unlikely]] {
-                return depth_switch(depth, [&]<int BITS>() {
-                    return do_coalesce<BITS>(node, hdr, bld);
-                });
-            }
-            return {tag_bitmask(node), true, exact};
-        }
-
-        // Child fully erased
-        uint64_t* nn;
-        if (sc > 0) [[unlikely]]
-            nn = BO::chain_remove_child(node, hdr, sc, cl.slot, ti, bld);
-        else
-            nn = BO::remove_child(node, hdr, cl.slot, ti, bld);
-        if (!nn) [[unlikely]] return {0, true, 0};
-
-        hdr = get_header(nn);
-        unsigned nc = hdr->entries();
-        uint64_t exact = dec_descendants(nn, hdr);
-
-        if (nc == 1) [[unlikely]] {
-            typename BO::collapse_info ci;
-            if (sc > 0) [[unlikely]]
-                ci = BO::chain_collapse_info(nn, sc);
-            else
-                ci = BO::standalone_collapse_info(nn);
-            size_t nn_au64 = hdr->alloc_u64();
-
-            if (ci.sole_child & LEAF_BIT) {
-                uint64_t* leaf = untag_leaf_mut(ci.sole_child);
-                leaf = depth_switch(depth, [&]<int BITS>() {
-                    return prepend_skip<BITS>(leaf, ci.total_skip,
-                               leaf_prefix(leaf), bld);
-                });
-                bld.dealloc_node(nn, nn_au64);
-                return {tag_leaf(leaf), true, exact};
-            }
-            uint64_t* child_node = bm_to_node(ci.sole_child);
-            bld.dealloc_node(nn, nn_au64);
-            return {BO::wrap_in_chain(child_node, ci.bytes, ci.total_skip, bld),
-                    true, exact};
-        }
-
-        if (exact <= COMPACT_MAX) [[unlikely]] {
-            return depth_switch(depth, [&]<int BITS>() {
-                return do_coalesce<BITS>(nn, get_header(nn), bld);
-            });
-        }
-        return {tag_bitmask(nn), true, exact};
-    }
-
-    template<int BITS, typename F>
-    static erase_result_t leaf_erase_when(uint64_t* node, node_header_t* hdr,
-                                           uint64_t ik, F&& fn, BLD& bld) {
-        using NK = nk_for_bits_t<BITS>;
-        NK suffix = leaf_ops_t<BITS>::template to_suffix<BITS>(ik);
-
-        if constexpr (sizeof(NK) == sizeof(uint8_t)) {
-            return BO::bitmap_erase_when(node, static_cast<uint8_t>(suffix),
-                                         std::forward<F>(fn), bld);
-        } else {
-            using CO = compact_ops<NK, VALUE, ALLOC>;
-            return CO::erase_when(node, hdr, suffix,
-                                  std::forward<F>(fn), bld);
-        }
-    }
-
 
     // ==================================================================
     // Collect entries — all use typed NK, narrow at leaf
