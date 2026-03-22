@@ -65,7 +65,11 @@ constexpr auto LOWER_MAP = [] {
 using lower_char_map = char_map<LOWER_MAP>;
 ```
 
-**Character map requirements.** The character map is not required to be a bijection. A many-to-one map (e.g. case-insensitive mapping) causes distinct input keys to collide in the trie. This is the intended behavior for case-insensitive containers: `find("Hello")` and `find("hello")` resolve to the same entry. Iteration yields keys in their mapped (internal) form. The user is responsible for preserving the original key form if needed. A map that maps all 256 byte values to a single output byte is degenerate but not undefined — it produces a trie that behaves like a list sorted by key length.
+**Character map requirements.** The character map is not required to be a bijection. A many-to-one map (e.g. case-insensitive mapping) causes distinct input keys to collide in the trie. This is the intended behavior for case-insensitive containers: `find("Hello")` and `find("hello")` resolve to the same entry.
+
+**Key form on iteration.** Iteration yields keys in their mapped (internal) form, not the original form. For a case-insensitive map using `lower_char_map`, inserting `"Hello"` and then iterating returns `"hello"`. The user is responsible for preserving the original key form if needed.
+
+A map that maps all 256 byte values to a single output byte is degenerate but not undefined — it produces a trie that behaves like a list sorted by key length.
 
 **Creating a custom map.** A user defines a custom character map by constructing a 256-element array and wrapping it in `char_map`:
 
@@ -105,10 +109,12 @@ One shift, one mask, one array index. Branchless. The static constants are threa
 The compile-time booleans that drive all internal dispatch:
 
 ```
-IS_TRIVIAL     = trivially_copyable && sizeof <= 8    // A: true    B: false  C: false
+IS_TRIVIAL     = trivially_copyable                   // A: true    B: true   C: false
 IS_BITMAP      = std::is_same_v<VALUE, bool>          // A: false   B: true   C: false
-IS_INLINE      = !IS_BITMAP && IS_TRIVIAL             // A: true    B: false  C: false
+IS_INLINE      = !IS_BITMAP && IS_TRIVIAL && sizeof<=8 // A: true   B: false  C: false
 ```
+
+Bool is trivially copyable, so IS_TRIVIAL is true for category B. IS_INLINE is false because `!IS_BITMAP` gates it out, routing bool to the packed-bit storage path.
 
 All node code operates on `value_base_t` uniformly, where `value_base_t` is `VALUE` for category A, `uint64_t` for categories B and C.
 
@@ -146,11 +152,11 @@ All allocated nodes in the kstrie share a common 8-byte header at `node[0]`:
 |-------|---------|
 | `alloc_u64` | Allocation size in u64 units (set by allocator, not modified by node logic) |
 | `count` | For compact: entry count. For bitmask: child count in bitmap |
-| `flags` | Node type: `0` = compact, `FLAG_BITMASK` = bitmask |
+| `flags` | Bit 0: `FLAG_BITMASK` (bitmask node). Bit 2: `FLAG_HAS_SKIP` (node has skip prefix bytes). All-zeros = compact, no skip |
 | `skip` | Number of prefix bytes captured at this node (0–254) |
 | `slots_off` | Cached u64 offset from node start to the value slots region |
 
-The `flags` field distinguishes the two node types. A single bit test (`h.is_compact()` or `h.is_bitmap()`) determines the node type at any point in the code. There are no tagged pointers; the type is stored in the node itself.
+The `flags` field encodes the node type and skip presence. `is_compact()` / `is_bitmap()` tests bit 0. `has_skip()` tests bit 2, avoiding a read of the skip count on the hot read path when no skip is present. There are no tagged pointers; the type is stored in the node itself.
 
 `slots_off` is a cached value that allows the value region to be located in one addition: `node + slots_off`. This avoids recomputing the offset from the node layout on every value access. It is updated when the layout changes (grow, shrink, keysuffix shuffle).
 
@@ -223,11 +229,7 @@ At the default `COMPACT_KEYSUFFIX_LIMIT = 4096`, offset_type is `uint16_t` (2 by
 
 #### 3.2.1 Search
 
-Finding an entry in a compact node is a two-phase process. The first phase locates the candidate position using the first-byte array F. The second phase verifies the full suffix against the keysuffix region.
-
-**Phase 1: binary search on F.** Entries are sorted by `(F[i], tail)`. A binary search over the F array finds the range of entries matching the target's first byte. Because F is a dense byte array, this search touches minimal cache lines.
-
-**Phase 2: suffix comparison.** Within the range of entries sharing the same first byte, a linear scan compares each entry's full suffix (first byte + tail bytes from keysuffix) against the lookup key's remaining bytes. Each comparison reads F[i] as the first byte, then performs memcmp against B + O[i] for the remaining L[i] − 1 tail bytes. The O[] indirection into the contiguous keysuffix region preserves cache locality despite variable-length suffixes. The scan is short because entries sharing a first byte are typically few.
+**Integrated binary search.** Entries are sorted lexicographically by (F[i], tail). `find_pos` performs a standard binary search where each midpoint comparison first tests `F[m]` against the target's first byte. Because F is a dense byte array, these first-byte comparisons are cache-friendly. On a first-byte match — which is rare since few entries typically share a byte — the search follows the O[m] offset into the keysuffix region to memcmp the remaining tail bytes. The result is a single O(log N) search with no separate range-find or linear scan phase.
 
 For entries with `L[i] = 0` (end-of-string), the match succeeds only if the lookup key is also exhausted at this point.
 
@@ -342,7 +344,7 @@ Each bitmask node stores a `total_tail` value: the estimated total byte cost of 
 
 The total_tail is maintained incrementally. On insert, the delta propagates upward: the keysuffix delta from the compact leaf, plus one dispatch byte, plus the skip bytes at each bitmask level. On erase, the same values are subtracted.
 
-The collapse check is: `total_tail <= COMPACT_KEYSUFFIX_LIMIT`. If true, the subtree can fit in a single compact node's keysuffix region. This avoids trial collapses — walking an entire subtree only to discover it won't fit — which was a significant performance problem before this heuristic was introduced.
+The collapse check is: `total_tail <= COMPACT_KEYSUFFIX_LIMIT`. If true, the subtree is likely to fit in a single compact node's keysuffix region. This is a conservative estimate, not a guarantee; the actual collapse is attempted and abandoned if the collected keysuffix exceeds the limit. This avoids trial collapses — walking an entire subtree only to discover it won't fit — which was a significant performance problem before this heuristic was introduced.
 
 ### 3.4 Root
 
@@ -362,7 +364,7 @@ Find is the hot path. It descends from the root through bitmask nodes to a compa
 
 The outer loop tests each node's type. At a bitmask node, find first checks the skip prefix (if any). If the skip matches, it extracts the next byte from the key and dispatches through the bitmap. If the key is exhausted at a bitmask node (no more bytes to dispatch), find checks the EOS child. If the dispatched child is the sentinel, the key is absent.
 
-At a compact node, find performs the two-phase search described in section 3.2.1: binary search on F to find the first-byte range, then suffix comparison within that range.
+At a compact node, find performs the integrated binary search described in section 3.2.1: each midpoint tests the first byte, then the tail on match.
 
 The entire find path is a tight loop with no heap allocation. The loop body is:
 
@@ -392,7 +394,7 @@ On the unwind path, each bitmask node's `total_tail` is updated with the delta f
 
 ### 4.3 erase
 
-Erase descends through the trie, mirroring find. At a compact node, it locates the entry and returns a PENDING status with the node and position. The actual erasure is deferred to the parent, which calls `erase_in_place` to remove the entry according to the three cases described in section 3.2.4.
+Erase descends through the trie, mirroring find. At a compact node, it locates the entry and erases it in place according to the three cases described in section 3.2.4. The unwind path then checks whether to collapse, shrink, or remove an empty node.
 
 On the unwind path after a successful erase:
 
@@ -402,7 +404,7 @@ On the unwind path after a successful erase:
 
 **Collapse check.** At each bitmask node, the `total_tail` is decremented. If it drops to `COMPACT_KEYSUFFIX_LIMIT` or below, `collapse_to_compact` attempts to collapse the entire subtree into a single compact node. The collapse walks the subtree, collecting all entries into stack-local arrays (L, F, O, keysuffix, values), applies the sharing invariant to the collected entries, and builds a new compact node. If the collapsed keysuffix exceeds the limit (the heuristic was slightly off due to prefix length variations), the collapse is abandoned and the bitmask structure is retained.
 
-**Single-child bitmask.** If removing a child leaves a bitmask node with zero children and no EOS, it is freed.
+**Single-child bitmask.** If removing a child leaves a bitmask node with zero children and no EOS, it is freed. If it leaves exactly one child (one byte-child and no EOS, or no byte-children and only an EOS child), the bitmask node is replaced by its sole child with skip bytes merged: the bitmask's skip, the dispatch byte, and the child's own skip are concatenated into the child's new skip prefix.
 
 ### 4.4 find first / find last
 
@@ -420,7 +422,7 @@ Iterator advancement is the second-hottest path after find. `iter_next` finds th
 
 `iter_prev` is the mirror image: it checks the previous entry in the leaf, then walks back through the bitmap looking for the previous sibling, and descends to the maximum entry of that sibling's subtree.
 
-The key is reconstructed during descent. Each skip prefix and dispatch byte is tracked so that the full key is available when the target entry is reached.
+The key is reconstructed during descent. Each skip prefix and dispatch byte is tracked so that the full key is available when the target entry is reached. The reconstruction cost is proportional to the key's byte length, not the trie depth, because skip bytes at each level contribute their full length to the output.
 
 ### 4.6 modify
 
@@ -516,7 +518,7 @@ In practice, the effective depth is often much less than K because of three mech
 
 **Skip prefix capture** collapses levels where all keys in a subtree share common bytes. A subtree where 1000 URLs share the prefix "https://example.com/" captures that entire prefix in one comparison rather than 20 bitmask levels.
 
-**Compact leaf absorption** catches entire subtrees in a flat sorted array. When a subtree's total keysuffix byte cost is within `COMPACT_KEYSUFFIX_LIMIT`, it remains a compact leaf rather than being split into bitmask nodes. The search within that compact leaf is a binary search on first bytes followed by suffix comparison.
+**Compact leaf absorption** catches entire subtrees in a flat sorted array. When a subtree's total keysuffix byte cost is within `COMPACT_KEYSUFFIX_LIMIT`, it remains a compact leaf rather than being split into bitmask nodes. The search within that compact leaf is an integrated binary search over (first byte, tail) as described in §3.2.1.
 
 **Keysuffix sharing** reduces the effective size of compact leaves by storing shared prefixes only once. This allows more entries per leaf, which delays splits and reduces the total number of bitmask levels.
 

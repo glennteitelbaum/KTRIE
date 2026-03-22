@@ -14,7 +14,7 @@ This document describes the data structures, algorithms, and shared design conce
   - [2.2 Bitmaps](#22-bitmaps)
   - [2.3 Value Storage](#23-value-storage)
 - [3 Comparisons with Other Structures](#3-comparisons-with-other-structures)
-  - [3.1 HAT-trie / Burst Trie](#31-hat-trie--burst-trie)
+  - [3.1 HAT-trie](#31-hat-trie)
   - [3.2 ART (Adaptive Radix Tree)](#32-art-adaptive-radix-tree)
   - [3.3 Sorted Flat Array](#33-sorted-flat-array)
   - [3.4 absl::flat_hash_map](#34-abslflat_hash_map)
@@ -28,7 +28,7 @@ A TRIE (from "retrieval") is a tree structure where each node represents a porti
 
 This gives TRIEs a fundamental property that distinguishes them from comparison-based trees: lookup cost depends on the key's length, not the number of entries. A TRIE with 100 entries and a TRIE with 100 million entries traverse the same number of levels for the same key.
 
-The classic problems with TRIEs are well known. A naïve implementation that allocates a 256-entry child array at every level wastes enormous memory. Most slots are empty, especially near the leaves. Sparse levels dominate. The structure also suffers from pointer chasing: each level requires following a pointer to the next node, and those nodes are scattered across the heap with no cache locality guarantees. For small key populations, the overhead of multiple levels can exceed the cost of a flat sorted search. And for variable-depth TRIEs, the bookkeeping to know what type of node you're looking at, how deep you are, and when you've reached a leaf adds complexity at every step.
+The classic problems with TRIEs are well known. A naïve implementation that allocates a 256-entry child array at every level wastes enormous memory. Most slots are empty, especially near the leaves. Sparsely-occupied levels are the norm. The structure also suffers from pointer chasing: each level requires following a pointer to the next node, and those nodes are scattered across the heap with no cache locality guarantees. For small key populations, the overhead of multiple levels can exceed the cost of a flat sorted search. And for variable-depth TRIEs, the bookkeeping to know what type of node you're looking at, how deep you are, and when you've reached a leaf adds complexity at every step.
 
 ### 1.2 Binary Search
 
@@ -173,9 +173,9 @@ All dispatch is `if constexpr`; dead branches are eliminated at compile time. Th
 
 This section compares the KTRIE family against other indexed structures that serve similar use cases. The goal is honest positioning: where KTRIE wins, where it doesn't, and why.
 
-### 3.1 HAT-trie / Burst Trie
+### 3.1 HAT-trie
 
-A HAT-trie (Hash Array Mapped Trie) uses trie routing at upper levels and hash containers at the leaves. When a leaf's hash container exceeds a threshold, it "bursts" into trie nodes. The C++ implementations (hat-trie by Tessil, cedar) are well-regarded for string-keyed workloads.
+The HAT-trie (Askitis and Sinha, 2007) extends the burst trie (Heinz, Zobel, and Williams, 2002) with hash-based containers at the leaves. It uses trie routing at upper levels and hash containers at the leaves. When a leaf's hash container exceeds a threshold, it "bursts" into trie nodes. The C++ implementations (hat-trie by Tessil, cedar) are well-regarded for string-keyed workloads.
 
 **Point lookup.** HAT-trie leaves use hash lookup — O(1) expected per leaf access. KSTRIE compact leaves use binary search on first bytes plus suffix comparison — O(log E) where E is entries per leaf. For the common case of small leaves (< 100 entries), the difference is negligible. For large leaves, HAT-trie has an edge.
 

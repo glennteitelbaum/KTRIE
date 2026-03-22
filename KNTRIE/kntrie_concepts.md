@@ -49,7 +49,7 @@ All key types (`uint16_t`, `int32_t`, `uint64_t`, signed or unsigned) are transf
 r ^= 1ULL << (key_bits - 1);
 ```
 
-This maps `INT_MIN → 0`, `0 → 0x80000000`, `INT_MAX → 0xFFFFFFFF`, a monotonically increasing sequence that matches numeric order. The flip is its own inverse, so converting back is the same XOR.
+For `int32_t`, this maps `INT_MIN → 0`, `0 → 0x80000000`, `INT_MAX → 0xFFFFFFFF`, a monotonically increasing sequence that matches numeric order. The flip is its own inverse, so converting back is the same XOR.
 
 **Left-alignment into 64 bits.** After the sign flip (if signed), the key is shifted left so its most significant bit sits at bit 63:
 
@@ -113,7 +113,7 @@ The shared bitmap representation and popcount mechanics are described in [KTRIE 
 slot &= -int(bool(before & (1ULL << 63)));  // 0 if miss, 1-based if hit
 ```
 
-A miss produces slot index 0. Slot 0 in any child array holds `SENTINEL_TAGGED` (`LEAF_BIT | NOT_FOUND_BIT`), a pure tag value with no backing allocation. The find loop sees `LEAF_BIT`, exits the descent, then tests `NOT_FOUND_BIT` to detect the miss — no pointer dereference needed.
+A miss produces slot index 0. Slot 0 in any child array holds a sentinel tag — a pure tag with no backing allocation. The find loop sees the leaf bit, exits the descent, then tests the not-found bit to detect the miss — no pointer dereference needed.
 
 **UNFILTERED** (insertion position): Returns the count of set bits strictly before the target, giving the correct insertion point in the dense array.
 
@@ -273,13 +273,13 @@ The 7-u64 leaf header carries the `node_header_t`, 5 function pointers, and the 
 
 **Search** uses the branchless binary search described in [KTRIE Concepts](../ktrie_concepts.md). The power-of-2 slot count guarantees the required input constraint. Every compact leaf has `total_slots = bit_ceil(entries)` physical slots, padded with dup entries to fill the boundary. The minimum of 2 slots ensures count enters the loop as ≥ 2, so at least one comparison always executes.
 
-**Dup tombstone / padding strategy.** The power-of-two allocation means a compact leaf almost always has more physical slots than entries. Rather than leaving the extra space unused, the leaf fills it with **dup slots**, copies of adjacent real entries. These dups serve two purposes:
+**Dup-slot padding strategy.** The power-of-two allocation means a compact leaf almost always has more physical slots than entries. Rather than leaving the extra space unused, the leaf fills it with **dup slots**, copies of adjacent real entries. These dups serve two purposes:
 
 1. **In-place insert.** When a new key arrives and dups exist, one dup is consumed: the nearest dup to the insertion point is found, the intervening entries are shifted by one position to close the gap, and the new key is written into the freed slot. No reallocation.
 
 2. **In-place erase.** When a key is erased, its slot is overwritten with a copy of the neighboring key's value. This converts a real entry into a dup in O(1). No memmove of the remaining array.
 
-Dups are seeded by `seed_from_real_`, which distributes them evenly among real entries. When dups are available, the nearest dup to any insertion point is at most about `entries / dups` positions away, bounding the memmove cost. When no dups remain (`entries = total_slots`), the leaf must grow before inserting.
+The seeding pass distributes dups evenly among real entries. When dups are available, the nearest dup to any insertion point is at most about `entries / dups` positions away, bounding the memmove cost. When no dups remain (`entries = total_slots`), the leaf must grow before inserting.
 
 The dup count is never stored; it's always derived: `total_slots - entries`. This keeps the header clean and avoids any possibility of the stored count drifting from reality.
 
@@ -315,7 +315,7 @@ Bitmap256 leaves can appear at any depth where the remaining suffix is 8 bits, w
 
 The root of the kntrie ties all node types together. It is a single tagged pointer (`root_ptr_v`) that can reference any node type: the sentinel (when empty), a compact leaf (for small collections), or an internal node (for large collections that require BRANCH dispatch).
 
-Three additional fields manage the root's prefix:
+Two additional fields manage the root's prefix:
 
 - `root_prefix_v` (u64): The shared prefix bytes of all entries, left-aligned.
 - `root_skip_bits_v` (u8): Number of leading key bits captured as prefix (0, 8, 16, ..., 48). Stored in bits to eliminate a multiply on every find and iteration call.
@@ -459,7 +459,7 @@ Red-black trees guarantee O(log N) worst-case lookup, insert, and erase through 
 
 The fundamental costs are:
 
-**Memory.** Every entry costs ~72 bytes regardless of key or value size. A million uint64_t→uint64_t entries consume ~69 MB in `std::map` versus ~16 MB in kntrie, a 4.3× difference.
+**Memory.** Every entry costs ~72 bytes regardless of key or value size. A million uint64_t→uint64_t entries consume ~72 MB in `std::map` versus ~16 MB in kntrie, a ~4.5× difference.
 
 **Cache behavior.** Each comparison in a tree traversal follows a pointer to a separately-allocated node. These nodes are scattered across the heap in allocation order, not key order. At scale, nearly every level of the tree is a cache miss. A 20-level traversal in a million-entry map touches 20 random cache lines.
 
