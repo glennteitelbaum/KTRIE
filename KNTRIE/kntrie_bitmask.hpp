@@ -988,9 +988,11 @@ private:
     }
 
     // --- Shared: bitmap starts after header (1 or 2 u64s) ---
+public:
     static const bitmap_256_t& bm(const uint64_t* n, size_t header_size) noexcept {
         return *reinterpret_cast<const bitmap_256_t*>(n + header_size);
     }
+private:
     static bitmap_256_t& bm_mut(uint64_t* n, size_t header_size) noexcept {
         return *reinterpret_cast<bitmap_256_t*>(n + header_size);
     }

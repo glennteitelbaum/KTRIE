@@ -76,6 +76,11 @@ inline constexpr int ROOT_CONSUMED_BYTES = 2;          // 1 root dispatch byte +
 // --- Growth/shrink ---
 inline constexpr size_t SHRINK_FACTOR = 2;
 
+// Growth: allocate for GROW_NUMER/GROW_DENOM × current entries
+// to provide amortized headroom. 3/2 = 1.5× growth factor.
+inline constexpr size_t GROW_NUMER   = 3;
+inline constexpr size_t GROW_DENOM   = 2;
+
 // Pointer tagging: pointers are cast through std::uintptr_t (guaranteed
 // lossless by the standard) then widened to uint64_t. Bits 62-63 are used
 // as tag bits. This assumes userspace heap allocations do not set bits 62-63,

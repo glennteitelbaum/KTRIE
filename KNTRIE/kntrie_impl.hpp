@@ -278,11 +278,12 @@ public:
     }
 
     static VALUE& value_ref_at_pos(uint64_t* leaf, uint16_t pos) noexcept {
-        return OPS::value_ref_at(leaf, pos);
+        // OPS operates on NORM_V (normalized value); reinterpret to VALUE
+        return reinterpret_cast<VALUE&>(OPS::value_ref_at(leaf, pos));
     }
 
     static const VALUE& value_cref_at_pos(const uint64_t* leaf, uint16_t pos) noexcept {
-        return OPS::value_cref_at(leaf, pos);
+        return reinterpret_cast<const VALUE&>(OPS::value_cref_at(leaf, pos));
     }
 
 public:
