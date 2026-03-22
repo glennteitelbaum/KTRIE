@@ -140,16 +140,16 @@ struct kntrie_ops {
         if (nk_bits <= U8_BITS) {
             // bitmap
             if (has_skip) {
-                set_find_fn<VALUE>(node, &BO::template find_fn_bitmap<true>);
-                set_find_next<VALUE>(node, &BO::template find_next_fn_bitmap<true>);
-                set_find_prev<VALUE>(node, &BO::template find_prev_fn_bitmap<true>);
+                set_find_fn(node, &BO::template find_fn_bitmap<true>);
+                set_find_next(node, &BO::template find_next_fn_bitmap<true>);
+                set_find_prev(node, &BO::template find_prev_fn_bitmap<true>);
             } else {
-                set_find_fn<VALUE>(node, &BO::template find_fn_bitmap<false>);
-                set_find_next<VALUE>(node, &BO::template find_next_fn_bitmap<false>);
-                set_find_prev<VALUE>(node, &BO::template find_prev_fn_bitmap<false>);
+                set_find_fn(node, &BO::template find_fn_bitmap<false>);
+                set_find_next(node, &BO::template find_next_fn_bitmap<false>);
+                set_find_prev(node, &BO::template find_prev_fn_bitmap<false>);
             }
-            set_find_first<VALUE>(node, &BO::find_first_fn_bitmap);
-            set_find_last<VALUE>(node, &BO::find_last_fn_bitmap);
+            set_find_first(node, &BO::find_first_fn_bitmap);
+            set_find_last(node, &BO::find_last_fn_bitmap);
         } else if (nk_bits <= U16_BITS) {
             using CO = compact_ops<uint16_t, VALUE, ALLOC>;
             CO::set_leaf_fns(node, has_skip);
@@ -161,70 +161,6 @@ struct kntrie_ops {
             CO::set_leaf_fns(node, has_skip);
         }
     }
-
-    // ==================================================================
-    // find_pos_for_leaf — runtime NK dispatch, returns {leaf*, pos, found}
-    // ==================================================================
-
-    static leaf_pos_t find_pos_for_leaf(uint64_t* node, uint64_t ik) noexcept {
-        depth_t d = get_depth(node);
-        uint8_t nk_bits = U64_BITS - d.shift;
-        if (nk_bits <= U8_BITS) {
-            return BO::bitmap_find_pos(node, ik);
-        } else if (nk_bits <= U16_BITS) {
-            return compact_ops<uint16_t, VALUE, ALLOC>::find_pos(node, ik);
-        } else if (nk_bits <= U32_BITS) {
-            return compact_ops<uint32_t, VALUE, ALLOC>::find_pos(node, ik);
-        } else {
-            return compact_ops<uint64_t, VALUE, ALLOC>::find_pos(node, ik);
-        }
-    }
-
-    // find_next_pos_for_leaf — first entry > ik at leaf, runtime dispatch
-    static leaf_pos_t find_next_pos_for_leaf(uint64_t* node, uint64_t ik) noexcept {
-        depth_t d = get_depth(node);
-        uint8_t nk_bits = U64_BITS - d.shift;
-        if (nk_bits <= U8_BITS) {
-            return BO::bitmap_find_next_pos(node, ik);
-        } else if (nk_bits <= U16_BITS) {
-            return compact_ops<uint16_t, VALUE, ALLOC>::find_next_pos(node, ik);
-        } else if (nk_bits <= U32_BITS) {
-            return compact_ops<uint32_t, VALUE, ALLOC>::find_next_pos(node, ik);
-        } else {
-            return compact_ops<uint64_t, VALUE, ALLOC>::find_next_pos(node, ik);
-        }
-    }
-
-    // find_ge_pos_for_leaf — first entry >= ik at leaf, runtime dispatch
-    static leaf_pos_t find_ge_pos_for_leaf(uint64_t* node, uint64_t ik) noexcept {
-        depth_t d = get_depth(node);
-        uint8_t nk_bits = U64_BITS - d.shift;
-        if (nk_bits <= U8_BITS) {
-            return BO::bitmap_find_ge_pos(node, ik);
-        } else if (nk_bits <= U16_BITS) {
-            return compact_ops<uint16_t, VALUE, ALLOC>::find_ge_pos(node, ik);
-        } else if (nk_bits <= U32_BITS) {
-            return compact_ops<uint32_t, VALUE, ALLOC>::find_ge_pos(node, ik);
-        } else {
-            return compact_ops<uint64_t, VALUE, ALLOC>::find_ge_pos(node, ik);
-        }
-    }
-
-    // find_prev_pos_for_leaf — last entry < ik at leaf, runtime dispatch
-    static leaf_pos_t find_prev_pos_for_leaf(uint64_t* node, uint64_t ik) noexcept {
-        depth_t d = get_depth(node);
-        uint8_t nk_bits = U64_BITS - d.shift;
-        if (nk_bits <= U8_BITS) {
-            return BO::bitmap_find_prev_pos(node, ik);
-        } else if (nk_bits <= U16_BITS) {
-            return compact_ops<uint16_t, VALUE, ALLOC>::find_prev_pos(node, ik);
-        } else if (nk_bits <= U32_BITS) {
-            return compact_ops<uint32_t, VALUE, ALLOC>::find_prev_pos(node, ik);
-        } else {
-            return compact_ops<uint64_t, VALUE, ALLOC>::find_prev_pos(node, ik);
-        }
-    }
-
     // ==================================================================
     // reconstruct_ik — rebuild full u64 IK from leaf + position
     // ==================================================================

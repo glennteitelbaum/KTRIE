@@ -248,35 +248,23 @@ public:
     // Find — no sentinel checks, sentinel fn returns nullptr
     // ==================================================================
 
-    const VALUE* find_value(const KEY& key) const noexcept {
-        uint64_t ik = key_to_u64(key);
-        if ((ik ^ root_prefix_v) & root_prefix_mask()) [[unlikely]] return nullptr;
-        return reinterpret_cast<const VALUE*>(
-            BO::find_loop(root_ptr_v, ik, ik << root_skip_bits_v));
-    }
-
-    bool contains(const KEY& key) const noexcept {
-        return find_value(key) != nullptr;
-    }
-
     // Find returning {leaf*, pos, found} for live iterators.
-    // Same descent as find_value but returns position instead of VALUE*.
+    // Calls find_loop which now returns leaf_pos_t.
     leaf_pos_t find_with_pos(const KEY& key) const noexcept {
         uint64_t ik = key_to_u64(key);
         if ((ik ^ root_prefix_v) & root_prefix_mask()) [[unlikely]] return {};
+        return BO::find_loop(root_ptr_v, ik, ik << root_skip_bits_v);
+    }
 
-        // Bitmask descent (same as BO::find_loop)
-        uint64_t ptr = root_ptr_v;
-        uint64_t shifted = ik << root_skip_bits_v;
-        int depth = 0;
-        while (!(ptr & LEAF_BIT)) [[likely]] {
-            ptr = BO::bm_child(ptr, static_cast<uint8_t>(shifted >> (U64_TOP_BYTE_SHIFT - depth * CHAR_BIT)));
-            ++depth;
-        }
-        if (ptr & NOT_FOUND_BIT) [[unlikely]] return {};
+    // Legacy find — returns VALUE* for callers that just need the value.
+    const VALUE* find_value(const KEY& key) const noexcept {
+        auto r = find_with_pos(key);
+        if (!r.found) return nullptr;
+        return &OPS::value_cref_at(r.node, r.pos);
+    }
 
-        uint64_t* node = untag_leaf_mut(ptr);
-        return OPS::find_pos_for_leaf(node, ik);
+    bool contains(const KEY& key) const noexcept {
+        return find_with_pos(key).found;
     }
 
     // ==================================================================
@@ -576,8 +564,13 @@ public:
         }
 
         // Reached leaf — find first entry >= ik
+        // Try exact match first, then next-after
         uint64_t* leaf = untag_leaf_mut(ptr);
-        auto r = OPS::find_ge_pos_for_leaf(leaf, ik);
+        auto fn = get_find_fn(leaf);
+        auto r = fn(leaf, ik);
+        if (r.found) return r;
+        auto fn_next = get_find_next(leaf);
+        r = fn_next(leaf, ik);
         if (r.found) return r;
         return walk_parent_forward(leaf, true);
     }
@@ -617,7 +610,8 @@ public:
         }
 
         uint64_t* leaf = untag_leaf_mut(ptr);
-        auto r = OPS::find_next_pos_for_leaf(leaf, ik);
+        auto fn_next = get_find_next(leaf);
+        auto r = fn_next(leaf, ik);
         if (r.found) return r;
         return walk_parent_forward(leaf, true);
     }

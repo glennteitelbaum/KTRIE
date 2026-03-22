@@ -602,8 +602,7 @@ struct bitmask_ops {
                     if (value) val_bm_mut(node, hs).set_bit(suffix);
                     else       val_bm_mut(node, hs).clear_bit(suffix);
                 }
-                return {tag_leaf(node), false, false,
-                        bool_slots::ptr(val_bm(node, hs).has_bit(suffix))};
+                return {tag_leaf(node), false, false, nullptr};
             }
             if constexpr (!INSERT) return {tag_leaf(node), false, false};
 
@@ -638,7 +637,7 @@ struct bitmask_ops {
                     bld.destroy_value(vd[slot]);
                     VT::write_slot(&vd[slot], value);
                 }
-                return {tag_leaf(node), false, false, VT::as_ptr(vd[slot])};
+                return {tag_leaf(node), false, false, nullptr};
             }
 
             if constexpr (!INSERT) return {tag_leaf(node), false, false};

@@ -807,7 +807,7 @@ and `pos` is the insertion index in the new allocation. On split
 (compact → bitmask), the entry lands in one of the new child compacts;
 that child's leaf/pos propagate up.
 
-### 7.2 All 5 fn-ptr signatures → leaf_pos_t — PARTIAL (support typedefs+accessors done, compact fns done, bitmask fns+loops done, impl descend refs fixed. Still needed: find_with_pos→find_loop, find_value→find_loop, lower/upper_bound_pos use fn ptrs at leaf, remove 4 dispatch fns from ops, fix bool_slots::ptr ref in bitmask, untemplated setters in ops set_leaf_fns_for)
+### 7.2 All 5 fn-ptr signatures → leaf_pos_t — DONE (support typedefs+accessors untemplated, compact+bitmask fns return leaf_pos_t, find_loop+descend loops unified, 4 ops dispatchers removed, find_with_pos+find_value use find_loop, lower/upper_bound_pos use fn ptrs. Remaining cleanup: remove bitmap erase_when, as_ptr IS_BOOL branch becomes dead)
 
 All 5 leaf function pointers change to return `leaf_pos_t` instead
 of their current types. This unifies narrowing dispatch and position
@@ -932,6 +932,115 @@ This is stricter than std::map (which guarantees insert doesn't
 invalidate) but matches the flat-storage reality. Users who need
 stable iterators across mutations should use `find()` after each
 mutation.
+
+### 7.7 Direction collapse — 5 fn ptrs → 3
+
+Collapse `find_next`/`find_prev` into `find_adv(node, ik, dir)` and
+`find_first`/`find_last` into `find_edge(node, dir)`. Saves 2 fn ptrs
+per leaf (16 bytes), shrinks leaf header from 8 u64 to 6 u64.
+
+#### Direction type
+
+```cpp
+enum class dir_t : int8_t { FWD = +1, BWD = -1 };
+```
+
+Using +1/-1 enables arithmetic: `pos + static_cast<int>(dir)` for
+advance, no branch needed for many operations.
+
+#### Leaf layout (6 u64 header)
+
+```
+[0] header
+[1] find_fn          — exact match
+[2] find_adv_fn      — directional advance (next if FWD, prev if BWD)
+[3] find_edge_fn     — edge entry (first if FWD, last if BWD)
+[4] prefix
+[5] parent_ptr
+```
+
+```cpp
+inline constexpr size_t LEAF_FIND_FN    = 1;
+inline constexpr size_t LEAF_ADV_FN     = 2;
+inline constexpr size_t LEAF_EDGE_FN    = 3;
+inline constexpr size_t LEAF_PREFIX     = 4;
+inline constexpr size_t LEAF_PARENT_PTR = 5;
+inline constexpr size_t LEAF_HEADER_U64 = 6;
+```
+
+#### Fn-ptr signatures
+
+```cpp
+using find_fn_t  = leaf_pos_t (*)(uint64_t*, uint64_t) noexcept;
+using adv_fn_t   = leaf_pos_t (*)(uint64_t*, uint64_t, dir_t) noexcept;
+using edge_fn_t  = leaf_pos_t (*)(uint64_t*, dir_t) noexcept;
+```
+
+#### Compact find_adv_fn
+
+Replaces both `find_next_fn` and `find_prev_fn`:
+```cpp
+template<bool DO_SKIP>
+static leaf_pos_t find_adv_fn(uint64_t* node, uint64_t ik, dir_t dir) {
+    // skip check: cmp against dir
+    // target = suffix + dir  (suffix+1 for FWD, suffix-1 for BWD)
+    // search: find_base_first for FWD, find_base for BWD
+    // boundary: pos + dir < entries (FWD) or pos >= 0 (BWD)
+}
+```
+
+Where possible, use `dir` arithmetically to avoid branches:
+- `target = suffix + static_cast<int8_t>(dir)` — +1 or -1
+- Edge entry: `dir == FWD ? 0 : entries - 1` — one conditional
+- Boundary check: `dir == FWD ? pos < entries : pos > 0`
+- Bitmap: `dir == FWD ? next_set_after(suffix) : prev_set_before(suffix)`
+
+#### Compact find_edge_fn
+
+Replaces both `find_first_fn` and `find_last_fn`:
+```cpp
+static leaf_pos_t find_edge_fn(uint64_t* node, dir_t dir) {
+    unsigned entries = get_header(node)->entries();
+    if (entries == 0) return {};
+    uint16_t pos = (dir == dir_t::FWD) ? 0 : entries - 1;
+    return {node, pos, true};
+}
+```
+
+#### Bitmap variants
+
+Same pattern: `find_adv_fn_bitmap` collapses `find_next_fn_bitmap` +
+`find_prev_fn_bitmap`. `find_edge_fn_bitmap` collapses first + last.
+
+#### Tables (2 entries each, indexed by DO_SKIP)
+
+```cpp
+static inline const adv_fn_t ADV_TABLE[2] = {
+    &find_adv_fn<false>,  &find_adv_fn<true>,
+};
+```
+
+#### Upstream collapse (all pass `dir`)
+
+- `walk_parent_forward` + `walk_parent_backward` → `walk_parent(dir)`
+  - FWD: `bm_next_sibling`, `descend_first_loop`
+  - BWD: `bm_prev_sibling`, `descend_last_loop`
+- `descend_first_loop` + `descend_last_loop` → `descend_edge_loop(dir)`
+  - FWD: `bm_first_child`, call `find_edge_fn(FWD)`
+  - BWD: `bm_last_child`, call `find_edge_fn(BWD)`
+- `next_pos` + `prev_pos` → `advance_pos(leaf, pos, dir)`
+  - Hot path: compact `pos + dir` in bounds; bitmap `next/prev_set`
+  - Cold path: `walk_parent(dir)`
+- `lower_bound_pos` + `upper_bound_pos` share tracked descent, differ
+  only at leaf: `lower` calls `find_fn` then `find_adv(FWD)`;
+  `upper` calls `find_adv(FWD)` directly
+- `operator++` / `operator--` → `advance_pos(FWD)` / `advance_pos(BWD)`
+
+#### What stays separate
+
+- `find_fn` — exact match has no direction concept
+- `find_loop` — branchless descent has no direction concept
+- `insert` / `erase` — no direction concept
 
 ---
 
