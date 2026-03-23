@@ -1160,11 +1160,12 @@ Step 5 is independent of 1-4.
 - Eliminated 2x make_unique for full 4097-entry arrays
 - Partitioned loops, build_node_from_arrays_tagged_ins
 
-### 9.9 Single-pass coalesce (#3) — PARTIAL
-- walk_entries_in_order added
-- do_coalesce rewritten with direct write
-- coalesce_bm_to_leaf rewritten
-- Dead code removed (collected_t, collected_typed_t, collect_*)
-- REMAINING: compile fix — VST vs NVST type mismatch in coalesce_bm_to_leaf
+### 9.9 Single-pass coalesce (#3) — DONE
+- walk_entries_in_order: zero-alloc subtree traversal with suffix reconstruction
+- do_coalesce: direct write into destination leaf, stack arrays for bitmap case
+- coalesce_bm_to_leaf in kntrie_impl: rewritten using walk_entries_in_order, VST type fix
+- descend_first_prefix helper added to kntrie_ops
+- Dead code removed: collected_t, collected_typed_t, collect_entries, collect_leaf, collect_leaf_skip, collect_bm_skip, collect_bm_final
+- Zero make_unique in kntrie_ops, kntrie_compact, kntrie_impl
 - walk_entries_in_order, direct-write do_coalesce
 - Dead code removal: collected_t, collected_typed_t, collect_*

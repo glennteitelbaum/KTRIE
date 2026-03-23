@@ -651,15 +651,16 @@ private:
     void coalesce_bm_to_leaf() {
         OPS::depth_switch(root_skip_bytes(), [&]<int BITS>() {
             using NK = nk_for_bits_t<BITS>;
+            using VST = typename OPS::VST;
             uint64_t rep_key = OPS::descend_first_prefix(root_ptr_v);
 
             uint64_t* leaf;
             if constexpr (sizeof(NK) == sizeof(uint8_t)) {
                 uint8_t byte_keys[BYTE_VALUES];
-                NVST vals_arr[BYTE_VALUES];
+                VST vals_arr[BYTE_VALUES];
                 size_t wi = 0;
                 OPS::template walk_entries_in_order<BITS>(root_ptr_v,
-                    [&](NK s, NVST v) {
+                    [&](NK s, VST v) {
                         byte_keys[wi] = static_cast<uint8_t>(s);
                         vals_arr[wi] = v;
                         wi++;
@@ -676,10 +677,10 @@ private:
                 CO::set_val_offset(leaf, total_u64);
 
                 NK* dk = CO::keys(leaf, hu);
-                NVST* dv = CO::vals_mut(leaf);
+                auto* dv = CO::vals_mut(leaf);
                 size_t wi = 0;
                 OPS::template walk_entries_in_order<BITS>(root_ptr_v,
-                    [&](NK s, NVST v) {
+                    [&](NK s, VST v) {
                         dk[wi] = s;
                         VT::init_slot(&dv[wi], v);
                         wi++;
