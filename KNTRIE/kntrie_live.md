@@ -772,7 +772,7 @@ be emulated with erase+insert but that defeats the purpose.
 
 ## 7 Design Decisions
 
-### 7.1 Insert pos propagation — TODO (leaf/pos already filled by compact/bitmap insert; insert_node splits/first-insert paths leave leaf=null. Fix: insert_with_pos checks r.leaf, falls back to find_with_pos only on null — single-walk 99%+ of inserts)
+### 7.1 Insert pos propagation — PARTIAL (single_entry_pos helper, SENTINEL path done, split_on_prefix returns insert_result_t with leaf/pos, make_leaf_descended returns leaf_and_pos. Still needed: split_skip_at→insert_result_t, convert_to_bitmask→insert_result_t, insert_with_pos use r.leaf/r.pos directly)
 
 The entire insert chain must propagate `{leaf*, pos}` back to the
 caller. Current return type:

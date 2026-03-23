@@ -260,12 +260,26 @@ struct kntrie_ops {
     }
 
     // Recursively descend `depth` bytes (consuming BITS), then create leaf.
-    static uint64_t* make_leaf_descended(uint64_t ik, VST value,
-                                           uint8_t target_depth,
-                                           BLD& bld) {
-        return depth_switch(target_depth, [&]<int BITS>() {
-            return make_single_leaf<BITS>(ik, value, bld);
+    // Returns {leaf, pos} where pos is the position of the sole entry.
+    struct leaf_and_pos { uint64_t* leaf; uint16_t pos; };
+    static leaf_and_pos make_leaf_descended(uint64_t ik, VST value,
+                                             uint8_t target_depth,
+                                             BLD& bld) {
+        return depth_switch(target_depth, [&]<int BITS>() -> leaf_and_pos {
+            auto* leaf = make_single_leaf<BITS>(ik, value, bld);
+            return {leaf, single_entry_pos<BITS>(ik)};
         });
+    }
+
+    // Position of the sole entry in a freshly created single-entry leaf.
+    // Compact: always pos 0. Bitmap: pos = byte value.
+    template<int BITS>
+    static uint16_t single_entry_pos(uint64_t ik) noexcept {
+        if constexpr (BITS <= U8_BITS) {
+            return static_cast<uint16_t>(extract_byte<BITS>(ik));
+        } else {
+            return 0;
+        }
     }
 
     // ==================================================================
@@ -425,7 +439,7 @@ struct kntrie_ops {
     // ==================================================================
 
     template<int BITS> requires (BITS > U8_BITS)
-    static uint64_t split_on_prefix(uint64_t* node, node_header_t* hdr,
+    static insert_result_t split_on_prefix(uint64_t* node, node_header_t* hdr,
                                       uint64_t ik, VST value,
                                       uint8_t skip, uint8_t common,
                                       BLD& bld) {
@@ -436,8 +450,6 @@ struct kntrie_ops {
         uint8_t old_rem = skip - 1 - common;
 
         // Save common prefix bytes for wrap_in_chain.
-        // Skip bytes 0..common-1 are at levels ABOVE current BITS:
-        //   byte i is at byte_shift<BITS>() + 8*(common-i)
         uint8_t saved_prefix[MAX_SKIP] = {};
         for (uint8_t i = 0; i < common; ++i)
             saved_prefix[i] = static_cast<uint8_t>(
@@ -445,7 +457,6 @@ struct kntrie_ops {
 
         // Update old node: strip consumed prefix, keep remainder
         if (old_rem > 0) [[unlikely]] {
-            // Re-mask prefix: new REMAINING = (BITS-8) - 8*old_rem
             uint64_t mask = ~0ULL << (U64_BITS - KEY_BITS + BITS - CHAR_BIT - CHAR_BIT * old_rem);
             set_leaf_prefix(node, leaf_prefix(node) & mask);
             set_depth(node, make_depth<BITS - CHAR_BIT>(old_rem));
@@ -456,8 +467,7 @@ struct kntrie_ops {
 
         // Build new leaf at BITS-8 (one byte past divergence)
         constexpr uint8_t BASE_DEPTH = (KEY_BITS - BITS) / CHAR_BIT + 1;
-        uint64_t* new_leaf;
-        new_leaf = make_leaf_descended(ik, value, BASE_DEPTH + old_rem, bld);
+        auto [new_leaf, new_pos] = make_leaf_descended(ik, value, BASE_DEPTH + old_rem, bld);
         if (old_rem > 0) [[unlikely]] {
             new_leaf = prepend_skip<BITS - CHAR_BIT>(new_leaf, old_rem, ik, bld);
         }
@@ -476,9 +486,12 @@ struct kntrie_ops {
         uint64_t total = BO::exact_subtree_count(cp[0]) +
                          BO::exact_subtree_count(cp[1]);
         auto* bm_node = BO::make_bitmask(bi, cp, 2, bld, total);
+        uint64_t tagged;
         if (common > 0) [[unlikely]]
-            return BO::wrap_in_chain(bm_node, saved_prefix, common, bld);
-        return tag_bitmask(bm_node);
+            tagged = BO::wrap_in_chain(bm_node, saved_prefix, common, bld);
+        else
+            tagged = tag_bitmask(bm_node);
+        return {tagged, true, false, nullptr, new_leaf, new_pos};
     }
 
     // ==================================================================
@@ -605,10 +618,11 @@ struct kntrie_ops {
         // SENTINEL
         if (ptr == BO::SENTINEL_TAGGED) [[unlikely]] {
             if constexpr (!INSERT) return {ptr, false, false};
-            auto tagged = depth_switch(depth, [&]<int BITS>() {
-                return tag_leaf(make_single_leaf<BITS>(ik, value, bld));
+            return depth_switch(depth, [&]<int BITS>() -> insert_result_t {
+                auto* leaf = make_single_leaf<BITS>(ik, value, bld);
+                uint16_t pos = single_entry_pos<BITS>(ik);
+                return {tag_leaf(leaf), true, false, nullptr, leaf, pos};
             });
-            return {tagged, true, false};
         }
 
         // LEAF
@@ -624,14 +638,13 @@ struct kntrie_ops {
                 uint8_t actual = static_cast<uint8_t>(pfx_shifted >> U64_TOP_BYTE_SHIFT);
                 if (expected != actual) [[unlikely]] {
                     if constexpr (!INSERT) return {tag_leaf(node), false, false};
-                    auto tagged = depth_switch(depth, [&]<int BITS>() -> uint64_t {
+                    return depth_switch(depth, [&]<int BITS>() -> insert_result_t {
                         if constexpr (BITS > U8_BITS)
                             return split_on_prefix<BITS>(node, hdr, ik, value,
                                                           skip, pos, bld);
                         else
                             std::unreachable();
                     });
-                    return {tagged, true, false};
                 }
                 shifted <<= CHAR_BIT;
                 pfx_shifted <<= CHAR_BIT;
