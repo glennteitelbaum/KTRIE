@@ -443,9 +443,28 @@ public:
         if (BO::is_bitmap_leaf(leaf)) {
             constexpr size_t hs = LEAF_HEADER_U64;
             if (dir == dir_t::FWD) {
+                // Fast path: check if next bit is set (common for dense bitmaps)
+                constexpr unsigned BITS_PER_WORD = U64_BITS;
+                uint8_t next = static_cast<uint8_t>(pos + 1);
+                if (next != 0) {  // pos < 255
+                    unsigned w = next / BITS_PER_WORD;
+                    unsigned b = next % BITS_PER_WORD;
+                    if ((leaf[hs + w] >> b) & 1)
+                        return {leaf, static_cast<uint16_t>(next), true};
+                }
+                // Slow path: sparse bitmap
                 auto adj = BO::bm(leaf, hs).next_set_after(static_cast<uint8_t>(pos));
                 if (adj.found) return {leaf, static_cast<uint16_t>(adj.idx), true};
             } else {
+                // Fast path: check if prev bit is set
+                if (pos > 0) {
+                    constexpr unsigned BITS_PER_WORD = U64_BITS;
+                    uint8_t prev = static_cast<uint8_t>(pos - 1);
+                    unsigned w = prev / BITS_PER_WORD;
+                    unsigned b = prev % BITS_PER_WORD;
+                    if ((leaf[hs + w] >> b) & 1)
+                        return {leaf, static_cast<uint16_t>(prev), true};
+                }
                 auto adj = BO::bm(leaf, hs).prev_set_before(static_cast<uint8_t>(pos));
                 if (adj.found) return {leaf, static_cast<uint16_t>(adj.idx), true};
             }
