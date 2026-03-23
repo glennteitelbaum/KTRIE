@@ -22,11 +22,9 @@ using namespace gteitelbaum;
 template<typename V, typename PyV>
 void bind_kntrie(py::module_& m, const char* name) {
     using trie_t = kntrie<int64_t, V>;
-    using iter_t = typename trie_t::const_iterator;
 
     py::class_<trie_t>(m, name)
 
-        // Construction
         .def(py::init<>())
 
         // __getitem__
@@ -65,7 +63,7 @@ void bind_kntrie(py::module_& m, const char* name) {
         // __bool__
         .def("__bool__", [](const trie_t& t) { return !t.empty(); })
 
-        // __iter__ — yields (key, value) tuples
+        // __iter__ — yields (key, value) tuples in sorted order
         .def("__iter__", [](const trie_t& t) {
             return py::make_iterator(t.begin(), t.end());
         }, py::keep_alive<0, 1>())
@@ -80,84 +78,24 @@ void bind_kntrie(py::module_& m, const char* name) {
                 return py::cast(static_cast<PyV>((*it).second));
         }, py::arg("key"), py::arg("default") = py::none())
 
-        // insert(key, value) → bool
+        // insert(key, value) → bool (true if new, false if existed)
         .def("insert", [](trie_t& t, int64_t key, PyV val) -> bool {
             if constexpr (std::is_same_v<V, py::object>)
-                return t.insert({key, val}).second;
+                return t.insert(key, val).second;
             else
-                return t.insert({key, static_cast<V>(val)}).second;
+                return t.insert(key, static_cast<V>(val)).second;
         })
 
-        // modify(key, fn) → bool
-        // modify(key, fn, default) → bool
-        .def("modify", [](trie_t& t, int64_t key, py::function fn,
-                          py::object dflt) -> bool {
-            if (dflt.is_none()) {
-                // Two-arg: modify existing only
-                auto it = t.find(key);
-                if (it == t.end()) return false;
-                V old_val;
-                if constexpr (std::is_same_v<V, py::object>)
-                    old_val = (*it).second;
-                else
-                    old_val = (*it).second;
-                V new_val;
-                if constexpr (std::is_same_v<V, py::object>)
-                    new_val = fn(old_val);
-                else
-                    new_val = fn(py::cast(old_val)).template cast<V>();
-                t.insert_or_assign(key, new_val);
-                return true;
-            } else {
-                // Three-arg: modify or insert default
-                auto it = t.find(key);
-                V old_val;
-                if (it != t.end()) {
-                    if constexpr (std::is_same_v<V, py::object>)
-                        old_val = (*it).second;
-                    else
-                        old_val = (*it).second;
-                } else {
-                    if constexpr (std::is_same_v<V, py::object>)
-                        old_val = dflt;
-                    else
-                        old_val = dflt.cast<V>();
-                }
-                V new_val;
-                if constexpr (std::is_same_v<V, py::object>)
-                    new_val = fn(old_val);
-                else
-                    new_val = fn(py::cast(old_val)).template cast<V>();
-                t.insert_or_assign(key, new_val);
-                return (it == t.end());
-            }
-        }, py::arg("key"), py::arg("fn"), py::arg("default") = py::none())
-
-        // erase_when(key, fn) → bool
-        .def("erase_when", [](trie_t& t, int64_t key, py::function fn) -> bool {
-            auto it = t.find(key);
-            if (it == t.end()) return false;
-            bool should_erase;
-            if constexpr (std::is_same_v<V, py::object>)
-                should_erase = fn((*it).second).template cast<bool>();
-            else
-                should_erase = fn(py::cast(static_cast<PyV>((*it).second))).template cast<bool>();
-            if (should_erase) { t.erase(key); return true; }
-            return false;
-        })
-
-        // clear()
         .def("clear", &trie_t::clear)
 
-        // memory_usage()
         .def("memory_usage", &trie_t::memory_usage)
 
-        // items() — yields (key, value) tuples
+        // items() — yields (key, value) tuples in sorted order
         .def("items", [](const trie_t& t) {
             return py::make_iterator(t.begin(), t.end());
         }, py::keep_alive<0, 1>())
 
-        // keys()
+        // keys() — sorted list
         .def("keys", [](const trie_t& t) {
             py::list result;
             for (auto it = t.begin(); it != t.end(); ++it)
@@ -165,7 +103,7 @@ void bind_kntrie(py::module_& m, const char* name) {
             return result;
         })
 
-        // values()
+        // values() — in key-sorted order
         .def("values", [](const trie_t& t) {
             py::list result;
             for (auto it = t.begin(); it != t.end(); ++it) {
@@ -177,7 +115,6 @@ void bind_kntrie(py::module_& m, const char* name) {
             return result;
         })
 
-        // __repr__
         .def("__repr__", [name](const trie_t& t) {
             return std::string("kntrie.") + name +
                    "(size=" + std::to_string(t.size()) + ")";

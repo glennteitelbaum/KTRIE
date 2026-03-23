@@ -66,29 +66,6 @@ class TestInt64:
         m[1] = 20
         assert m[1] == 20
 
-    def test_modify(self):
-        m = kntrie.Int64()
-        m[1] = 10
-        assert m.modify(1, lambda v: v + 5)
-        assert m[1] == 15
-        assert not m.modify(2, lambda v: v + 1)
-
-    def test_modify_with_default(self):
-        m = kntrie.Int64()
-        assert not m.modify(1, lambda v: v * 2, 42)
-        assert m[1] == 42  # default inserted, fn not called
-        assert m.modify(1, lambda v: v * 2, 0)
-        assert m[1] == 84
-
-    def test_erase_when(self):
-        m = kntrie.Int64()
-        m[1] = 10
-        m[2] = 20
-        assert not m.erase_when(1, lambda v: v == 99)
-        assert 1 in m
-        assert m.erase_when(1, lambda v: v == 10)
-        assert 1 not in m
-        assert not m.erase_when(99, lambda v: True)
 
     def test_clear(self):
         m = kntrie.Int64()
@@ -177,12 +154,6 @@ class TestFloat:
         m[1] = 3.14
         assert abs(m[1] - 3.14) < 1e-10
 
-    def test_modify(self):
-        m = kntrie.Float()
-        m[1] = 1.5
-        m.modify(1, lambda v: v * 2)
-        assert abs(m[1] - 3.0) < 1e-10
-
 
 # ============================================================================
 # Bool
@@ -195,13 +166,6 @@ class TestBool:
         m[2] = False
         assert m[1] == True
         assert m[2] == False
-
-    def test_erase_when(self):
-        m = kntrie.Bool()
-        m[1] = True
-        m[2] = False
-        assert m.erase_when(2, lambda v: not v)
-        assert 2 not in m
 
 
 # ============================================================================
@@ -219,10 +183,10 @@ class TestObject:
         m[1] = [1, 2, 3]
         assert m[1] == [1, 2, 3]
 
-    def test_modify_list(self):
+    def test_setitem_list(self):
         m = kntrie.Object()
         m[1] = [1, 2, 3]
-        m.modify(1, lambda v: v + [4])
+        m[1] = m[1] + [4]
         assert m[1] == [1, 2, 3, 4]
 
     def test_mixed_types(self):
@@ -236,8 +200,9 @@ class TestObject:
         assert m[3] == [1, 2]
         assert m[4] is None
 
-    def test_erase_when(self):
+    def test_conditional_erase(self):
         m = kntrie.Object()
         m[1] = [1, 2, 3]
-        assert m.erase_when(1, lambda v: len(v) == 3)
+        if 1 in m and len(m[1]) == 3:
+            del m[1]
         assert 1 not in m
