@@ -198,7 +198,8 @@ struct compact_ops {
                     VT::init_slot(&vd[idx], value);
                 }
             }
-            return {tag_leaf(node), false, false, nullptr};
+            return {tag_leaf(node), false, false, nullptr,
+                    node, static_cast<uint16_t>(idx)};
         }
         if constexpr (!INSERT) return {tag_leaf(node), false, false};
 
@@ -244,7 +245,8 @@ struct compact_ops {
             }
 
             bld.dealloc_node(node, h->alloc_u64());
-            return {tag_leaf(nn), true, false};
+            return {tag_leaf(nn), true, false, nullptr,
+                    nn, static_cast<uint16_t>(ins)};
         }
 
         // In-place: memmove tail right by 1
@@ -267,7 +269,8 @@ struct compact_ops {
             VT::init_slot(&vd[ins], value);
         }
         h->set_entries(entries + 1);
-        return {tag_leaf(node), true, false};
+        return {tag_leaf(node), true, false, nullptr,
+                node, static_cast<uint16_t>(ins)};
     }
 
     // ==================================================================

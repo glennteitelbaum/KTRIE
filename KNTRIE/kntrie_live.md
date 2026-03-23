@@ -102,7 +102,7 @@ bytes_for(), u64_for()
 `bool_slots` manages the packed storage; `bool_ref` provides the proxy
 reference that the live iterator returns.
 
-### 1.5 Add bool_ref proxy — SKIPPED (depends on §1.4)
+### 1.5 Add bool_ref proxy — TODO (needed for kntrie<K,bool> support)
 
 ```cpp
 struct bool_ref {
@@ -120,7 +120,7 @@ struct bool_ref {
 };
 ```
 
-### 1.6 value_traits — SKIPPED (depends on §1.4)
+### 1.6 value_traits cleanup — TODO (remove IS_BOOL as_ptr dead branch after bool_ref added)
 
 Old:
 ```cpp
@@ -439,7 +439,7 @@ bm_first_child()         -- used by descend loops
 bm_last_child()          -- used by descend loops
 ```
 
-### 3.4 Parent maintenance — PARTIAL (helpers added, bitmask alloc sites instrumented, mark_root in impl insert/erase/normalize/coalesce. Still needed: reduce_root_skip mark_root, build_remainder relink, first-insert mark_root)
+### 3.4 Parent maintenance — DONE (link_child, set_root_parent, relink_all_children helpers; add_child_at, remove_child_at, make_bitmask, make_skip_chain instrumented; mark_root at all root_ptr_v assignments; build_remainder covered by make_bitmask/make_skip_chain)
 
 Every place that stores a child pointer into a bitmask node must also
 set the child's parent pointer and dispatch byte. Apply in:
@@ -462,7 +462,7 @@ erase_when_node()            (lines 1019-1075)
 leaf_erase_when()            (lines 1139-1160)
 ```
 
-### 4.2 Leaf construction — PARTIAL (set_leaf_fns fixed, bm+vals_mut public, GROW constants, value_ref_at_pos cast fixed, copy_leaf_header confirmed copies parent_ptr. Still needed: reduce_root_skip, build_remainder, first-insert)
+### 4.2 Leaf construction — DONE (set_leaf_fns fixed, bm+vals_mut public, GROW constants, value_ref_at_pos cast, copy_leaf_header copies parent_ptr, all alloc sites instrumented)
 
 All leaf allocation sites set `node[LEAF_PARENT_PTR]` and
 `h->set_parent_byte()`.
@@ -772,7 +772,7 @@ be emulated with erase+insert but that defeats the purpose.
 
 ## 7 Design Decisions
 
-### 7.1 Insert pos propagation
+### 7.1 Insert pos propagation — TODO (currently two-walk via insert then find_with_pos; should propagate pos from compact insert up through insert_node)
 
 The entire insert chain must propagate `{leaf*, pos}` back to the
 caller. Current return type:

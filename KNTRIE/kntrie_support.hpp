@@ -1079,6 +1079,8 @@ struct insert_result_t {
     bool inserted;
     bool needs_split;
     const void* existing_value;  // non-null on dup: pointer to existing VALUE in leaf
+    uint64_t* leaf;         // leaf containing the key (null if split invalidated)
+    uint16_t  pos;          // position within leaf
 };
 
 struct erase_result_t {

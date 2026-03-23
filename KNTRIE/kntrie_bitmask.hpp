@@ -593,7 +593,8 @@ struct bitmask_ops {
                     if (value) val_bm_mut(node, hs).set_bit(suffix);
                     else       val_bm_mut(node, hs).clear_bit(suffix);
                 }
-                return {tag_leaf(node), false, false, nullptr};
+                return {tag_leaf(node), false, false, nullptr,
+                        node, static_cast<uint16_t>(suffix)};
             }
             if constexpr (!INSERT) return {tag_leaf(node), false, false};
 
@@ -604,7 +605,8 @@ struct bitmask_ops {
                 bm.set_bit(suffix);
                 if (value) val_bm_mut(node, hs).set_bit(suffix);
                 h->set_entries(nc);
-                return {tag_leaf(node), true, false};
+                return {tag_leaf(node), true, false, nullptr,
+                        node, static_cast<uint16_t>(suffix)};
             }
 
             size_t au64 = round_up_u64(new_sz);
@@ -618,7 +620,8 @@ struct bitmask_ops {
             val_bm_mut(nn, hs) = val_bm(node, hs);
             if (value) val_bm_mut(nn, hs).set_bit(suffix);
             bld.dealloc_node(node, h->alloc_u64());
-            return {tag_leaf(nn), true, false};
+            return {tag_leaf(nn), true, false, nullptr,
+                    nn, static_cast<uint16_t>(suffix)};
         } else {
             VST* vd = bl_vals_mut(node, hs);
 
@@ -628,7 +631,8 @@ struct bitmask_ops {
                     bld.destroy_value(vd[slot]);
                     VT::write_slot(&vd[slot], value);
                 }
-                return {tag_leaf(node), false, false, nullptr};
+                return {tag_leaf(node), false, false, nullptr,
+                        node, static_cast<uint16_t>(suffix)};
             }
 
             if constexpr (!INSERT) return {tag_leaf(node), false, false};
@@ -642,7 +646,8 @@ struct bitmask_ops {
                 std::memmove(vd + isl + 1, vd + isl, (count - isl) * sizeof(VST));
                 VT::write_slot(&vd[isl], value);
                 h->set_entries(nc);
-                return {tag_leaf(node), true, false};
+                return {tag_leaf(node), true, false, nullptr,
+                        node, static_cast<uint16_t>(suffix)};
             }
 
             size_t au64 = round_up_u64(new_sz);
@@ -661,7 +666,8 @@ struct bitmask_ops {
             std::memcpy(nvd + isl + 1, vd + isl, (count - isl) * sizeof(VST));
 
             bld.dealloc_node(node, h->alloc_u64());
-            return {tag_leaf(nn), true, false};
+            return {tag_leaf(nn), true, false, nullptr,
+                    nn, static_cast<uint16_t>(suffix)};
         }
     }
 

@@ -634,6 +634,7 @@ struct kntrie_ops {
                     return split_skip_at<BITS>(node, hdr, sc, pos,
                                                 ik, value, bld);
                 });
+                // Split: leaf+pos unknown here, caller falls back to find_with_pos
                 return {tagged, true, false};
             }
             shifted <<= CHAR_BIT;
@@ -652,8 +653,16 @@ struct kntrie_ops {
         if (!cl.found) [[unlikely]] {
             if constexpr (!INSERT) return {tag_bitmask(node), false, false};
 
+            uint64_t* new_leaf = nullptr;
+            uint16_t new_pos = 0;
             auto leaf_tagged = depth_switch(depth + 1, [&]<int BITS>() {
-                return tag_leaf(make_single_leaf<BITS>(ik, value, bld));
+                new_leaf = make_single_leaf<BITS>(ik, value, bld);
+                // Single entry: compact pos=0, bitmap pos=byte value
+                if constexpr (BITS <= CHAR_BIT) {
+                    new_pos = static_cast<uint16_t>(
+                        static_cast<uint8_t>(depth_t::suffix_at<BITS>(ik)));
+                }
+                return tag_leaf(new_leaf);
             });
 
             uint64_t* nn;
@@ -662,7 +671,7 @@ struct kntrie_ops {
             else
                 nn = BO::add_child(node, hdr, ti, leaf_tagged, bld);
             inc_descendants(nn, get_header(nn));
-            return {tag_bitmask(nn), true, false};
+            return {tag_bitmask(nn), true, false, nullptr, new_leaf, new_pos};
         }
 
         // Recurse into child
