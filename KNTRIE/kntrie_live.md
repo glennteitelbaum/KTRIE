@@ -1154,11 +1154,17 @@ Step 5 is independent of 1-4.
 - dealloc_subtree_nodes_only compact leaf path: same
 
 ### 9.8 convert_to_bitmask_tagged zero-alloc (#2) — DONE
+- 3 partitioned loops, stack scratch buffers (COMPACT_MAX+1), zero heap allocs
 - 3 partitioned loops: bytes < new, byte == new (small heap alloc for one range), bytes > new
 - Loops 1 and 3 pass old array slices directly to build_node_from_arrays_tagged
 - Eliminated 2x make_unique for full 4097-entry arrays
 - Partitioned loops, build_node_from_arrays_tagged_ins
 
-### 9.9 Single-pass coalesce (#3) — TODO
+### 9.9 Single-pass coalesce (#3) — PARTIAL
+- walk_entries_in_order added
+- do_coalesce rewritten with direct write
+- coalesce_bm_to_leaf rewritten
+- Dead code removed (collected_t, collected_typed_t, collect_*)
+- REMAINING: compile fix — VST vs NVST type mismatch in coalesce_bm_to_leaf
 - walk_entries_in_order, direct-write do_coalesce
 - Dead code removal: collected_t, collected_typed_t, collect_*

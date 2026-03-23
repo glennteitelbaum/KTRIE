@@ -650,9 +650,43 @@ private:
 
     void coalesce_bm_to_leaf() {
         OPS::depth_switch(root_skip_bytes(), [&]<int BITS>() {
-            auto c = OPS::template collect_entries<BITS>(root_ptr_v);
-            uint64_t* leaf = OPS::template build_leaf<BITS>(
-                c.keys.get(), c.vals.get(), c.count, c.rep_key, bld_v);
+            using NK = nk_for_bits_t<BITS>;
+            uint64_t rep_key = OPS::descend_first_prefix(root_ptr_v);
+
+            uint64_t* leaf;
+            if constexpr (sizeof(NK) == sizeof(uint8_t)) {
+                uint8_t byte_keys[BYTE_VALUES];
+                NVST vals_arr[BYTE_VALUES];
+                size_t wi = 0;
+                OPS::template walk_entries_in_order<BITS>(root_ptr_v,
+                    [&](NK s, NVST v) {
+                        byte_keys[wi] = static_cast<uint8_t>(s);
+                        vals_arr[wi] = v;
+                        wi++;
+                    });
+                leaf = BO::make_bitmap_leaf(byte_keys, vals_arr,
+                    static_cast<uint32_t>(wi), bld_v);
+            } else {
+                using CO = compact_ops<NK, VALUE, ALLOC>;
+                constexpr size_t hu = LEAF_HEADER_U64;
+                size_t total_u64 = round_up_u64(CO::size_u64(size_v, hu));
+                leaf = bld_v.alloc_node(total_u64, false);
+                auto* lh = get_header(leaf);
+                lh->set_entries(static_cast<uint16_t>(size_v));
+                CO::set_val_offset(leaf, total_u64);
+
+                NK* dk = CO::keys(leaf, hu);
+                NVST* dv = CO::vals_mut(leaf);
+                size_t wi = 0;
+                OPS::template walk_entries_in_order<BITS>(root_ptr_v,
+                    [&](NK s, NVST v) {
+                        dk[wi] = s;
+                        VT::init_slot(&dv[wi], v);
+                        wi++;
+                    });
+            }
+
+            OPS::template init_leaf_fns<BITS>(leaf, rep_key);
             OPS::dealloc_subtree_nodes_only(root_ptr_v, root_skip_bytes(), bld_v);
             root_ptr_v = tag_leaf(leaf);
         });

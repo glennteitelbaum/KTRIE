@@ -391,7 +391,7 @@ struct kntrie_ops {
     static uint64_t build_node_from_arrays_tagged(nk_for_bits_t<BITS>* suf,
                                                      VST* vals,
                                                      size_t count, uint64_t ik,
-                                                     BLD& bld) {
+                                                     BLD& bld, char* scratch) {
         using NK = nk_for_bits_t<BITS>;
         constexpr int NK_BITS = static_cast<int>(sizeof(NK) * CHAR_BIT);
 
@@ -410,14 +410,14 @@ struct kntrie_ops {
             if constexpr (BITS > U8_BITS) {
             using CNK = nk_for_bits_t<BITS - CHAR_BIT>;
             constexpr int CNK_BITS = static_cast<int>(sizeof(CNK) * CHAR_BIT);
-            auto cs = std::make_unique<CNK[]>(count);
+            CNK* cs = reinterpret_cast<CNK*>(scratch);
             for (size_t i = 0; i < count; ++i) {
                 NK shifted = static_cast<NK>(suf[i] << CHAR_BIT);
                 cs[i] = static_cast<CNK>(shifted >> (NK_BITS - CNK_BITS));
             }
 
             uint64_t child_tagged = build_node_from_arrays_tagged<BITS - CHAR_BIT>(
-                cs.get(), vals, count, ik, bld);
+                cs, vals, count, ik, bld, scratch);
 
             uint8_t byte_arr[1] = {first_top};
             if (child_tagged & LEAF_BIT) {
@@ -445,7 +445,7 @@ struct kntrie_ops {
             if constexpr (BITS > U8_BITS) {
                 using CNK = nk_for_bits_t<BITS - CHAR_BIT>;
                 constexpr int CNK_BITS = static_cast<int>(sizeof(CNK) * CHAR_BIT);
-                auto cs = std::make_unique<CNK[]>(cc);
+                CNK* cs = reinterpret_cast<CNK*>(scratch);
                 for (size_t j = 0; j < cc; ++j) {
                     NK shifted = static_cast<NK>(suf[start + j] << CHAR_BIT);
                     cs[j] = static_cast<CNK>(shifted >> (NK_BITS - CNK_BITS));
@@ -454,7 +454,7 @@ struct kntrie_ops {
                 uint64_t child_ik = (ik & safe_prefix_mask<BITS>())
                     | leaf_ops_t<BITS>::template suffix_to_u64<BITS>(suf[start]);
                 child_tagged[n_children] = build_node_from_arrays_tagged<BITS - CHAR_BIT>(
-                    cs.get(), vals + start, cc, child_ik, bld);
+                    cs, vals + start, cc, child_ik, bld, scratch);
             }
             indices[n_children] = ti;
             n_children++;
@@ -644,10 +644,19 @@ struct kntrie_ops {
         unsigned ins = 0;
         while (ins < old_count && old_keys[ins] < suffix) ++ins;
 
+        // Stack scratch buffer for key narrowing — allocated once, reused at every level
+        constexpr size_t SCRATCH_BYTES = (COMPACT_MAX + 1) * sizeof(NK);
+        char scratch[SCRATCH_BYTES];
+
         // Partition by top byte into children
         uint8_t indices[BYTE_VALUES];
         uint64_t child_ptrs[BYTE_VALUES];
         int n_children = 0;
+
+        // Stack merge buffers for loop 2 (key merge)
+        constexpr size_t MERGE_MAX = COMPACT_MAX + 1;
+        NK  merge_keys[MERGE_MAX];
+        VST merge_vals[MERGE_MAX];
 
         size_t i = 0;
 
@@ -664,7 +673,7 @@ struct kntrie_ops {
             indices[n_children] = ti;
             child_ptrs[n_children] = build_node_from_arrays_tagged<BITS>(
                 const_cast<NK*>(old_keys + start), const_cast<VST*>(old_vals + start),
-                cc, child_ik, bld);
+                cc, child_ik, bld, scratch);
             n_children++;
         }
 
@@ -677,21 +686,18 @@ struct kntrie_ops {
             size_t range_new = range_old + 1;
             unsigned local_ins = ins - static_cast<unsigned>(range_start);
 
-            // Small heap alloc for this one range only (not 4097)
-            auto mk = std::make_unique<NK[]>(range_new);
-            auto mv = std::make_unique<VST[]>(range_new);
-            std::memcpy(mk.get(), old_keys + range_start, local_ins * sizeof(NK));
-            mk[local_ins] = suffix;
-            std::memcpy(mk.get() + local_ins + 1, old_keys + range_start + local_ins,
+            std::memcpy(merge_keys, old_keys + range_start, local_ins * sizeof(NK));
+            merge_keys[local_ins] = suffix;
+            std::memcpy(merge_keys + local_ins + 1, old_keys + range_start + local_ins,
                          (range_old - local_ins) * sizeof(NK));
-            std::memcpy(mv.get(), old_vals + range_start, local_ins * sizeof(VST));
-            mv[local_ins] = value;
-            std::memcpy(mv.get() + local_ins + 1, old_vals + range_start + local_ins,
+            std::memcpy(merge_vals, old_vals + range_start, local_ins * sizeof(VST));
+            merge_vals[local_ins] = value;
+            std::memcpy(merge_vals + local_ins + 1, old_vals + range_start + local_ins,
                          (range_old - local_ins) * sizeof(VST));
 
             indices[n_children] = new_top_byte;
             child_ptrs[n_children] = build_node_from_arrays_tagged<BITS>(
-                mk.get(), mv.get(), range_new, ik, bld);
+                merge_keys, merge_vals, range_new, ik, bld, scratch);
             n_children++;
         }
 
@@ -707,7 +713,7 @@ struct kntrie_ops {
             indices[n_children] = ti;
             child_ptrs[n_children] = build_node_from_arrays_tagged<BITS>(
                 const_cast<NK*>(old_keys + start), const_cast<VST*>(old_vals + start),
-                cc, child_ik, bld);
+                cc, child_ik, bld, scratch);
             n_children++;
         }
 
@@ -1042,166 +1048,123 @@ struct kntrie_ops {
         }
     }
 
+
     // ==================================================================
-    // Collect entries — all use typed NK, narrow at leaf
+    // walk_entries_in_order — zero-alloc subtree traversal
     // ==================================================================
 
-    struct collected_t {
-        std::unique_ptr<nk_for_bits_t<U8_BITS>[]> keys;
-        std::unique_ptr<VST[]> vals;
-        size_t count;
-    };
-
-    template<int BITS>
-    struct collected_typed_t {
+    template<int BITS, typename Fn>
+    static void walk_entries_in_order(uint64_t tagged, Fn&& cb) {
         using NK = nk_for_bits_t<BITS>;
-        std::unique_ptr<NK[]> keys;
-        std::unique_ptr<VST[]> vals;
-        size_t count;
-        uint64_t rep_key;  // any surviving leaf's node[3] — full root-level key
-    };
-
-    template<int BITS> requires (BITS >= U8_BITS)
-    static collected_typed_t<BITS> collect_entries(uint64_t tagged) {
-        using NK = nk_for_bits_t<BITS>;
-        constexpr int NK_BITS = static_cast<int>(sizeof(NK) * CHAR_BIT);
 
         if (tagged & LEAF_BIT) [[unlikely]] {
             const uint64_t* node = untag_leaf(tagged);
-            auto* hdr = get_header(node);
-            uint8_t skip = hdr->skip();
-            if (skip) [[unlikely]]
-                return collect_leaf_skip<BITS>(node, hdr, skip, 0);
-            return collect_leaf<BITS>(node, hdr);
+            const auto* hdr = get_header(node);
+            if constexpr (sizeof(NK) == sizeof(uint8_t)) {
+                BO::for_each_bitmap(node, [&](uint8_t s, VST v) {
+                    cb(static_cast<NK>(s), v);
+                });
+            } else {
+                using CO = compact_ops<NK, VALUE, ALLOC>;
+                CO::for_each(node, hdr, [&](NK s, const VST& v) {
+                    cb(s, v);
+                });
+            }
+            return;
         }
 
         const uint64_t* node = bm_to_node_const(tagged);
-        auto* hdr = get_header(node);
+        const auto* hdr = get_header(node);
         uint8_t sc = hdr->skip();
-        if (sc > 0) [[unlikely]]
-            return collect_bm_skip<BITS>(node, sc, 0);
-        return collect_bm_final<BITS>(node, 0);
-    }
-
-    template<int BITS> requires (BITS >= U8_BITS)
-    static collected_typed_t<BITS> collect_leaf(const uint64_t* node,
-                                                  const node_header_t* hdr) {
-        using NK = nk_for_bits_t<BITS>;
-        size_t n = hdr->entries();
-        auto wk = std::make_unique<NK[]>(n);
-        auto wv = std::make_unique<VST[]>(n);
-        size_t wi = 0;
-        leaf_for_each<BITS>(node, hdr, [&](NK s, VST v) {
-            wk[wi] = s; wv[wi] = v; wi++;
-        });
-        return {std::move(wk), std::move(wv), wi, leaf_prefix(node)};
-    }
-
-    template<int BITS> requires (BITS >= U8_BITS)
-    static collected_typed_t<BITS> collect_leaf_skip(const uint64_t* node,
-                                                       const node_header_t* hdr,
-                                                       uint8_t skip, uint8_t pos) {
-        if (pos >= skip) [[unlikely]]
-            return collect_leaf<BITS>(node, hdr);
 
         if constexpr (BITS > U8_BITS) {
-            using NK = nk_for_bits_t<BITS>;
             constexpr int NK_BITS = static_cast<int>(sizeof(NK) * CHAR_BIT);
-            uint8_t byte = extract_byte<BITS>(leaf_prefix(node));
-            auto child = collect_leaf_skip<BITS - CHAR_BIT>(node, hdr, skip, pos + 1);
-
             using CNK = nk_for_bits_t<BITS - CHAR_BIT>;
             constexpr int CNK_BITS = static_cast<int>(sizeof(CNK) * CHAR_BIT);
-            auto wk = std::make_unique<NK[]>(child.count);
-            auto wv = std::make_unique<VST[]>(child.count);
-            for (size_t i = 0; i < child.count; ++i) {
-                wk[i] = (NK(byte) << (NK_BITS - CHAR_BIT))
-                       | static_cast<NK>(static_cast<uint64_t>(child.keys[i]) << (U64_BITS - CNK_BITS) >> (U64_BITS - NK_BITS + CHAR_BIT));
-                wv[i] = child.vals[i];
-            }
-            return {std::move(wk), std::move(wv), child.count, child.rep_key};
+
+            const bitmap_256_t& fbm = BO::chain_bitmap(node, sc);
+            const uint64_t* rch = BO::chain_children(node, sc);
+
+            fbm.for_each_set([&](uint8_t idx, int slot) {
+                walk_entries_in_order<BITS - CHAR_BIT>(rch[slot],
+                    [&](CNK child_suffix, VST v) {
+                        NK full = (NK(idx) << (NK_BITS - CHAR_BIT))
+                            | static_cast<NK>(
+                                static_cast<uint64_t>(child_suffix)
+                                << (U64_BITS - CNK_BITS)
+                                >> (U64_BITS - NK_BITS + CHAR_BIT));
+                        cb(full, v);
+                    });
+            });
         }
-        std::unreachable();
     }
 
-    template<int BITS> requires (BITS >= U8_BITS)
-    static collected_typed_t<BITS> collect_bm_skip(const uint64_t* node,
-                                                      uint8_t sc, uint8_t pos) {
-        if (pos >= sc) [[unlikely]]
-            return collect_bm_final<BITS>(node, sc);
-
-        if constexpr (BITS > U8_BITS) {
-            using NK = nk_for_bits_t<BITS>;
-            constexpr int NK_BITS = static_cast<int>(sizeof(NK) * CHAR_BIT);
-            uint8_t byte = BO::skip_byte(node, pos);
-            auto child = collect_bm_skip<BITS - CHAR_BIT>(node, sc, pos + 1);
-
-            using CNK = nk_for_bits_t<BITS - CHAR_BIT>;
-            constexpr int CNK_BITS = static_cast<int>(sizeof(CNK) * CHAR_BIT);
-            auto wk = std::make_unique<NK[]>(child.count);
-            auto wv = std::make_unique<VST[]>(child.count);
-            for (size_t i = 0; i < child.count; ++i) {
-                wk[i] = (NK(byte) << (NK_BITS - CHAR_BIT))
-                       | static_cast<NK>(static_cast<uint64_t>(child.keys[i]) << (U64_BITS - CNK_BITS) >> (U64_BITS - NK_BITS + CHAR_BIT));
-                wv[i] = child.vals[i];
-            }
-            return {std::move(wk), std::move(wv), child.count, child.rep_key};
+    // Descend to first leaf, return its prefix (for rep_key in coalesce)
+    static uint64_t descend_first_prefix(uint64_t tagged) noexcept {
+        while (!(tagged & LEAF_BIT)) {
+            const uint64_t* node = bm_to_node_const(tagged);
+            auto* hdr = get_header(node);
+            uint8_t sc = hdr->skip();
+            const uint64_t* ch = BO::chain_children(node, sc);
+            tagged = ch[0];
         }
-        std::unreachable();
-    }
-
-    template<int BITS> requires (BITS >= U8_BITS)
-    static collected_typed_t<BITS> collect_bm_final(const uint64_t* node, uint8_t sc) {
-        using NK = nk_for_bits_t<BITS>;
-        constexpr int NK_BITS = static_cast<int>(sizeof(NK) * CHAR_BIT);
-        auto* hdr = get_header(node);
-        uint64_t total = BO::chain_descendants(node, sc, hdr->entries());
-
-        auto wk = std::make_unique<NK[]>(total);
-        auto wv = std::make_unique<VST[]>(total);
-        size_t wi = 0;
-        uint64_t rk = 0;
-
-        const bitmap_256_t& fbm = BO::chain_bitmap(node, sc);
-        const uint64_t* rch = BO::chain_children(node, sc);
-
-        fbm.for_each_set([&](uint8_t idx, int slot) {
-            if constexpr (BITS > U8_BITS) {
-                using CNK = nk_for_bits_t<BITS - CHAR_BIT>;
-                constexpr int CNK_BITS = static_cast<int>(sizeof(CNK) * CHAR_BIT);
-                auto child = collect_entries<BITS - CHAR_BIT>(rch[slot]);
-                if (wi == 0) rk = child.rep_key;
-                for (size_t i = 0; i < child.count; ++i) {
-                    wk[wi] = (NK(idx) << (NK_BITS - CHAR_BIT))
-                           | static_cast<NK>(static_cast<uint64_t>(child.keys[i]) << (U64_BITS - CNK_BITS) >> (U64_BITS - NK_BITS + CHAR_BIT));
-                    wv[wi] = child.vals[i];
-                    wi++;
-                }
-            }
-        });
-        return {std::move(wk), std::move(wv), wi, rk};
+        return leaf_prefix(untag_leaf(tagged));
     }
 
     // ==================================================================
-    // do_coalesce — collect entries + build leaf
+    // do_coalesce — single-pass direct write
     // ==================================================================
 
     template<int BITS> requires (BITS >= U8_BITS)
     static erase_result_t do_coalesce(uint64_t* node, node_header_t* hdr,
                                         BLD& bld) {
+        using NK = nk_for_bits_t<BITS>;
         uint8_t sc = hdr->skip();
+        uint64_t total_entries = BO::chain_descendants(node, sc, hdr->entries());
 
-        auto c = collect_bm_final<BITS>(node, sc);
+        uint64_t rep_key = descend_first_prefix(tag_bitmask(node));
 
-        uint64_t* leaf = build_leaf<BITS>(c.keys.get(), c.vals.get(), c.count,
-                                           c.rep_key, bld);
+        uint64_t* leaf;
+        if constexpr (sizeof(NK) == sizeof(uint8_t)) {
+            // Bitmap leaf — stack arrays, max BYTE_VALUES entries
+            uint8_t byte_keys[BYTE_VALUES];
+            VST vals_arr[BYTE_VALUES];
+            size_t wi = 0;
+            walk_entries_in_order<BITS>(tag_bitmask(node), [&](NK s, VST v) {
+                byte_keys[wi] = static_cast<uint8_t>(s);
+                vals_arr[wi] = v;
+                wi++;
+            });
+            leaf = BO::make_bitmap_leaf(byte_keys, vals_arr,
+                static_cast<uint32_t>(wi), bld);
+        } else {
+            // Compact leaf — allocate and write directly
+            using CO = compact_ops<NK, VALUE, ALLOC>;
+            constexpr size_t hu = LEAF_HEADER_U64;
+            size_t total_u64 = round_up_u64(CO::size_u64(total_entries, hu));
+            leaf = bld.alloc_node(total_u64, false);
+            auto* lh = get_header(leaf);
+            lh->set_entries(static_cast<uint16_t>(total_entries));
+            CO::set_val_offset(leaf, total_u64);
+
+            NK* dk = CO::keys(leaf, hu);
+            VST* dv = CO::vals_mut(leaf);
+            size_t wi = 0;
+            walk_entries_in_order<BITS>(tag_bitmask(node), [&](NK s, VST v) {
+                dk[wi] = s;
+                VT::init_slot(&dv[wi], v);
+                wi++;
+            });
+        }
+
+        init_leaf_fns<BITS>(leaf, rep_key);
 
         if (sc > 0) [[unlikely]] {
-            leaf = prepend_skip<BITS>(leaf, sc, c.rep_key, bld);
+            leaf = prepend_skip<BITS>(leaf, sc, rep_key, bld);
         }
 
         dealloc_coalesced_node<BITS>(node, sc, bld);
-        return {tag_leaf(leaf), true, c.count};
+        return {tag_leaf(leaf), true, static_cast<uint64_t>(total_entries)};
     }
 
     // ==================================================================
