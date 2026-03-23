@@ -638,7 +638,19 @@ struct kntrie_ops {
 
         // Direct pointers into old leaf — no top-level temp arrays
         const NK* old_keys = CO::keys(node, hs);
-        const VST* old_vals = CO::vals(node);
+
+        // For IS_BOOL, packed bits cannot be addressed as VST* — unpack first.
+        // Cold path (fires once per leaf lifetime at overflow).
+        VST unpacked_vals[COMPACT_MAX];
+        const VST* old_vals;
+        if constexpr (VT::IS_BOOL) {
+            auto bv = CO::bool_vals(node);
+            for (uint16_t i = 0; i < old_count; ++i)
+                unpacked_vals[i] = bv.get(i);
+            old_vals = unpacked_vals;
+        } else {
+            old_vals = CO::vals(node);
+        }
 
         // Find insertion point in old sorted array
         unsigned ins = 0;
@@ -1148,13 +1160,23 @@ struct kntrie_ops {
             CO::set_capacity(leaf, total_u64);
 
             NK* dk = CO::keys(leaf, hu);
-            VST* dv = CO::vals_mut(leaf);
             size_t wi = 0;
-            walk_entries_in_order<BITS>(tag_bitmask(node), [&](NK s, VST v) {
-                dk[wi] = s;
-                VT::init_slot(&dv[wi], v);
-                wi++;
-            });
+            if constexpr (VT::IS_BOOL) {
+                auto bv = CO::bool_vals_mut(leaf);
+                bv.clear_all(total_entries);
+                walk_entries_in_order<BITS>(tag_bitmask(node), [&](NK s, VST v) {
+                    dk[wi] = s;
+                    bv.set(wi, v);
+                    wi++;
+                });
+            } else {
+                VST* dv = CO::vals_mut(leaf);
+                walk_entries_in_order<BITS>(tag_bitmask(node), [&](NK s, VST v) {
+                    dk[wi] = s;
+                    VT::init_slot(&dv[wi], v);
+                    wi++;
+                });
+            }
         }
 
         init_leaf_fns<BITS>(leaf, rep_key);

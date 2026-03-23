@@ -677,14 +677,25 @@ private:
                 CO::set_capacity(leaf, total_u64);
 
                 NK* dk = CO::keys(leaf, hu);
-                auto* dv = CO::vals_mut(leaf);
                 size_t wi = 0;
-                OPS::template walk_entries_in_order<BITS>(root_ptr_v,
-                    [&](NK s, VST v) {
-                        dk[wi] = s;
-                        VT::init_slot(&dv[wi], v);
-                        wi++;
-                    });
+                if constexpr (VT::IS_BOOL) {
+                    auto bv = CO::bool_vals_mut(leaf);
+                    bv.clear_all(size_v);
+                    OPS::template walk_entries_in_order<BITS>(root_ptr_v,
+                        [&](NK s, VST v) {
+                            dk[wi] = s;
+                            bv.set(wi, v);
+                            wi++;
+                        });
+                } else {
+                    auto* dv = CO::vals_mut(leaf);
+                    OPS::template walk_entries_in_order<BITS>(root_ptr_v,
+                        [&](NK s, VST v) {
+                            dk[wi] = s;
+                            VT::init_slot(&dv[wi], v);
+                            wi++;
+                        });
+                }
             }
 
             OPS::template init_leaf_fns<BITS>(leaf, rep_key);
