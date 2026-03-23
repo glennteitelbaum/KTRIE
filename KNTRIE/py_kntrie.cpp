@@ -35,9 +35,9 @@ void bind_kntrie(py::module_& m, const char* name) {
             if (it == t.end())
                 throw py::key_error(std::to_string(key));
             if constexpr (std::is_same_v<V, py::object>)
-                return it.value();
+                return (*it).second;
             else
-                return static_cast<PyV>(it.value());
+                return static_cast<PyV>((*it).second);
         })
 
         // __setitem__
@@ -75,9 +75,9 @@ void bind_kntrie(py::module_& m, const char* name) {
             auto it = t.find(key);
             if (it == t.end()) return dflt;
             if constexpr (std::is_same_v<V, py::object>)
-                return it.value();
+                return (*it).second;
             else
-                return py::cast(static_cast<PyV>(it.value()));
+                return py::cast(static_cast<PyV>((*it).second));
         }, py::arg("key"), py::arg("default") = py::none())
 
         // insert(key, value) → bool
@@ -94,36 +94,56 @@ void bind_kntrie(py::module_& m, const char* name) {
                           py::object dflt) -> bool {
             if (dflt.is_none()) {
                 // Two-arg: modify existing only
-                return t.modify(key, [&fn](V& v) {
-                    if constexpr (std::is_same_v<V, py::object>)
-                        v = fn(v);
-                    else
-                        v = fn(py::cast(v)).template cast<V>();
-                });
+                auto it = t.find(key);
+                if (it == t.end()) return false;
+                V old_val;
+                if constexpr (std::is_same_v<V, py::object>)
+                    old_val = (*it).second;
+                else
+                    old_val = (*it).second;
+                V new_val;
+                if constexpr (std::is_same_v<V, py::object>)
+                    new_val = fn(old_val);
+                else
+                    new_val = fn(py::cast(old_val)).template cast<V>();
+                t.insert_or_assign(key, new_val);
+                return true;
             } else {
                 // Three-arg: modify or insert default
-                V def_val;
-                if constexpr (std::is_same_v<V, py::object>)
-                    def_val = dflt;
-                else
-                    def_val = dflt.cast<V>();
-                return t.modify(key, [&fn](V& v) {
+                auto it = t.find(key);
+                V old_val;
+                if (it != t.end()) {
                     if constexpr (std::is_same_v<V, py::object>)
-                        v = fn(v);
+                        old_val = (*it).second;
                     else
-                        v = fn(py::cast(v)).template cast<V>();
-                }, def_val);
+                        old_val = (*it).second;
+                } else {
+                    if constexpr (std::is_same_v<V, py::object>)
+                        old_val = dflt;
+                    else
+                        old_val = dflt.cast<V>();
+                }
+                V new_val;
+                if constexpr (std::is_same_v<V, py::object>)
+                    new_val = fn(old_val);
+                else
+                    new_val = fn(py::cast(old_val)).template cast<V>();
+                t.insert_or_assign(key, new_val);
+                return (it == t.end());
             }
         }, py::arg("key"), py::arg("fn"), py::arg("default") = py::none())
 
         // erase_when(key, fn) → bool
         .def("erase_when", [](trie_t& t, int64_t key, py::function fn) -> bool {
-            return t.erase_when(key, [&fn](const V& v) -> bool {
-                if constexpr (std::is_same_v<V, py::object>)
-                    return fn(v).template cast<bool>();
-                else
-                    return fn(py::cast(v)).template cast<bool>();
-            });
+            auto it = t.find(key);
+            if (it == t.end()) return false;
+            bool should_erase;
+            if constexpr (std::is_same_v<V, py::object>)
+                should_erase = fn((*it).second).template cast<bool>();
+            else
+                should_erase = fn(py::cast(static_cast<PyV>((*it).second))).template cast<bool>();
+            if (should_erase) { t.erase(key); return true; }
+            return false;
         })
 
         // clear()
@@ -141,7 +161,7 @@ void bind_kntrie(py::module_& m, const char* name) {
         .def("keys", [](const trie_t& t) {
             py::list result;
             for (auto it = t.begin(); it != t.end(); ++it)
-                result.append(it.key());
+                result.append((*it).first);
             return result;
         })
 
@@ -150,9 +170,9 @@ void bind_kntrie(py::module_& m, const char* name) {
             py::list result;
             for (auto it = t.begin(); it != t.end(); ++it) {
                 if constexpr (std::is_same_v<V, py::object>)
-                    result.append(it.value());
+                    result.append((*it).second);
                 else
-                    result.append(py::cast(static_cast<PyV>(it.value())));
+                    result.append(py::cast(static_cast<PyV>((*it).second)));
             }
             return result;
         })

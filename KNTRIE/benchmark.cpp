@@ -132,8 +132,8 @@ static Result bench_kntrie(const Workload<KEY>& w) {
     double t1 = now_ms();
     for (int r = 0; r < w.find_iters; ++r) {
         for (auto k : w.find1_keys) {
-            auto* v = trie.find_value(k);
-            checksum += v ? *v : 0;
+            auto it = trie.find(k);
+            checksum += (it != trie.end()) ? (*it).second : 0;
         }
     }
     res.find_ms = (now_ms() - t1) / w.find_iters;
@@ -153,8 +153,8 @@ static Result bench_kntrie(const Workload<KEY>& w) {
     double t4 = now_ms();
     for (int r = 0; r < w.find_iters; ++r) {
         for (auto k : w.find2_keys) {
-            auto* v = trie.find_value(k);
-            checksum += v ? *v : 0;
+            auto it = trie.find(k);
+            checksum += (it != trie.end()) ? (*it).second : 0;
         }
     }
     res.find2_ms = (now_ms() - t4) / w.find_iters;

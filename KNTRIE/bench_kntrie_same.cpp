@@ -497,14 +497,14 @@ static void bench_one_key(size_t target_n, const std::string& pattern,
         uint64_t cs = 0;
         double t1 = now_ms();
         for (int r = 0; r < fi; ++r)
-            for (auto k : fnd_orders[r]) { auto* v = trie.find_value(static_cast<K>(k)); cs += acc(v); }
+            for (auto k : fnd_orders[r]) { auto it = trie.find(static_cast<K>(k)); cs += (it != trie.end()) ? acc((*it).second) : 0; }
         k_fnd = std::min(k_fnd, (now_ms() - t1) / fi);
         do_not_optimize(cs);
 
         cs = 0;
         double t1n = now_ms();
         for (int r = 0; r < fi; ++r)
-            for (auto k : nf_orders[r]) { auto* v = trie.find_value(static_cast<K>(k)); cs += acc(v); }
+            for (auto k : nf_orders[r]) { auto it = trie.find(static_cast<K>(k)); cs += (it != trie.end()) ? acc((*it).second) : 0; }
         k_nf = std::min(k_nf, (now_ms() - t1n) / fi);
         do_not_optimize(cs);
 
