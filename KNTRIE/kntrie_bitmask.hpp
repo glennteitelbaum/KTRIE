@@ -497,12 +497,20 @@ struct bitmask_ops {
         return *reinterpret_cast<VALUE*>(&bl_vals_mut(node, hs)[slot]);
     }
 
+    // val pointer for iter_entry_t. Non-bool: &bl_vals[slot]. Bool: val_bm.words base.
+    static void* bm_val_ptr(uint64_t* node, size_t hs, int slot) noexcept {
+        if constexpr (VT::IS_BOOL)
+            return &val_bm_mut(node, hs).words[0];
+        else
+            return &bl_vals_mut(node, hs)[slot];
+    }
+
     // ==================================================================
-    // find_fn_bitmap — exact match → leaf_pos_t (pos = byte value)
+    // find_fn_bitmap — exact match → iter_entry_t (pos = byte value)
     // ==================================================================
 
     template<bool DO_SKIP>
-    static leaf_pos_t find_fn_bitmap(uint64_t* node, uint64_t ik) noexcept {
+    static iter_entry_t find_fn_bitmap(uint64_t* node, uint64_t ik) noexcept {
         constexpr size_t hs = LEAF_HEADER_U64;
         depth_t d = get_depth(node);
 
@@ -512,36 +520,43 @@ struct bitmask_ops {
         }
 
         uint8_t suffix = static_cast<uint8_t>(d.suffix(ik));
-        if (!bm(node, hs).has_bit(suffix)) [[unlikely]] return {};
-        return {node, static_cast<uint16_t>(suffix), true};
+        const bitmap_256_t& bmp = bm(node, hs);
+        if (!bmp.has_bit(suffix)) [[unlikely]] return {};
+        int slot = bmp.find_slot<slot_mode::FAST_EXIT>(suffix);
+        uint64_t key = d.to_ik(leaf_prefix(node), static_cast<uint64_t>(suffix));
+        return {node, static_cast<uint16_t>(suffix), key,
+                bm_val_ptr(node, hs, slot), true};
     }
 
     // ==================================================================
-    // find_adv_fn_bitmap — directional advance → leaf_pos_t
+    // find_adv_fn_bitmap — directional advance → iter_entry_t
     // FWD: first entry with byte > suffix. BWD: last with byte < suffix.
     // ==================================================================
 
     template<bool DO_SKIP>
-    static leaf_pos_t find_adv_fn_bitmap(uint64_t* node, uint64_t ik, dir_t dir) noexcept {
+    static iter_entry_t find_adv_fn_bitmap(uint64_t* node, uint64_t ik, dir_t dir) noexcept {
         constexpr size_t hs = LEAF_HEADER_U64;
         depth_t d = get_depth(node);
+        uint64_t pfx = leaf_prefix(node);
 
         if constexpr (DO_SKIP) {
-            int cmp = skip_cmp(leaf_prefix(node), d, ik);
-            // FWD: cmp>0 means all entries > ik → miss at this leaf
-            //      cmp<0 means all entries < ik → return edge
-            // BWD: reversed
+            int cmp = skip_cmp(pfx, d, ik);
             if (dir == dir_t::FWD) {
                 if (cmp > 0) return {};
                 if (cmp < 0) {
                     uint8_t byte = bm(node, hs).first_set_bit();
-                    return {node, static_cast<uint16_t>(byte), true};
+                    uint64_t key = d.to_ik(pfx, static_cast<uint64_t>(byte));
+                    return {node, static_cast<uint16_t>(byte), key,
+                            bm_val_ptr(node, hs, 0), true};
                 }
             } else {
                 if (cmp < 0) return {};
                 if (cmp > 0) {
                     uint8_t byte = bm(node, hs).last_set_bit();
-                    return {node, static_cast<uint16_t>(byte), true};
+                    unsigned entries = get_header(node)->entries();
+                    uint64_t key = d.to_ik(pfx, static_cast<uint64_t>(byte));
+                    return {node, static_cast<uint16_t>(byte), key,
+                            bm_val_ptr(node, hs, static_cast<int>(entries - 1)), true};
                 }
             }
         }
@@ -552,26 +567,40 @@ struct bitmask_ops {
             if (suffix >= static_cast<uint8_t>(d.nk_max())) [[unlikely]] return {};
             auto r = bm(node, hs).next_set_after(suffix);
             if (!r.found) [[unlikely]] return {};
-            return {node, static_cast<uint16_t>(r.idx), true};
+            uint64_t key = d.to_ik(pfx, static_cast<uint64_t>(r.idx));
+            return {node, static_cast<uint16_t>(r.idx), key,
+                    bm_val_ptr(node, hs, r.slot), true};
         } else {
             if (suffix == 0) [[unlikely]] return {};
             auto r = bm(node, hs).prev_set_before(suffix);
             if (!r.found) [[unlikely]] return {};
-            return {node, static_cast<uint16_t>(r.idx), true};
+            uint64_t key = d.to_ik(pfx, static_cast<uint64_t>(r.idx));
+            return {node, static_cast<uint16_t>(r.idx), key,
+                    bm_val_ptr(node, hs, r.slot), true};
         }
     }
 
     // ==================================================================
-    // find_edge_fn_bitmap — edge entry → leaf_pos_t
+    // find_edge_fn_bitmap — edge entry → iter_entry_t
     // FWD: first set bit. BWD: last set bit.
     // ==================================================================
 
-    static leaf_pos_t find_edge_fn_bitmap(uint64_t* node, dir_t dir) noexcept {
+    static iter_entry_t find_edge_fn_bitmap(uint64_t* node, dir_t dir) noexcept {
         constexpr size_t hs = LEAF_HEADER_U64;
-        uint8_t idx = (dir == dir_t::FWD)
-            ? bm(node, hs).first_set_bit()
-            : bm(node, hs).last_set_bit();
-        return {node, static_cast<uint16_t>(idx), true};
+        depth_t d = get_depth(node);
+        uint64_t pfx = leaf_prefix(node);
+        unsigned entries = get_header(node)->entries();
+        if (dir == dir_t::FWD) {
+            uint8_t idx = bm(node, hs).first_set_bit();
+            uint64_t key = d.to_ik(pfx, static_cast<uint64_t>(idx));
+            return {node, static_cast<uint16_t>(idx), key,
+                    bm_val_ptr(node, hs, 0), true};
+        } else {
+            uint8_t idx = bm(node, hs).last_set_bit();
+            uint64_t key = d.to_ik(pfx, static_cast<uint64_t>(idx));
+            return {node, static_cast<uint16_t>(idx), key,
+                    bm_val_ptr(node, hs, static_cast<int>(entries - 1)), true};
+        }
     }
 
     // ==================================================================
@@ -1136,9 +1165,9 @@ public:
     // Read/iter loop functions — called by kntrie_impl
     // ==================================================================
 
-    // find_loop: branchless bitmask descent, fn-ptr dispatch at leaf → leaf_pos_t
-    static leaf_pos_t find_loop(uint64_t ptr, uint64_t ik,
-                                 uint64_t shifted) noexcept {
+    // find_loop: branchless bitmask descent, fn-ptr dispatch at leaf → iter_entry_t
+    static iter_entry_t find_loop(uint64_t ptr, uint64_t ik,
+                                   uint64_t shifted) noexcept {
         int depth = 0;
         while (!(ptr & LEAF_BIT)) [[likely]] {
             ptr = bm_child(ptr, static_cast<uint8_t>(shifted >> (U64_TOP_BYTE_SHIFT - depth * CHAR_BIT)));
@@ -1151,8 +1180,8 @@ public:
         return fn(node, ik);
     }
 
-    // descend_edge_loop: walk to min (FWD) or max (BWD) leaf → leaf_pos_t
-    static leaf_pos_t descend_edge_loop(uint64_t ptr, dir_t dir) noexcept {
+    // descend_edge_loop: walk to min (FWD) or max (BWD) leaf → iter_entry_t
+    static iter_entry_t descend_edge_loop(uint64_t ptr, dir_t dir) noexcept {
         while (!(ptr & LEAF_BIT))
             ptr = (dir == dir_t::FWD) ? bm_first_child(ptr) : bm_last_child(ptr);
         uint64_t* node = untag_leaf_mut(ptr);

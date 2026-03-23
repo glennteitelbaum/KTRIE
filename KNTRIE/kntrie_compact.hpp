@@ -426,12 +426,20 @@ public:
     // ==================================================================
 public:
 
+    // val pointer for iter_entry_t. Non-bool: &vals[pos]. Bool: bool_slots.data base.
+    static void* val_ptr(uint64_t* node, unsigned entries, size_t hs, uint16_t pos) noexcept {
+        if constexpr (VT::IS_BOOL)
+            return bool_vals_mut(node, entries, hs).data;
+        else
+            return &vals_mut(node, entries, hs)[pos];
+    }
+
     // ==================================================================
-    // find_fn — exact match → leaf_pos_t
+    // find_fn — exact match → iter_entry_t
     // ==================================================================
 
     template<bool DO_SKIP>
-    static leaf_pos_t find_fn(uint64_t* node, uint64_t ik) noexcept {
+    static iter_entry_t find_fn(uint64_t* node, uint64_t ik) noexcept {
         constexpr size_t hs = LEAF_HEADER_U64;
         depth_t d = get_depth(node);
 
@@ -448,69 +456,73 @@ public:
         uint16_t pos = static_cast<uint16_t>(base - kd);
 
         if (kd[pos] != suffix) [[unlikely]] return {};
-        return {node, pos, true};
+        uint64_t key = d.to_ik(leaf_prefix(node), static_cast<uint64_t>(suffix));
+        return {node, pos, key, val_ptr(node, entries, hs, pos), true};
     }
 
     // ==================================================================
-    // find_adv_fn — directional advance → leaf_pos_t
+    // find_adv_fn — directional advance → iter_entry_t
     // FWD: first entry with key > ik.  BWD: last entry with key < ik.
     // ==================================================================
 
     template<bool DO_SKIP>
-    static leaf_pos_t find_adv_fn(uint64_t* node, uint64_t ik, dir_t dir) noexcept {
+    static iter_entry_t find_adv_fn(uint64_t* node, uint64_t ik, dir_t dir) noexcept {
         constexpr size_t hs = LEAF_HEADER_U64;
         depth_t d = get_depth(node);
+        uint64_t pfx = leaf_prefix(node);
         unsigned entries = get_header(node)->entries();
+        const K* kd = keys(node, hs);
 
         if constexpr (DO_SKIP) {
-            int cmp = skip_cmp(leaf_prefix(node), d, ik);
-            // cmp * dir > 0 → miss; cmp * dir < 0 → edge entry
+            int cmp = skip_cmp(pfx, d, ik);
             if (cmp * static_cast<int>(dir) > 0) return {};
             if (cmp * static_cast<int>(dir) < 0) {
                 uint16_t edge = (dir == dir_t::FWD) ? 0
                     : static_cast<uint16_t>(entries - 1);
-                return {node, edge, true};
+                uint64_t key = d.to_ik(pfx, static_cast<uint64_t>(kd[edge]));
+                return {node, edge, key, val_ptr(node, entries, hs, edge), true};
             }
         }
 
         K suffix = static_cast<K>(d.suffix(ik));
 
-        // Boundary check
         if (dir == dir_t::FWD) {
             if (suffix >= static_cast<K>(d.nk_max())) [[unlikely]] return {};
-        } else {
-            if (suffix == 0) [[unlikely]] return {};
-        }
-
-        K target = suffix + static_cast<K>(static_cast<int8_t>(dir));
-        const K* kd = keys(node, hs);
-
-        if (dir == dir_t::FWD) {
+            K target = suffix + 1;
             const K* base = adaptive_search<K>::find_base_first(kd, entries, target);
             uint16_t pos = static_cast<uint16_t>(base - kd);
             if (kd[pos] < target) [[unlikely]] {
                 ++pos;
                 if (pos >= entries) [[unlikely]] return {};
             }
-            return {node, pos, true};
+            uint64_t key = d.to_ik(pfx, static_cast<uint64_t>(kd[pos]));
+            return {node, pos, key, val_ptr(node, entries, hs, pos), true};
         } else {
+            if (suffix == 0) [[unlikely]] return {};
+            K target = suffix - 1;
             const K* base = adaptive_search<K>::find_base(kd, entries, target);
             uint16_t pos = static_cast<uint16_t>(base - kd);
             if (kd[pos] > target) [[unlikely]] return {};
-            return {node, pos, true};
+            uint64_t key = d.to_ik(pfx, static_cast<uint64_t>(kd[pos]));
+            return {node, pos, key, val_ptr(node, entries, hs, pos), true};
         }
     }
 
     // ==================================================================
-    // find_edge_fn — edge entry → leaf_pos_t
+    // find_edge_fn — edge entry → iter_entry_t
     // FWD: first (min).  BWD: last (max).
     // ==================================================================
 
-    static leaf_pos_t find_edge_fn(uint64_t* node, dir_t dir) noexcept {
+    static iter_entry_t find_edge_fn(uint64_t* node, dir_t dir) noexcept {
+        constexpr size_t hs = LEAF_HEADER_U64;
+        depth_t d = get_depth(node);
+        uint64_t pfx = leaf_prefix(node);
         unsigned entries = get_header(node)->entries();
+        const K* kd = keys(node, hs);
         uint16_t pos = (dir == dir_t::FWD) ? 0
             : static_cast<uint16_t>(entries - 1);
-        return {node, pos, true};
+        uint64_t key = d.to_ik(pfx, static_cast<uint64_t>(kd[pos]));
+        return {node, pos, key, val_ptr(node, entries, hs, pos), true};
     }
 
     // ==================================================================

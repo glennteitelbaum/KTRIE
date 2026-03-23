@@ -1082,3 +1082,36 @@ Step 5 is independent of 1-4.
 
 1. `link_child` in kntrie_support.hpp calls `set_leaf_parent` which is defined later in the same file — move `link_child`/`set_root_parent` after the leaf accessor definitions, or forward-declare.
 2. Line ~714 in kntrie_ops.hpp has stale `depth_t::suffix_at<BITS>` — replace with `single_entry_pos<BITS>(ik)` or `extract_byte<BITS>(ik)`.
+
+### 8.1 iter_entry_t and fn ptr signatures — DONE
+- `iter_entry_t` added to kntrie_support.hpp (leaf, pos, ik, void* val, found)
+- `find_fn_t`, `adv_fn_t`, `edge_fn_t` all return `iter_entry_t`
+
+### 8.2 Compact fn ptrs return iter_entry_t — DONE
+- `find_fn`, `adv_fn`, `edge_fn` compute key via `d.to_ik()` and val via `val_ptr()`
+- `val_ptr()` helper: non-bool returns `&vals[pos]`, bool returns `bool_slots.data`
+
+### 8.3 Bitmap fn ptrs return iter_entry_t — DONE
+- `find_fn_bitmap`, `adv_fn_bitmap`, `edge_fn_bitmap` compute key + val
+- `bm_val_ptr()` helper: non-bool returns `&bl_vals[slot]`, bool returns `val_bm.words`
+- `find_loop` and `descend_edge_loop` return `iter_entry_t`
+
+### 8.4 Impl rewrite — DONE
+- `find_entry` replaces `find_with_pos` (returns `iter_entry_t`)
+- `find_value` and `contains` use `find_entry`
+- `edge_entry(dir)` replaces `edge_pos(dir)`
+- `walk_from_leaf`, `walk_from_bm`, `walk_bm_chain` — static, no impl ptr, parent always bitmask
+- `tracked_descent_fwd` returns `iter_entry_t`
+- `lower_bound_entry` / `upper_bound_entry` replace `lower_bound_pos` / `upper_bound_pos`
+- Removed: `advance_pos`, `bitmap_advance`, `walk_parent`, `key_at_pos`, `value_ref_at_pos`, `value_cref_at_pos`, `bool_ref_at_pos`
+
+### 8.5 kntrie.hpp iterator rewrite — TODO
+- Iterator: 4 fields `{leaf*, pos, ik, val_ptr}`, no impl pointer
+- `operator*`: return cached key+value (bool_ref for IS_BOOL)
+- `operator++`: one path — `adv_fn(leaf, ik, FWD)`, then `walk_from_leaf` → `edge_fn`
+- `operator--`: same with BWD
+- Update `at()`, `operator[]`, `find()`, `begin()`, `lower_bound()`, `upper_bound()`
+
+### 8.6 Dead code removal — TODO
+- Remove from kntrie_ops.hpp: `reconstruct_ik`, `value_ref_at`, `value_cref_at`, `bool_ref_at`
+- Remove `is_bitmap_leaf` from kntrie_bitmask.hpp (no longer needed)

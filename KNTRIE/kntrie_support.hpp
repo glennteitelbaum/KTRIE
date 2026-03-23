@@ -333,15 +333,25 @@ struct insert_pos_result_t {
     bool      inserted = false;
 };
 
-// 3 leaf function pointers, all return leaf_pos_t.
+// Iteration entry — returned by all fn ptrs. Complete: leaf, pos, key, value.
+// val is void* — caller casts to VALUE* (non-bool) or uint64_t* (bool base).
+struct iter_entry_t {
+    uint64_t* leaf  = nullptr;
+    uint16_t  pos   = 0;
+    uint64_t  ik    = 0;       // full key, left-aligned in u64
+    void*     val   = nullptr;
+    bool      found = false;
+};
+
+// 3 leaf function pointers, all return iter_entry_t.
 // find_fn: exact match.
-using find_fn_t = leaf_pos_t (*)(uint64_t*, uint64_t) noexcept;
+using find_fn_t = iter_entry_t (*)(uint64_t*, uint64_t) noexcept;
 
 // adv_fn: directional search (next if FWD, prev if BWD).
-using adv_fn_t  = leaf_pos_t (*)(uint64_t*, uint64_t, dir_t) noexcept;
+using adv_fn_t  = iter_entry_t (*)(uint64_t*, uint64_t, dir_t) noexcept;
 
 // edge_fn: edge entry (first if FWD, last if BWD).
-using edge_fn_t = leaf_pos_t (*)(uint64_t*, dir_t) noexcept;
+using edge_fn_t = iter_entry_t (*)(uint64_t*, dir_t) noexcept;
 
 // ==========================================================================
 // Leaf node accessors

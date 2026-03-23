@@ -255,9 +255,8 @@ public:
     // Find — no sentinel checks, sentinel fn returns nullptr
     // ==================================================================
 
-    // Find returning {leaf*, pos, found} for live iterators.
-    // Calls find_loop which now returns leaf_pos_t.
-    leaf_pos_t find_with_pos(const KEY& key) const noexcept {
+    // Find entry — returns iter_entry_t with key+val.
+    iter_entry_t find_entry(const KEY& key) const noexcept {
         uint64_t ik = key_to_u64(key);
         if ((ik ^ root_prefix_v) & root_prefix_mask()) [[unlikely]] return {};
         return BO::find_loop(root_ptr_v, ik, ik << root_skip_bits_v);
@@ -265,36 +264,117 @@ public:
 
     // Legacy find — returns VALUE* for callers that just need the value.
     const VALUE* find_value(const KEY& key) const noexcept {
-        auto r = find_with_pos(key);
+        auto r = find_entry(key);
         if (!r.found) return nullptr;
-        return reinterpret_cast<const VALUE*>(&OPS::value_cref_at(r.node, r.pos));
+        return reinterpret_cast<const VALUE*>(r.val);
     }
 
     bool contains(const KEY& key) const noexcept {
-        return find_with_pos(key).found;
+        return find_entry(key).found;
     }
 
     // ==================================================================
-    // Position accessors — for live iterators to read key/value
+    // Edge entry — first (FWD) or last (BWD) entry in container.
     // ==================================================================
 
-    KEY key_at_pos(const uint64_t* leaf, uint16_t pos) const noexcept {
-        uint64_t ik = OPS::reconstruct_ik(leaf, pos);
-        IK internal = static_cast<IK>(ik >> (U64_BITS - IK_BITS));
-        return KO::to_key(internal);
+    iter_entry_t edge_entry(dir_t dir) const noexcept {
+        if (size_v == 0) [[unlikely]] return {};
+        return BO::descend_edge_loop(root_ptr_v, dir);
     }
 
-    static VALUE& value_ref_at_pos(uint64_t* leaf, uint16_t pos) noexcept {
-        // OPS operates on NORM_V (normalized value); reinterpret to VALUE
-        return reinterpret_cast<VALUE&>(OPS::value_ref_at(leaf, pos));
+    // ==================================================================
+    // Parent walk — static, no impl pointer needed.
+    // All parents are bitmask nodes.
+    // ==================================================================
+
+    // Walk from a leaf: get parent byte + leaf_parent, then walk bitmask chain.
+    static iter_entry_t walk_from_leaf(uint64_t* leaf, dir_t dir) noexcept {
+        uint8_t byte = static_cast<uint8_t>(get_header(leaf)->parent_byte());
+        uint64_t* parent = leaf_parent(leaf);
+        return walk_bm_chain(parent, byte, dir);
     }
 
-    static const VALUE& value_cref_at_pos(const uint64_t* leaf, uint16_t pos) noexcept {
-        return reinterpret_cast<const VALUE&>(OPS::value_cref_at(leaf, pos));
+    // Walk from a bitmask node: get parent byte + bm_parent, then walk chain.
+    static iter_entry_t walk_from_bm(uint64_t* bm_node, dir_t dir) noexcept {
+        uint8_t byte = static_cast<uint8_t>(get_header(bm_node)->parent_byte());
+        uint64_t* parent = bm_parent(bm_node);
+        return walk_bm_chain(parent, byte, dir);
     }
 
-    static bool_ref bool_ref_at_pos(uint64_t* leaf, uint16_t pos) noexcept {
-        return OPS::bool_ref_at(leaf, pos);
+    // Walk bitmask parent chain. All nodes are bitmask.
+    static iter_entry_t walk_bm_chain(uint64_t* parent, uint8_t byte, dir_t dir) noexcept {
+        while (byte != node_header_t::ROOT_BYTE) {
+            uint64_t bm_ptr = BO::node_bm_ptr(parent);
+            auto [sib, found] = (dir == dir_t::FWD)
+                ? BO::bm_next_sibling(bm_ptr, byte)
+                : BO::bm_prev_sibling(bm_ptr, byte);
+            if (found) return BO::descend_edge_loop(sib, dir);
+            byte = static_cast<uint8_t>(get_header(parent)->parent_byte());
+            parent = bm_parent(parent);
+        }
+        return {};
+    }
+
+    // ==================================================================
+    // Tracked descent for lower_bound / upper_bound.
+    // On bitmask miss, tries next sibling then walks parents.
+    // ==================================================================
+
+    template<typename LeafFn>
+    iter_entry_t tracked_descent_fwd(uint64_t ik, LeafFn&& leaf_fn) const noexcept {
+        if (size_v == 0) [[unlikely]] return {};
+
+        uint64_t diff = (ik ^ root_prefix_v) & root_prefix_mask();
+        if (diff) [[unlikely]] {
+            int shift = std::countl_zero(diff) & BYTE_BOUNDARY_MASK;
+            uint8_t kb = static_cast<uint8_t>(ik >> (U64_TOP_BYTE_SHIFT - shift));
+            uint8_t pb = static_cast<uint8_t>(root_prefix_v >> (U64_TOP_BYTE_SHIFT - shift));
+            if (kb < pb) return edge_entry(dir_t::FWD);
+            return {};
+        }
+
+        uint64_t ptr = root_ptr_v;
+        uint64_t shifted = ik << root_skip_bits_v;
+        int depth = 0;
+
+        while (!(ptr & LEAF_BIT)) [[likely]] {
+            uint8_t byte = static_cast<uint8_t>(shifted >> (U64_TOP_BYTE_SHIFT - depth * CHAR_BIT));
+            auto [child, slot] = BO::bm_child_exact(ptr, byte);
+            if (slot < 0) [[unlikely]] {
+                auto [sib, found] = BO::bm_next_sibling(ptr, byte);
+                if (found) return BO::descend_edge_loop(sib, dir_t::FWD);
+                uint64_t* bm_node = bm_to_node(ptr);
+                return walk_from_bm(bm_node, dir_t::FWD);
+            }
+            ptr = child;
+            ++depth;
+        }
+
+        uint64_t* leaf = untag_leaf_mut(ptr);
+        return leaf_fn(leaf, ik);
+    }
+
+    iter_entry_t lower_bound_entry(const KEY& key) const noexcept {
+        uint64_t ik = key_to_u64(key);
+        return tracked_descent_fwd(ik, [](uint64_t* leaf, uint64_t ik_) -> iter_entry_t {
+            auto fn = get_find_fn(leaf);
+            auto r = fn(leaf, ik_);
+            if (r.found) return r;
+            auto fn_adv = get_find_adv(leaf);
+            r = fn_adv(leaf, ik_, dir_t::FWD);
+            if (r.found) return r;
+            return walk_from_leaf(leaf, dir_t::FWD);
+        });
+    }
+
+    iter_entry_t upper_bound_entry(const KEY& key) const noexcept {
+        uint64_t ik = key_to_u64(key);
+        return tracked_descent_fwd(ik, [](uint64_t* leaf, uint64_t ik_) -> iter_entry_t {
+            auto fn_adv = get_find_adv(leaf);
+            auto r = fn_adv(leaf, ik_, dir_t::FWD);
+            if (r.found) return r;
+            return walk_from_leaf(leaf, dir_t::FWD);
+        });
     }
 
 public:
@@ -344,6 +424,12 @@ public:
     bool erase_at(uint64_t* leaf, uint16_t pos) {
         if (size_v == 0) [[unlikely]] return false;
         uint64_t ik = OPS::reconstruct_ik(leaf, pos);
+        return erase_ik(ik);
+    }
+
+    // Erase by cached ik — used by iterator which already has the key.
+    bool erase_by_ik(uint64_t ik) {
+        if (size_v == 0) [[unlikely]] return false;
         return erase_ik(ik);
     }
 
@@ -428,139 +514,6 @@ public:
         return bm_to_node_const(root_ptr_v);
     }
 
-    // ==================================================================
-    // Live position API — all direction-parameterized
-    // ==================================================================
-
-    leaf_pos_t edge_pos(dir_t dir) const noexcept {
-        if (size_v == 0) [[unlikely]] return {};
-        return BO::descend_edge_loop(root_ptr_v, dir);
-    }
-
-    // Advance/retreat: hot path within same leaf, cold path walks parents.
-    leaf_pos_t advance_pos(uint64_t* leaf, uint16_t pos, dir_t dir) const noexcept {
-        // Try within same leaf
-        if (BO::is_bitmap_leaf(leaf)) {
-            constexpr size_t hs = LEAF_HEADER_U64;
-            if (dir == dir_t::FWD) {
-                // Fast path: check if next bit is set (common for dense bitmaps)
-                constexpr unsigned BITS_PER_WORD = U64_BITS;
-                uint8_t next = static_cast<uint8_t>(pos + 1);
-                if (next != 0) {  // pos < 255
-                    unsigned w = next / BITS_PER_WORD;
-                    unsigned b = next % BITS_PER_WORD;
-                    if ((leaf[hs + w] >> b) & 1)
-                        return {leaf, static_cast<uint16_t>(next), true};
-                }
-                // Slow path: sparse bitmap
-                auto adj = BO::bm(leaf, hs).next_set_after(static_cast<uint8_t>(pos));
-                if (adj.found) return {leaf, static_cast<uint16_t>(adj.idx), true};
-            } else {
-                // Fast path: check if prev bit is set
-                if (pos > 0) {
-                    constexpr unsigned BITS_PER_WORD = U64_BITS;
-                    uint8_t prev = static_cast<uint8_t>(pos - 1);
-                    unsigned w = prev / BITS_PER_WORD;
-                    unsigned b = prev % BITS_PER_WORD;
-                    if ((leaf[hs + w] >> b) & 1)
-                        return {leaf, static_cast<uint16_t>(prev), true};
-                }
-                auto adj = BO::bm(leaf, hs).prev_set_before(static_cast<uint8_t>(pos));
-                if (adj.found) return {leaf, static_cast<uint16_t>(adj.idx), true};
-            }
-        } else {
-            unsigned entries = get_header(leaf)->entries();
-            if (dir == dir_t::FWD) {
-                if (pos + 1 < entries) return {leaf, static_cast<uint16_t>(pos + 1), true};
-            } else {
-                if (pos > 0) return {leaf, static_cast<uint16_t>(pos - 1), true};
-            }
-        }
-
-        return walk_parent(leaf, true, dir);
-    }
-
-    // Walk parent chain in given direction.
-    leaf_pos_t walk_parent(uint64_t* node, bool is_leaf_node, dir_t dir) const noexcept {
-        while (true) {
-            auto* h = get_header(node);
-            if (h->is_root()) return {};
-            uint8_t byte = static_cast<uint8_t>(h->parent_byte());
-            uint64_t* parent_node = is_leaf_node ? leaf_parent(node) : bm_parent(node);
-            uint64_t parent_bm_ptr = BO::node_bm_ptr(parent_node);
-            auto [sib, found] = (dir == dir_t::FWD)
-                ? BO::bm_next_sibling(parent_bm_ptr, byte)
-                : BO::bm_prev_sibling(parent_bm_ptr, byte);
-            if (found) return BO::descend_edge_loop(sib, dir);
-            node = parent_node;
-            is_leaf_node = false;
-        }
-    }
-
-    // ==================================================================
-    // Tracked descent for lower_bound / upper_bound.
-    // Shared descent logic; at the leaf, calls the provided leaf_fn.
-    // On bitmask miss, tries next sibling in FWD direction then walks parents.
-    // ==================================================================
-
-    template<typename LeafFn>
-    leaf_pos_t tracked_descent_fwd(uint64_t ik, LeafFn&& leaf_fn) const noexcept {
-        if (size_v == 0) [[unlikely]] return {};
-
-        uint64_t diff = (ik ^ root_prefix_v) & root_prefix_mask();
-        if (diff) [[unlikely]] {
-            int shift = std::countl_zero(diff) & BYTE_BOUNDARY_MASK;
-            uint8_t kb = static_cast<uint8_t>(ik >> (U64_TOP_BYTE_SHIFT - shift));
-            uint8_t pb = static_cast<uint8_t>(root_prefix_v >> (U64_TOP_BYTE_SHIFT - shift));
-            if (kb < pb) return edge_pos(dir_t::FWD);
-            return {};
-        }
-
-        uint64_t ptr = root_ptr_v;
-        uint64_t shifted = ik << root_skip_bits_v;
-        int depth = 0;
-
-        while (!(ptr & LEAF_BIT)) [[likely]] {
-            uint8_t byte = static_cast<uint8_t>(shifted >> (U64_TOP_BYTE_SHIFT - depth * CHAR_BIT));
-            auto [child, slot] = BO::bm_child_exact(ptr, byte);
-            if (slot < 0) [[unlikely]] {
-                auto [sib, found] = BO::bm_next_sibling(ptr, byte);
-                if (found) return BO::descend_edge_loop(sib, dir_t::FWD);
-                uint64_t* bm_node = bm_to_node(ptr);
-                return walk_parent(bm_node, false, dir_t::FWD);
-            }
-            ptr = child;
-            ++depth;
-        }
-
-        uint64_t* leaf = untag_leaf_mut(ptr);
-        return leaf_fn(leaf, ik);
-    }
-
-    leaf_pos_t lower_bound_pos(const KEY& key) const noexcept {
-        uint64_t ik = key_to_u64(key);
-        return tracked_descent_fwd(ik, [this](uint64_t* leaf, uint64_t ik_) {
-            // Try exact match, then advance FWD
-            auto fn = get_find_fn(leaf);
-            auto r = fn(leaf, ik_);
-            if (r.found) return r;
-            auto fn_adv = get_find_adv(leaf);
-            r = fn_adv(leaf, ik_, dir_t::FWD);
-            if (r.found) return r;
-            return walk_parent(leaf, true, dir_t::FWD);
-        });
-    }
-
-    leaf_pos_t upper_bound_pos(const KEY& key) const noexcept {
-        uint64_t ik = key_to_u64(key);
-        return tracked_descent_fwd(ik, [this](uint64_t* leaf, uint64_t ik_) {
-            auto fn_adv = get_find_adv(leaf);
-            auto r = fn_adv(leaf, ik_, dir_t::FWD);
-            if (r.found) return r;
-            return walk_parent(leaf, true, dir_t::FWD);
-        });
-    }
-
     template<bool INSERT, bool ASSIGN>
     insert_pos_result_t insert_dispatch(const KEY& key, const VALUE& value) {
         uint64_t ik = key_to_u64(key);
@@ -604,8 +557,8 @@ public:
                 if (size_v <= COMPACT_MAX && !(root_ptr_v & LEAF_BIT)) [[unlikely]]
                     coalesce_bm_to_leaf();
                 // normalize/coalesce may have reallocated — re-find
-                auto lp = find_with_pos(key);
-                return {lp.node, lp.pos, true};
+                auto lp = find_entry(key);
+                return {lp.leaf, lp.pos, true};
             }
             return {r.leaf, r.pos, true};
         }

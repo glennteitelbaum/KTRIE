@@ -15,8 +15,14 @@ class kntrie {
 
     using UK     = std::make_unsigned_t<KEY>;
     using impl_t = kntrie_detail::kntrie_impl<UK, VALUE, ALLOC>;
+    using KO     = kntrie_detail::key_ops<UK>;
+    using IK     = typename KO::IK;
 
     static constexpr int KEY_BITS = sizeof(KEY) * CHAR_BIT;
+    static constexpr int IK_BITS  = KO::IK_BITS;
+    static constexpr int U64_BITS = 64;
+    static constexpr bool IS_BOOL = std::is_same_v<VALUE, bool>;
+
     static constexpr UK  SIGN_BIT = std::is_signed_v<KEY>
         ? (UK(1) << (KEY_BITS - 1)) : UK(0);
 
@@ -27,6 +33,12 @@ class kntrie {
         return static_cast<KEY>(u ^ SIGN_BIT);
     }
 
+    // Convert left-aligned ik from iter_entry_t to KEY
+    static KEY ik_to_key(uint64_t ik) noexcept {
+        IK internal = static_cast<IK>(ik >> (U64_BITS - IK_BITS));
+        return from_unsigned(KO::to_key(internal));
+    }
+
 public:
     using key_type        = KEY;
     using mapped_type     = VALUE;
@@ -35,34 +47,33 @@ public:
     using difference_type = std::ptrdiff_t;
     using allocator_type  = ALLOC;
 
-    static constexpr bool IS_BOOL = std::is_same_v<VALUE, bool>;
-
-    // ==================================================================
-    // Iterator — live, bidirectional
-    //
-    // Points into the trie structure. operator*() returns a pair with a
-    // reference to the value, not a copy. Invalidated by any modification
-    // to the container (same as std::unordered_map).
-    // For VALUE=bool, the mapped reference is a bool_ref proxy into
-    // packed bit storage.
-    // ==================================================================
-
     using mapped_ref       = std::conditional_t<IS_BOOL,
                                 kntrie_detail::bool_ref, VALUE&>;
     using const_mapped_ref = std::conditional_t<IS_BOOL,
                                 bool, const VALUE&>;
 
+    // ==================================================================
+    // Iterator — live, bidirectional
+    //
+    // Caches key and value pointer from fn ptrs. operator*() returns
+    // cached pair directly — no header reads, no type dispatch.
+    // Invalidated by any modification (same as std::unordered_map).
+    // No impl pointer — parent walk uses node parent pointers.
+    // ==================================================================
+
     class iterator {
         friend class kntrie;
-        impl_t*   impl_v = nullptr;
         uint64_t* leaf_v = nullptr;
         uint16_t  pos_v  = 0;
+        uint64_t  ik_v   = 0;
+        void*     val_v  = nullptr;
 
-        iterator(impl_t* p, uint64_t* leaf, uint16_t pos)
-            : impl_v(p), leaf_v(leaf), pos_v(pos) {}
+        iterator(kntrie_detail::iter_entry_t e)
+            : leaf_v(e.leaf), pos_v(e.pos), ik_v(e.ik), val_v(e.val) {}
 
-        iterator(impl_t* p, kntrie_detail::leaf_pos_t lp)
-            : impl_v(p), leaf_v(lp.node), pos_v(lp.pos) {}
+        // For insert returning iterator (leaf+pos known but no cached entry)
+        iterator(uint64_t* leaf, uint16_t pos, uint64_t ik, void* val)
+            : leaf_v(leaf), pos_v(pos), ik_v(ik), val_v(val) {}
 
     public:
         using iterator_category = std::bidirectional_iterator_tag;
@@ -79,12 +90,15 @@ public:
         iterator() = default;
 
         reference operator*() const noexcept {
-            KEY k = impl_v->key_at_pos(leaf_v, pos_v);
-            KEY fk = from_unsigned(to_unsigned(k));
+            KEY k = ik_to_key(ik_v);
             if constexpr (IS_BOOL) {
-                return {fk, impl_t::bool_ref_at_pos(leaf_v, pos_v)};
+                constexpr unsigned BITS_PER_WORD = 64;
+                auto* base = static_cast<uint64_t*>(val_v);
+                return {k, kntrie_detail::bool_ref{
+                    base + pos_v / BITS_PER_WORD,
+                    static_cast<uint8_t>(pos_v % BITS_PER_WORD)}};
             } else {
-                return {fk, impl_t::value_ref_at_pos(leaf_v, pos_v)};
+                return {k, *static_cast<VALUE*>(val_v)};
             }
         }
 
@@ -92,22 +106,40 @@ public:
             return {**this};
         }
 
+        // One path: adv_fn → if miss, walk parent chain → edge_fn
         iterator& operator++() {
-            auto r = impl_v->advance_pos(leaf_v, pos_v, kntrie_detail::dir_t::FWD);
-            leaf_v = r.node;
-            pos_v  = r.pos;
+            using namespace kntrie_detail;
+            auto fn = get_find_adv(leaf_v);
+            auto e = fn(leaf_v, ik_v, dir_t::FWD);
+            if (e.found) {
+                leaf_v = e.leaf; pos_v = e.pos;
+                ik_v = e.ik; val_v = e.val;
+                return *this;
+            }
+            // Walk parent chain — first parent from leaf, rest from bitmask
+            auto e2 = impl_t::walk_from_leaf(leaf_v, dir_t::FWD);
+            leaf_v = e2.leaf; pos_v = e2.pos;
+            ik_v = e2.ik; val_v = e2.val;
             return *this;
         }
         iterator operator++(int) { auto t = *this; ++(*this); return t; }
 
         iterator& operator--() {
+            using namespace kntrie_detail;
             if (!leaf_v) {
-                auto r = impl_v->edge_pos(kntrie_detail::dir_t::BWD);
-                leaf_v = r.node; pos_v = r.pos;
-            } else {
-                auto r = impl_v->advance_pos(leaf_v, pos_v, kntrie_detail::dir_t::BWD);
-                leaf_v = r.node; pos_v = r.pos;
+                // Can't decrement end() without container — use rbegin() instead
+                return *this;
             }
+            auto fn = get_find_adv(leaf_v);
+            auto e = fn(leaf_v, ik_v, dir_t::BWD);
+            if (e.found) {
+                leaf_v = e.leaf; pos_v = e.pos;
+                ik_v = e.ik; val_v = e.val;
+                return *this;
+            }
+            auto e2 = impl_t::walk_from_leaf(leaf_v, dir_t::BWD);
+            leaf_v = e2.leaf; pos_v = e2.pos;
+            ik_v = e2.ik; val_v = e2.val;
             return *this;
         }
         iterator operator--(int) { auto t = *this; --(*this); return t; }
@@ -173,22 +205,42 @@ public:
     // ==================================================================
 
     mapped_ref at(const KEY& key) {
-        auto r = impl_.find_with_pos(to_unsigned(key));
+        auto r = impl_.find_entry(to_unsigned(key));
         if (!r.found) throw std::out_of_range("kntrie::at");
-        if constexpr (IS_BOOL) return impl_t::bool_ref_at_pos(r.node, r.pos);
-        else return impl_t::value_ref_at_pos(r.node, r.pos);
+        if constexpr (IS_BOOL) {
+            constexpr unsigned BPW = 64;
+            auto* base = static_cast<uint64_t*>(r.val);
+            return kntrie_detail::bool_ref{base + r.pos / BPW,
+                                            static_cast<uint8_t>(r.pos % BPW)};
+        } else {
+            return *static_cast<VALUE*>(r.val);
+        }
     }
     const_mapped_ref at(const KEY& key) const {
-        auto r = impl_.find_with_pos(to_unsigned(key));
+        auto r = impl_.find_entry(to_unsigned(key));
         if (!r.found) throw std::out_of_range("kntrie::at");
-        if constexpr (IS_BOOL) return impl_t::bool_ref_at_pos(const_cast<uint64_t*>(r.node), r.pos);
-        else return impl_t::value_cref_at_pos(r.node, r.pos);
+        if constexpr (IS_BOOL) {
+            constexpr unsigned BPW = 64;
+            auto* base = static_cast<uint64_t*>(r.val);
+            return (base[r.pos / BPW] >> (r.pos % BPW)) & 1;
+        } else {
+            return *static_cast<const VALUE*>(r.val);
+        }
     }
 
     mapped_ref operator[](const KEY& key) {
         auto r = impl_.insert_with_pos(to_unsigned(key), VALUE{});
-        if constexpr (IS_BOOL) return impl_t::bool_ref_at_pos(r.leaf, r.pos);
-        else return impl_t::value_ref_at_pos(r.leaf, r.pos);
+        // insert_with_pos returns insert_pos_result_t, not iter_entry_t.
+        // Re-find to get the val pointer. Cache-hot after insert.
+        auto e = impl_.find_entry(to_unsigned(key));
+        if constexpr (IS_BOOL) {
+            constexpr unsigned BPW = 64;
+            auto* base = static_cast<uint64_t*>(e.val);
+            return kntrie_detail::bool_ref{base + e.pos / BPW,
+                                            static_cast<uint8_t>(e.pos % BPW)};
+        } else {
+            return *static_cast<VALUE*>(e.val);
+        }
     }
 
     // ==================================================================
@@ -196,18 +248,24 @@ public:
     // ==================================================================
 
     std::pair<iterator, bool> insert(const value_type& kv) {
-        auto r = impl_.insert_with_pos(to_unsigned(kv.first), kv.second);
-        return {iterator(&impl_, r.leaf, r.pos), r.inserted};
+        UK uk = to_unsigned(kv.first);
+        auto r = impl_.insert_with_pos(uk, kv.second);
+        auto e = impl_.find_entry(uk);
+        return {iterator(e), r.inserted};
     }
 
     std::pair<iterator, bool> insert(const KEY& key, const VALUE& value) {
-        auto r = impl_.insert_with_pos(to_unsigned(key), value);
-        return {iterator(&impl_, r.leaf, r.pos), r.inserted};
+        UK uk = to_unsigned(key);
+        auto r = impl_.insert_with_pos(uk, value);
+        auto e = impl_.find_entry(uk);
+        return {iterator(e), r.inserted};
     }
 
     std::pair<iterator, bool> insert(value_type&& kv) {
-        auto r = impl_.insert_with_pos(to_unsigned(kv.first), std::move(kv.second));
-        return {iterator(&impl_, r.leaf, r.pos), r.inserted};
+        UK uk = to_unsigned(kv.first);
+        auto r = impl_.insert_with_pos(uk, std::move(kv.second));
+        auto e = impl_.find_entry(uk);
+        return {iterator(e), r.inserted};
     }
 
     iterator insert(const_iterator, const value_type& kv) {
@@ -225,8 +283,10 @@ public:
     }
 
     std::pair<iterator, bool> insert_or_assign(const KEY& key, const VALUE& value) {
-        auto r = impl_.upsert_with_pos(to_unsigned(key), value);
-        return {iterator(&impl_, r.leaf, r.pos), r.inserted};
+        UK uk = to_unsigned(key);
+        auto r = impl_.upsert_with_pos(uk, value);
+        auto e = impl_.find_entry(uk);
+        return {iterator(e), r.inserted};
     }
 
     template<typename... Args>
@@ -238,8 +298,10 @@ public:
     template<typename... Args>
     std::pair<iterator, bool> try_emplace(const KEY& key, Args&&... args) {
         VALUE v(std::forward<Args>(args)...);
-        auto r = impl_.insert_with_pos(to_unsigned(key), std::move(v));
-        return {iterator(&impl_, r.leaf, r.pos), r.inserted};
+        UK uk = to_unsigned(key);
+        auto r = impl_.insert_with_pos(uk, std::move(v));
+        auto e = impl_.find_entry(uk);
+        return {iterator(e), r.inserted};
     }
 
     // ==================================================================
@@ -252,7 +314,7 @@ public:
 
     iterator erase(iterator pos) {
         auto next = pos; ++next;
-        impl_.erase_at(pos.leaf_v, pos.pos_v);
+        impl_.erase_by_ik(pos.ik_v);
         return next;
     }
 
@@ -275,26 +337,26 @@ public:
     }
 
     iterator find(const KEY& key) {
-        auto r = impl_.find_with_pos(to_unsigned(key));
+        auto r = impl_.find_entry(to_unsigned(key));
         if (!r.found) return end();
-        return iterator(&impl_, r.node, r.pos);
+        return iterator(r);
     }
     const_iterator find(const KEY& key) const {
-        auto r = impl_.find_with_pos(to_unsigned(key));
+        auto r = impl_.find_entry(to_unsigned(key));
         if (!r.found) return end();
-        return const_iterator(const_cast<impl_t*>(&impl_), r.node, r.pos);
+        return const_iterator(r);
     }
 
     iterator lower_bound(const KEY& key) {
-        auto r = impl_.lower_bound_pos(to_unsigned(key));
+        auto r = impl_.lower_bound_entry(to_unsigned(key));
         if (!r.found) return end();
-        return iterator(&impl_, r.node, r.pos);
+        return iterator(r);
     }
 
     iterator upper_bound(const KEY& key) {
-        auto r = impl_.upper_bound_pos(to_unsigned(key));
+        auto r = impl_.upper_bound_entry(to_unsigned(key));
         if (!r.found) return end();
-        return iterator(&impl_, r.node, r.pos);
+        return iterator(r);
     }
 
     std::pair<iterator, iterator> equal_range(const KEY& key) {
@@ -324,17 +386,17 @@ public:
     // ==================================================================
 
     iterator begin() noexcept {
-        return iterator(&impl_, impl_.edge_pos(kntrie_detail::dir_t::FWD));
+        return iterator(impl_.edge_entry(kntrie_detail::dir_t::FWD));
     }
     iterator end() noexcept {
-        return iterator(&impl_, nullptr, 0);
+        return iterator{};
     }
     const_iterator begin() const noexcept {
-        return const_iterator(const_cast<impl_t*>(&impl_),
-                              const_cast<impl_t&>(impl_).edge_pos(kntrie_detail::dir_t::FWD));
+        return const_iterator(const_cast<impl_t&>(impl_).edge_entry(
+            kntrie_detail::dir_t::FWD));
     }
     const_iterator end() const noexcept {
-        return const_iterator(const_cast<impl_t*>(&impl_), nullptr, 0);
+        return const_iterator{};
     }
     const_iterator cbegin() const noexcept { return begin(); }
     const_iterator cend()   const noexcept { return end(); }

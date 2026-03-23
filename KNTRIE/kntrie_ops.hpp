@@ -605,7 +605,7 @@ struct kntrie_ops {
         bld.dealloc_node(const_cast<uint64_t*>(node), hdr->alloc_u64());
 
         // Locate the inserted entry in the new subtree (cache-hot).
-        leaf_pos_t lp;
+        iter_entry_t lp;
         if (child_tagged & LEAF_BIT) {
             uint64_t* leaf = untag_leaf_mut(child_tagged);
             lp = get_find_fn(leaf)(leaf, ik);
@@ -618,7 +618,7 @@ struct kntrie_ops {
             uint64_t shifted = (shift_amt > 0) ? (ik << shift_amt) : ik;
             lp = BO::find_loop(child_tagged, ik, shifted);
         }
-        return {child_tagged, true, false, nullptr, lp.node, lp.pos};
+        return {child_tagged, true, false, nullptr, lp.leaf, lp.pos};
     }
 
     // ==================================================================
