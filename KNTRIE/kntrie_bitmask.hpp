@@ -255,6 +255,9 @@ struct bitmask_ops {
                                     indices, child_tagged_ptrs, n_children);
 
         *descendants_ptr_mut(nn, hs, n_children) = descendants_;
+
+        // Link all children to this new parent
+        relink_all_children(nn, hs);
         return nn;
     }
 
@@ -310,6 +313,9 @@ struct bitmask_ops {
 
         // Single descendants count (after children)
         nn[final_offset + BM_CHILDREN_START + final_n_children] = descendants_;
+
+        // Link all final-level children to this node
+        relink_all_children(nn, final_offset);
 
         return nn;
     }
@@ -901,6 +907,9 @@ private:
 
             // Write descendants at new position
             *descendants_ptr_mut(node, hs, nc) = saved;
+
+            // Link new child to this parent
+            link_child(node, child_tagged, idx);
             return node;
         }
 
@@ -925,6 +934,9 @@ private:
 
         *descendants_ptr_mut(nn, hs, nc) = saved;
 
+        // Relink all children to new parent
+        relink_all_children(nn, hs);
+
         bld.dealloc_node(node, h->alloc_u64());
         return nn;
     }
@@ -941,7 +953,7 @@ private:
 
         size_t needed = bitmask_size_u64(nc, hs);
 
-        // In-place
+        // In-place — no parent changes needed (removed child is freed)
         if (!should_shrink_u64(h->alloc_u64(), needed)) {
             uint64_t saved = *descendants_ptr(node, hs, oc);
 
@@ -974,8 +986,30 @@ private:
 
         *descendants_ptr_mut(nn, hs, nc) = saved;
 
+        // Relink all children to new parent
+        relink_all_children(nn, hs);
+
         bld.dealloc_node(node, h->alloc_u64());
         return nn;
+    }
+
+    // --- Relink all children of a bitmask node to point to it as parent ---
+    static void relink_all_children(uint64_t* node, size_t hs) noexcept {
+        const bitmap_256_t& bmp = bm(node, hs);
+        unsigned nc = get_header(node)->entries();
+        const uint64_t* rch = real_children(node, hs);
+        // Walk set bits to get byte values
+        unsigned slot = 0;
+        for (unsigned w = 0; w < BITMAP_WORDS && slot < nc; ++w) {
+            uint64_t word = bmp.words[w];
+            while (word && slot < nc) {
+                unsigned bit = static_cast<unsigned>(std::countr_zero(word));
+                uint8_t byte = static_cast<uint8_t>(w * U64_BITS + bit);
+                link_child(node, rch[slot], byte);
+                word &= word - 1;  // clear lowest set bit
+                ++slot;
+            }
+        }
     }
 
     // --- Shared lookup core: works for any header size ---

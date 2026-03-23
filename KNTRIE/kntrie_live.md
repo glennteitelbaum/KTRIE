@@ -79,7 +79,7 @@ inline void set_leaf_parent(uint64_t* node, uint64_t* parent) noexcept {
 }
 ```
 
-### 1.4 bool_slots — SKIPPED (ptr/ptr_at still used by val_ptr_at and bitmask return paths until full iterator switchover)
+### 1.4 bool_slots — DONE (ptr/ptr_at/TRUE_VAL/FALSE_VAL already removed in earlier sessions)
 
 Remove from `bool_slots`:
 ```
@@ -139,7 +139,7 @@ static const VALUE* as_ptr(const slot_type& s) noexcept {
 }
 ```
 
-### 1.7 Snapshot iteration types — SKIPPED (iter_fn_t still used by find_next/prev)
+### 1.7 Snapshot iteration types — DONE (leaf_result_t, iter_fn_t already removed; fn ptrs now return leaf_pos_t)
 
 Remove:
 ```
@@ -439,7 +439,7 @@ bm_first_child()         -- used by descend loops
 bm_last_child()          -- used by descend loops
 ```
 
-### 3.4 Parent maintenance
+### 3.4 Parent maintenance — PARTIAL (helpers added, bitmask alloc sites instrumented, mark_root in impl insert/erase/normalize/coalesce. Still needed: reduce_root_skip mark_root, build_remainder relink, first-insert mark_root)
 
 Every place that stores a child pointer into a bitmask node must also
 set the child's parent pointer and dispatch byte. Apply in:
@@ -462,7 +462,7 @@ erase_when_node()            (lines 1019-1075)
 leaf_erase_when()            (lines 1139-1160)
 ```
 
-### 4.2 Leaf construction — PARTIAL (set_leaf_fns calls fixed; parent pointer setting at alloc sites still needed)
+### 4.2 Leaf construction — PARTIAL (set_leaf_fns fixed, bm+vals_mut public, GROW constants, value_ref_at_pos cast fixed, copy_leaf_header confirmed copies parent_ptr. Still needed: reduce_root_skip, build_remainder, first-insert)
 
 All leaf allocation sites set `node[LEAF_PARENT_PTR]` and
 `h->set_parent_byte()`.

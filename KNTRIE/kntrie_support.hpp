@@ -306,6 +306,34 @@ inline void set_bm_parent(uint64_t* node, uint64_t* parent) noexcept {
     node[BM_PARENT_IDX] = static_cast<uint64_t>(reinterpret_cast<std::uintptr_t>(parent));
 }
 
+// Link a child (leaf or bitmask) to its parent node + dispatch byte.
+// Call after storing a tagged child pointer in a bitmask's child array.
+inline void link_child(uint64_t* parent_node, uint64_t child_tagged, uint8_t byte) noexcept {
+    if (child_tagged & LEAF_BIT) {
+        if (child_tagged & NOT_FOUND_BIT) return;  // sentinel
+        uint64_t* leaf = untag_leaf_mut(child_tagged);
+        set_leaf_parent(leaf, parent_node);
+        get_header(leaf)->set_parent_byte(byte);
+    } else {
+        uint64_t* child_node = reinterpret_cast<uint64_t*>(
+            static_cast<std::uintptr_t>(child_tagged)) - HEADER_U64;
+        set_bm_parent(child_node, parent_node);
+        get_header(child_node)->set_parent_byte(byte);
+    }
+}
+
+// Mark a node as root (no parent).
+inline void set_root_parent(uint64_t tagged) noexcept {
+    if (tagged & LEAF_BIT) {
+        if (tagged & NOT_FOUND_BIT) return;
+        get_header(untag_leaf_mut(tagged))->set_parent_byte(node_header_t::ROOT_BYTE);
+    } else {
+        uint64_t* node = reinterpret_cast<uint64_t*>(
+            static_cast<std::uintptr_t>(tagged)) - HEADER_U64;
+        get_header(node)->set_parent_byte(node_header_t::ROOT_BYTE);
+    }
+}
+
 // Dynamic header size: only for bitmask nodes (always 1 u64).
 // Leaves always use LEAF_HEADER_U64 = 7.
 

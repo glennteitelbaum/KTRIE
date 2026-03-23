@@ -178,6 +178,13 @@ private:
         root_ptr_v = ptr;
         root_prefix_v = prefix;
         set_root(skip_bytes);
+        mark_root();
+    }
+
+    // Mark current root_ptr_v as root (no parent).
+    void mark_root() noexcept {
+        if (root_ptr_v != BO::SENTINEL_TAGGED)
+            set_root_parent(root_ptr_v);
     }
 
 public:
@@ -345,6 +352,7 @@ private:
         bool erased = r.erased;
         if (erased) [[likely]] {
             root_ptr_v = r.tagged_ptr ? r.tagged_ptr : BO::SENTINEL_TAGGED;
+            mark_root();
             --size_v;
             if (size_v == 0) [[unlikely]] {
                 root_ptr_v = BO::SENTINEL_TAGGED;
@@ -564,7 +572,7 @@ public:
         uint64_t old_root_ptr = root_ptr_v;
         auto r = OPS::template insert_node<INSERT, ASSIGN>(
             root_ptr_v, ik, ik << root_skip_bits_v, root_skip_bytes(), sv, bld_v);
-        if (r.tagged_ptr != root_ptr_v) [[unlikely]] root_ptr_v = r.tagged_ptr;
+        if (r.tagged_ptr != root_ptr_v) [[unlikely]] { root_ptr_v = r.tagged_ptr; mark_root(); }
         bool did_insert = r.inserted;
 
         if (did_insert) [[likely]] {
@@ -619,6 +627,7 @@ private:
                     leaf, root_skip_bytes(), leaf_prefix(leaf), bld_v);
                 root_ptr_v = tag_leaf(leaf);
                 set_root(0);
+                mark_root();
             }
             return;
         }
@@ -650,6 +659,7 @@ private:
         root_ptr_v = tag_bitmask(new_node);
 
         set_root(old_skip + sc);
+        mark_root();
     }
 
     // coalesce_bm_to_leaf: flatten BM tree to single leaf.
@@ -667,6 +677,7 @@ private:
             root_ptr_v = tag_leaf(leaf);
         });
         set_root(0);
+        mark_root();
     }
 
     // ==================================================================
