@@ -772,7 +772,7 @@ be emulated with erase+insert but that defeats the purpose.
 
 ## 7 Design Decisions
 
-### 7.1 Insert pos propagation — PARTIAL (single_entry_pos helper, SENTINEL path done, split_on_prefix returns insert_result_t with leaf/pos, make_leaf_descended returns leaf_and_pos. Still needed: split_skip_at→insert_result_t, convert_to_bitmask→insert_result_t, insert_with_pos use r.leaf/r.pos directly)
+### 7.1 Insert pos propagation — DONE (single_entry_pos helper, SENTINEL/split_on_prefix/split_skip_at return insert_result_t with leaf/pos, convert_to_bitmask finds leaf via find_loop on new subtree, insert_dispatch returns insert_pos_result_t, insert_with_pos/upsert_with_pos single-walk, re-find only after rare normalize/coalesce)
 
 The entire insert chain must propagate `{leaf*, pos}` back to the
 caller. Current return type:
@@ -1075,3 +1075,10 @@ the leaf when the last entry is removed. An empty leaf cannot exist.
 
 Steps 1-3 are independently testable. Step 4 is the API break.
 Step 5 is independent of 1-4.
+
+---
+
+## 9 Post-plan compile fixes needed
+
+1. `link_child` in kntrie_support.hpp calls `set_leaf_parent` which is defined later in the same file — move `link_child`/`set_root_parent` after the leaf accessor definitions, or forward-declare.
+2. Line ~714 in kntrie_ops.hpp has stale `depth_t::suffix_at<BITS>` — replace with `single_entry_pos<BITS>(ik)` or `extract_byte<BITS>(ik)`.

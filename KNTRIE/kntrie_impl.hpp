@@ -303,30 +303,30 @@ public:
     // ==================================================================
 
     std::pair<bool, bool> insert(const KEY& key, const VALUE& value) {
-        return insert_dispatch<true, false>(key, value);
+        auto r = insert_dispatch<true, false>(key, value);
+        return {true, r.inserted};
     }
 
     std::pair<bool, bool> insert_or_assign(const KEY& key, const VALUE& value) {
-        return insert_dispatch<true, true>(key, value);
+        auto r = insert_dispatch<true, true>(key, value);
+        return {true, r.inserted};
     }
 
     std::pair<bool, bool> assign(const KEY& key, const VALUE& value) {
-        return insert_dispatch<false, true>(key, value);
+        auto r = insert_dispatch<false, true>(key, value);
+        return {true, r.inserted};
     }
 
     // Insert returning {leaf, pos, inserted} for live iterators.
-    // Two-walk: insert then find_with_pos (second walk is cache-hot).
+    // Single-walk: insert_dispatch propagates leaf/pos from compact/bitmap insert.
+    // Re-find only after rare normalize_root/coalesce_bm_to_leaf.
     insert_pos_result_t insert_with_pos(const KEY& key, const VALUE& value) {
-        auto [ok, inserted] = insert_dispatch<true, false>(key, value);
-        auto lp = find_with_pos(key);
-        return {lp.node, lp.pos, inserted};
+        return insert_dispatch<true, false>(key, value);
     }
 
     // Insert-or-assign returning {leaf, pos, was_new_insert}.
     insert_pos_result_t upsert_with_pos(const KEY& key, const VALUE& value) {
-        auto [ok, inserted] = insert_dispatch<true, true>(key, value);
-        auto lp = find_with_pos(key);
-        return {lp.node, lp.pos, inserted};
+        return insert_dispatch<true, true>(key, value);
     }
 
     // ==================================================================
@@ -543,7 +543,7 @@ public:
     }
 
     template<bool INSERT, bool ASSIGN>
-    std::pair<bool, bool> insert_dispatch(const KEY& key, const VALUE& value) {
+    insert_pos_result_t insert_dispatch(const KEY& key, const VALUE& value) {
         uint64_t ik = key_to_u64(key);
 
         // Convert VALUE → normalized slot for ops
@@ -559,14 +559,14 @@ public:
 
         // First insert: root at skip=0, leaf handles its own prefix
         if (size_v == 0) [[unlikely]] {
-            if constexpr (!INSERT) { bld_v.destroy_value(sv); return {true, false}; }
+            if constexpr (!INSERT) { bld_v.destroy_value(sv); return {}; }
             set_root(0);
         }
 
         if (root_skip_bits_v > 0) [[unlikely]] {
             uint64_t diff = (ik ^ root_prefix_v) & root_prefix_mask();
             if (diff) [[unlikely]] {
-                if constexpr (!INSERT) { bld_v.destroy_value(sv); return {true, false}; }
+                if constexpr (!INSERT) { bld_v.destroy_value(sv); return {}; }
                 int clz = std::countl_zero(diff);
                 uint8_t div_pos = static_cast<uint8_t>(clz / CHAR_BIT);
                 reduce_root_skip(div_pos);
@@ -577,19 +577,22 @@ public:
         auto r = OPS::template insert_node<INSERT, ASSIGN>(
             root_ptr_v, ik, ik << root_skip_bits_v, root_skip_bytes(), sv, bld_v);
         if (r.tagged_ptr != root_ptr_v) [[unlikely]] { root_ptr_v = r.tagged_ptr; mark_root(); }
-        bool did_insert = r.inserted;
 
-        if (did_insert) [[likely]] {
+        if (r.inserted) [[likely]] {
             ++size_v;
             if (root_ptr_v != old_root_ptr) [[unlikely]] {
                 normalize_root();
                 if (size_v <= COMPACT_MAX && !(root_ptr_v & LEAF_BIT)) [[unlikely]]
                     coalesce_bm_to_leaf();
+                // normalize/coalesce may have reallocated — re-find
+                auto lp = find_with_pos(key);
+                return {lp.node, lp.pos, true};
             }
-            return {true, true};
+            return {r.leaf, r.pos, true};
         }
         bld_v.destroy_value(sv);
-        return {true, false};
+        // Not inserted — r.leaf/r.pos point to the existing entry
+        return {r.leaf, r.pos, false};
     }
 
 private:

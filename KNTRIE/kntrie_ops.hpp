@@ -500,21 +500,23 @@ struct kntrie_ops {
     // ==================================================================
 
     template<int BITS> requires (BITS >= U8_BITS)
-    static uint64_t split_skip_at(uint64_t* node, node_header_t* hdr,
+    static insert_result_t split_skip_at(uint64_t* node, node_header_t* hdr,
                                     uint8_t sc, uint8_t split_pos,
                                     uint64_t ik, VST value, BLD& bld) {
         uint8_t expected = extract_byte<BITS>(ik);
         uint8_t actual_byte = BO::skip_byte(node, split_pos);
 
         // Build new leaf — one BITS-level past the split point
-        uint64_t new_leaf_tagged;
+        uint64_t* new_leaf;
+        uint16_t new_pos;
         if constexpr (BITS > U8_BITS) {
-            auto* leaf = make_single_leaf<BITS - CHAR_BIT>(ik, value, bld);
-            new_leaf_tagged = tag_leaf(leaf);
+            new_leaf = make_single_leaf<BITS - CHAR_BIT>(ik, value, bld);
+            new_pos = single_entry_pos<BITS - CHAR_BIT>(ik);
         } else {
-            auto* leaf = make_single_leaf<BITS>(ik, value, bld);
-            new_leaf_tagged = tag_leaf(leaf);
+            new_leaf = make_single_leaf<BITS>(ik, value, bld);
+            new_pos = single_entry_pos<BITS>(ik);
         }
+        uint64_t new_leaf_tagged = tag_leaf(new_leaf);
 
         // Build remainder from [split_pos+1..sc-1] + final bitmask
         uint64_t remainder = BO::build_remainder(node, sc, split_pos + 1, bld);
@@ -544,7 +546,7 @@ struct kntrie_ops {
         }
 
         bld.dealloc_node(node, hdr->alloc_u64());
-        return result;
+        return {result, true, false, nullptr, new_leaf, new_pos};
     }
 
     // ==================================================================
@@ -552,7 +554,7 @@ struct kntrie_ops {
     // ==================================================================
 
     template<int BITS>
-    static uint64_t convert_to_bitmask_tagged(const uint64_t* node,
+    static insert_result_t convert_to_bitmask_tagged(const uint64_t* node,
                                                 const node_header_t* hdr,
                                                 uint64_t ik, VST value,
                                                 BLD& bld) {
@@ -578,14 +580,12 @@ struct kntrie_ops {
             wk.get(), wv.get(), total, ik, bld);
 
         // Propagate old skip to new child.
-        // depth_t encodes OUTER tree-level BITS + skip.
         uint8_t ps = hdr->skip();
         if (ps > 0) {
             if (child_tagged & LEAF_BIT) {
                 uint64_t* leaf = untag_leaf_mut(child_tagged);
                 uint8_t old_leaf_skip = get_header(leaf)->skip();
                 uint8_t new_skip = old_leaf_skip + ps;
-                // REMAINING = BITS - 8*old_leaf_skip (suffix bits at inner level)
                 int mshift = static_cast<int>(U64_BITS) - KEY_BITS + BITS - CHAR_BIT * old_leaf_skip;
                 uint64_t mask = (mshift >= static_cast<int>(U64_BITS)) ? 0 : (~0ULL << mshift);
                 set_leaf_prefix(leaf, ik & mask);
@@ -593,7 +593,6 @@ struct kntrie_ops {
                 if (old_leaf_skip == 0) set_leaf_fns_for<BITS>(leaf);
                 child_tagged = tag_leaf(leaf);
             } else {
-                // Extract ps skip bytes from ik at root-level positions
                 constexpr int BS = byte_shift<BITS>();
                 uint8_t pfx_bytes[MAX_SKIP];
                 for (uint8_t i = 0; i < ps; ++i)
@@ -604,7 +603,22 @@ struct kntrie_ops {
         }
 
         bld.dealloc_node(const_cast<uint64_t*>(node), hdr->alloc_u64());
-        return child_tagged;
+
+        // Locate the inserted entry in the new subtree (cache-hot).
+        leaf_pos_t lp;
+        if (child_tagged & LEAF_BIT) {
+            uint64_t* leaf = untag_leaf_mut(child_tagged);
+            lp = get_find_fn(leaf)(leaf, ik);
+        } else {
+            // Descent through bitmask (possibly skip chain).
+            // Shifted starts at the subtree root: BITS bytes consumed
+            // minus ps skip bytes now inside the chain.
+            constexpr int CONSUMED_BITS = KEY_BITS - BITS;
+            int shift_amt = CONSUMED_BITS - ps * CHAR_BIT;
+            uint64_t shifted = (shift_amt > 0) ? (ik << shift_amt) : ik;
+            lp = BO::find_loop(child_tagged, ik, shifted);
+        }
+        return {child_tagged, true, false, nullptr, lp.node, lp.pos};
     }
 
     // ==================================================================
@@ -669,12 +683,10 @@ struct kntrie_ops {
             uint8_t actual = BO::skip_byte(node, pos);
             if (expected != actual) [[unlikely]] {
                 if constexpr (!INSERT) return {tag_bitmask(node), false, false};
-                auto tagged = depth_switch(depth, [&]<int BITS>() {
+                return depth_switch(depth, [&]<int BITS>() -> insert_result_t {
                     return split_skip_at<BITS>(node, hdr, sc, pos,
                                                 ik, value, bld);
                 });
-                // Split: leaf+pos unknown here, caller falls back to find_with_pos
-                return {tagged, true, false};
             }
             shifted <<= CHAR_BIT;
             depth++;
@@ -747,8 +759,7 @@ struct kntrie_ops {
         }
         if (result.needs_split) [[unlikely]] {
             if constexpr (!INSERT) return {tag_leaf(node), false, false};
-            return {convert_to_bitmask_tagged<BITS>(node, hdr, ik, value, bld),
-                    true, false};
+            return convert_to_bitmask_tagged<BITS>(node, hdr, ik, value, bld);
         }
         return result;
     }
