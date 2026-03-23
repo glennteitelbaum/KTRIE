@@ -267,7 +267,7 @@ public:
     const VALUE* find_value(const KEY& key) const noexcept {
         auto r = find_with_pos(key);
         if (!r.found) return nullptr;
-        return &OPS::value_cref_at(r.node, r.pos);
+        return reinterpret_cast<const VALUE*>(&OPS::value_cref_at(r.node, r.pos));
     }
 
     bool contains(const KEY& key) const noexcept {

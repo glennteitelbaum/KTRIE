@@ -250,6 +250,7 @@ struct compact_ops {
         }
 
         // In-place: memmove tail right by 1
+        // Key array grows by sizeof(K), which may shift the value start.
         int tail = entries - ins;
         if constexpr (VT::IS_BOOL) {
             auto bv = bool_vals_mut(node, entries, hs);
@@ -260,13 +261,28 @@ struct compact_ops {
             kd[ins] = suffix;
             bv.set(ins, value);
         } else {
-            VST* vd = vals_mut(node, entries, hs);
-            if (tail > 0) {
-                std::memmove(kd + ins + 1, kd + ins, tail * sizeof(K));
-                std::memmove(vd + ins + 1, vd + ins, tail * sizeof(VST));
+            VST* old_vd = vals_mut(node, entries, hs);
+            VST* new_vd = vals_mut(node, entries + 1, hs);
+            if (new_vd != old_vd) {
+                // Value offset changed — relocate all values first (right shift)
+                std::memmove(new_vd, old_vd, entries * sizeof(VST));
+                // Shift tail values for insertion gap
+                if (tail > 0)
+                    std::memmove(new_vd + ins + 1, new_vd + ins, tail * sizeof(VST));
+                // Now safe to shift keys (may overwrite old value area)
+                if (tail > 0)
+                    std::memmove(kd + ins + 1, kd + ins, tail * sizeof(K));
+                kd[ins] = suffix;
+                VT::init_slot(&new_vd[ins], value);
+            } else {
+                // No relocation needed
+                if (tail > 0) {
+                    std::memmove(kd + ins + 1, kd + ins, tail * sizeof(K));
+                    std::memmove(old_vd + ins + 1, old_vd + ins, tail * sizeof(VST));
+                }
+                kd[ins] = suffix;
+                VT::init_slot(&old_vd[ins], value);
             }
-            kd[ins] = suffix;
-            VT::init_slot(&vd[ins], value);
         }
         h->set_entries(entries + 1);
         return {tag_leaf(node), true, false, nullptr,
@@ -334,6 +350,7 @@ struct compact_ops {
         }
 
         // In-place: memmove tail left by 1
+        // Key array shrinks by sizeof(K), which may shift value start left.
         unsigned tail = entries - idx - 1;
         if constexpr (VT::IS_BOOL) {
             auto bv = bool_vals_mut(node, entries, hs);
@@ -342,12 +359,24 @@ struct compact_ops {
                 bv.shift_left_1(idx + 1, tail);
             }
         } else {
-            VST* vd = vals_mut(node, entries, hs);
+            VST* old_vd = vals_mut(node, entries, hs);
+            VST* new_vd = vals_mut(node, nc, hs);
             if constexpr (VT::HAS_DESTRUCTOR)
-                bld.destroy_value(vd[idx]);
-            if (tail > 0) {
-                std::memmove(kd + idx, kd + idx + 1, tail * sizeof(K));
-                std::memmove(vd + idx, vd + idx + 1, tail * sizeof(VST));
+                bld.destroy_value(old_vd[idx]);
+            if (new_vd != old_vd) {
+                // Value offset changed — shift keys first, then relocate values left
+                if (tail > 0)
+                    std::memmove(kd + idx, kd + idx + 1, tail * sizeof(K));
+                // Copy values skipping idx directly to new position
+                if (idx > 0)
+                    std::memmove(new_vd, old_vd, idx * sizeof(VST));
+                if (tail > 0)
+                    std::memmove(new_vd + idx, old_vd + idx + 1, tail * sizeof(VST));
+            } else {
+                if (tail > 0) {
+                    std::memmove(kd + idx, kd + idx + 1, tail * sizeof(K));
+                    std::memmove(old_vd + idx, old_vd + idx + 1, tail * sizeof(VST));
+                }
             }
         }
         h->set_entries(nc);
