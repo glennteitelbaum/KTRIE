@@ -333,22 +333,25 @@ struct insert_pos_result_t {
     bool      inserted = false;
 };
 
-// Iteration entry — returned by all fn ptrs. Complete: leaf, pos, key, value.
-// val is void* — caller casts to VALUE* (non-bool) or uint64_t* (bool base).
+// Iteration entry — returned by all fn ptrs.
+// pos = slot (ordinal index into value array).
+// bit = byte value for bitmap leaves (0-255), ignored for compact.
+// val = void* — VALUE* (non-bool) or uint64_t* (bool packed bits base).
 struct iter_entry_t {
     uint64_t* leaf  = nullptr;
-    uint16_t  pos   = 0;
+    uint16_t  pos   = 0;       // slot
+    uint16_t  bit   = 0;       // byte value (bitmap), unused (compact)
     uint64_t  ik    = 0;       // full key, left-aligned in u64
     void*     val   = nullptr;
     bool      found = false;
 };
 
 // 3 leaf function pointers, all return iter_entry_t.
-// find_fn: exact match.
+// find_fn: exact match by key.
 using find_fn_t = iter_entry_t (*)(uint64_t*, uint64_t) noexcept;
 
-// adv_fn: directional search (next if FWD, prev if BWD).
-using adv_fn_t  = iter_entry_t (*)(uint64_t*, uint64_t, dir_t) noexcept;
+// adv_fn: positional advance from (pos, bit). O(1).
+using adv_fn_t  = iter_entry_t (*)(uint64_t*, uint16_t, uint16_t, dir_t) noexcept;
 
 // edge_fn: edge entry (first if FWD, last if BWD).
 using edge_fn_t = iter_entry_t (*)(uint64_t*, dir_t) noexcept;
@@ -572,7 +575,63 @@ struct bitmap_256_t {
         return static_cast<uint8_t>((idx << U64_BIT_SHIFT) + U64_BITS_MASK - std::countl_zero(words[idx]));
     }
 
+    // Select: find the nth set bit (0-indexed). Precondition: n < popcount.
+    uint8_t select_bit(unsigned n) const noexcept {
+        unsigned remaining = n;
+        for (unsigned w = 0; w < BITMAP_WORDS; ++w) {
+            unsigned pc = static_cast<unsigned>(std::popcount(words[w]));
+            if (remaining < pc) {
+                // nth bit is in this word — clear 'remaining' lowest set bits
+                uint64_t word = words[w];
+                for (unsigned i = 0; i < remaining; ++i)
+                    word &= word - 1;
+                return static_cast<uint8_t>(w * U64_BITS +
+                    static_cast<unsigned>(std::countr_zero(word)));
+            }
+            remaining -= pc;
+        }
+        __builtin_unreachable();
+    }
+
     struct adj_result { uint8_t idx; uint16_t slot; bool found; };
+
+    // Find smallest set bit > idx (no slot computation).
+    // Used by positional iteration where slot = pos+1.
+    struct bit_result { uint8_t idx; bool found; };
+
+    bit_result next_bit_after(uint8_t idx) const noexcept {
+        unsigned next = static_cast<unsigned>(idx) + 1;
+        if (next >= BYTE_VALUES) return {0, false};
+        unsigned w = next >> U64_BIT_SHIFT;
+        unsigned b = next & U64_BITS_MASK;
+        uint64_t word = words[w] >> b;
+        if (word)
+            return {static_cast<uint8_t>(next + std::countr_zero(word)), true};
+        for (unsigned nw = w + 1; nw < BITMAP_WORDS; ++nw) {
+            if (words[nw])
+                return {static_cast<uint8_t>(nw * U64_BITS +
+                    std::countr_zero(words[nw])), true};
+        }
+        return {0, false};
+    }
+
+    bit_result prev_bit_before(uint8_t idx) const noexcept {
+        if (idx == 0) return {0, false};
+        unsigned prev = static_cast<unsigned>(idx) - 1;
+        unsigned w = prev >> U64_BIT_SHIFT;
+        unsigned b = prev & U64_BITS_MASK;
+        uint64_t word = words[w] & (~uint64_t{0} >> (U64_BITS_MASK - b));
+        if (word)
+            return {static_cast<uint8_t>(w * U64_BITS + U64_BITS_MASK -
+                static_cast<unsigned>(std::countl_zero(word))), true};
+        for (int nw = static_cast<int>(w) - 1; nw >= 0; --nw) {
+            if (words[nw])
+                return {static_cast<uint8_t>(static_cast<unsigned>(nw) * U64_BITS +
+                    U64_BITS_MASK - static_cast<unsigned>(
+                    std::countl_zero(words[nw]))), true};
+        }
+        return {0, false};
+    }
 
     // Find smallest set bit > idx, with its slot. Fully branchless.
     adj_result next_set_after(uint8_t idx) const noexcept {

@@ -64,16 +64,18 @@ public:
     class iterator {
         friend class kntrie;
         uint64_t* leaf_v = nullptr;
-        uint16_t  pos_v  = 0;
+        uint16_t  pos_v  = 0;       // slot
+        uint16_t  bit_v  = 0;       // byte value (bitmap), unused (compact)
         uint64_t  ik_v   = 0;
         void*     val_v  = nullptr;
 
         iterator(kntrie_detail::iter_entry_t e)
-            : leaf_v(e.leaf), pos_v(e.pos), ik_v(e.ik), val_v(e.val) {}
+            : leaf_v(e.leaf), pos_v(e.pos), bit_v(e.bit),
+              ik_v(e.ik), val_v(e.val) {}
 
         // For insert returning iterator (leaf+pos known but no cached entry)
-        iterator(uint64_t* leaf, uint16_t pos, uint64_t ik, void* val)
-            : leaf_v(leaf), pos_v(pos), ik_v(ik), val_v(val) {}
+        iterator(uint64_t* leaf, uint16_t pos, uint16_t bit, uint64_t ik, void* val)
+            : leaf_v(leaf), pos_v(pos), bit_v(bit), ik_v(ik), val_v(val) {}
 
     public:
         using iterator_category = std::bidirectional_iterator_tag;
@@ -110,15 +112,15 @@ public:
         iterator& operator++() {
             using namespace kntrie_detail;
             auto fn = get_find_adv(leaf_v);
-            auto e = fn(leaf_v, ik_v, dir_t::FWD);
+            auto e = fn(leaf_v, pos_v, bit_v, dir_t::FWD);
             if (e.found) {
-                leaf_v = e.leaf; pos_v = e.pos;
+                leaf_v = e.leaf; pos_v = e.pos; bit_v = e.bit;
                 ik_v = e.ik; val_v = e.val;
                 return *this;
             }
             // Walk parent chain — first parent from leaf, rest from bitmask
             auto e2 = impl_t::walk_from_leaf(leaf_v, dir_t::FWD);
-            leaf_v = e2.leaf; pos_v = e2.pos;
+            leaf_v = e2.leaf; pos_v = e2.pos; bit_v = e2.bit;
             ik_v = e2.ik; val_v = e2.val;
             return *this;
         }
@@ -131,14 +133,14 @@ public:
                 return *this;
             }
             auto fn = get_find_adv(leaf_v);
-            auto e = fn(leaf_v, ik_v, dir_t::BWD);
+            auto e = fn(leaf_v, pos_v, bit_v, dir_t::BWD);
             if (e.found) {
-                leaf_v = e.leaf; pos_v = e.pos;
+                leaf_v = e.leaf; pos_v = e.pos; bit_v = e.bit;
                 ik_v = e.ik; val_v = e.val;
                 return *this;
             }
             auto e2 = impl_t::walk_from_leaf(leaf_v, dir_t::BWD);
-            leaf_v = e2.leaf; pos_v = e2.pos;
+            leaf_v = e2.leaf; pos_v = e2.pos; bit_v = e2.bit;
             ik_v = e2.ik; val_v = e2.val;
             return *this;
         }

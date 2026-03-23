@@ -457,54 +457,32 @@ public:
 
         if (kd[pos] != suffix) [[unlikely]] return {};
         uint64_t key = d.to_ik(leaf_prefix(node), static_cast<uint64_t>(suffix));
-        return {node, pos, key, val_ptr(node, entries, hs, pos), true};
+        return {node, pos, 0, key, val_ptr(node, entries, hs, pos), true};
     }
 
     // ==================================================================
-    // find_adv_fn — directional advance → iter_entry_t
-    // FWD: first entry with key > ik.  BWD: last entry with key < ik.
+    // find_adv_fn — positional advance → iter_entry_t
+    // FWD: pos+1.  BWD: pos-1.  O(1).
+    // No DO_SKIP needed — pos is always valid within the leaf.
     // ==================================================================
 
-    template<bool DO_SKIP>
-    static iter_entry_t find_adv_fn(uint64_t* node, uint64_t ik, dir_t dir) noexcept {
+    static iter_entry_t find_adv_fn(uint64_t* node, uint16_t pos, uint16_t /*bit*/, dir_t dir) noexcept {
         constexpr size_t hs = LEAF_HEADER_U64;
-        depth_t d = get_depth(node);
-        uint64_t pfx = leaf_prefix(node);
         unsigned entries = get_header(node)->entries();
-        const K* kd = keys(node, hs);
-
-        if constexpr (DO_SKIP) {
-            int cmp = skip_cmp(pfx, d, ik);
-            if (cmp * static_cast<int>(dir) > 0) return {};
-            if (cmp * static_cast<int>(dir) < 0) {
-                uint16_t edge = (dir == dir_t::FWD) ? 0
-                    : static_cast<uint16_t>(entries - 1);
-                uint64_t key = d.to_ik(pfx, static_cast<uint64_t>(kd[edge]));
-                return {node, edge, key, val_ptr(node, entries, hs, edge), true};
-            }
-        }
-
-        K suffix = static_cast<K>(d.suffix(ik));
-
         if (dir == dir_t::FWD) {
-            if (suffix >= static_cast<K>(d.nk_max())) [[unlikely]] return {};
-            K target = suffix + 1;
-            const K* base = adaptive_search<K>::find_base_first(kd, entries, target);
-            uint16_t pos = static_cast<uint16_t>(base - kd);
-            if (kd[pos] < target) [[unlikely]] {
-                ++pos;
-                if (pos >= entries) [[unlikely]] return {};
-            }
-            uint64_t key = d.to_ik(pfx, static_cast<uint64_t>(kd[pos]));
-            return {node, pos, key, val_ptr(node, entries, hs, pos), true};
+            uint16_t next = pos + 1;
+            if (next >= entries) return {};
+            depth_t d = get_depth(node);
+            const K* kd = keys(node, hs);
+            uint64_t key = d.to_ik(leaf_prefix(node), static_cast<uint64_t>(kd[next]));
+            return {node, next, 0, key, val_ptr(node, entries, hs, next), true};
         } else {
-            if (suffix == 0) [[unlikely]] return {};
-            K target = suffix - 1;
-            const K* base = adaptive_search<K>::find_base(kd, entries, target);
-            uint16_t pos = static_cast<uint16_t>(base - kd);
-            if (kd[pos] > target) [[unlikely]] return {};
-            uint64_t key = d.to_ik(pfx, static_cast<uint64_t>(kd[pos]));
-            return {node, pos, key, val_ptr(node, entries, hs, pos), true};
+            if (pos == 0) return {};
+            uint16_t prev = pos - 1;
+            depth_t d = get_depth(node);
+            const K* kd = keys(node, hs);
+            uint64_t key = d.to_ik(leaf_prefix(node), static_cast<uint64_t>(kd[prev]));
+            return {node, prev, 0, key, val_ptr(node, entries, hs, prev), true};
         }
     }
 
@@ -522,25 +500,24 @@ public:
         uint16_t pos = (dir == dir_t::FWD) ? 0
             : static_cast<uint16_t>(entries - 1);
         uint64_t key = d.to_ik(pfx, static_cast<uint64_t>(kd[pos]));
-        return {node, pos, key, val_ptr(node, entries, hs, pos), true};
+        return {node, pos, 0, key, val_ptr(node, entries, hs, pos), true};
     }
 
     // ==================================================================
     // Tables + set_leaf_fns
-    // 2-entry tables indexed by DO_SKIP only.
+    // find_fn: 2-entry table indexed by DO_SKIP.
+    // adv_fn: single function (positional, no skip check needed).
+    // edge_fn: single function.
     // ==================================================================
 
     static inline const find_fn_t FIND_TABLE[2] = {
         &find_fn<false>,  &find_fn<true>,
     };
-    static inline const adv_fn_t ADV_TABLE[2] = {
-        &find_adv_fn<false>,  &find_adv_fn<true>,
-    };
 
     static void set_leaf_fns(uint64_t* node, bool has_skip) noexcept {
         unsigned idx = has_skip ? 1u : 0u;
         set_find_fn(node, FIND_TABLE[idx]);
-        set_find_adv(node, ADV_TABLE[idx]);
+        set_find_adv(node, &find_adv_fn);
         set_find_edge(node, &find_edge_fn);
     }
 };

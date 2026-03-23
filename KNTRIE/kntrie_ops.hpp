@@ -141,11 +141,10 @@ struct kntrie_ops {
             // bitmap
             if (has_skip) {
                 set_find_fn(node, &BO::template find_fn_bitmap<true>);
-                set_find_adv(node, &BO::template find_adv_fn_bitmap<true>);
             } else {
                 set_find_fn(node, &BO::template find_fn_bitmap<false>);
-                set_find_adv(node, &BO::template find_adv_fn_bitmap<false>);
             }
+            set_find_adv(node, &BO::find_adv_fn_bitmap);
             set_find_edge(node, &BO::find_edge_fn_bitmap);
         } else if (nk_bits <= U16_BITS) {
             using CO = compact_ops<uint16_t, VALUE, ALLOC>;
@@ -238,6 +237,78 @@ struct kntrie_ops {
             auto bv = compact_ops<uint64_t, VALUE, ALLOC>::bool_vals_mut(node, entries, hs);
             return {&bv.data[pos / U64_BITS], static_cast<uint8_t>(pos % U64_BITS)};
         }
+    }
+
+    // ==================================================================
+    // leaf_first_after — key-based search for first entry > ik.
+    // Cold path, used only by lower_bound / upper_bound.
+    // Dispatches on leaf type via depth.
+    // ==================================================================
+
+    static iter_entry_t leaf_first_after(uint64_t* node, uint64_t ik, dir_t dir) noexcept {
+        depth_t d = get_depth(node);
+        uint64_t pfx = leaf_prefix(node);
+        constexpr size_t hs = LEAF_HEADER_U64;
+        uint8_t nk_bits = U64_BITS - d.shift;
+
+        if (nk_bits <= U8_BITS) {
+            // Bitmap leaf
+            uint8_t suffix = static_cast<uint8_t>(d.suffix(ik));
+            const auto& bmp = BO::bm(node, hs);
+            if (dir == dir_t::FWD) {
+                auto r = bmp.next_set_after(suffix);
+                if (!r.found) return {};
+                uint64_t key = d.to_ik(pfx, static_cast<uint64_t>(r.idx));
+                void* val;
+                if constexpr (VT::IS_BOOL)
+                    val = &BO::val_bm_mut(node, hs).words[0];
+                else
+                    val = &BO::bl_vals_mut(node, hs)[r.slot];
+                return {node, static_cast<uint16_t>(r.slot),
+                        static_cast<uint16_t>(r.idx), key, val, true};
+            } else {
+                auto r = bmp.prev_set_before(suffix);
+                if (!r.found) return {};
+                uint64_t key = d.to_ik(pfx, static_cast<uint64_t>(r.idx));
+                void* val;
+                if constexpr (VT::IS_BOOL)
+                    val = &BO::val_bm_mut(node, hs).words[0];
+                else
+                    val = &BO::bl_vals_mut(node, hs)[r.slot];
+                return {node, static_cast<uint16_t>(r.slot),
+                        static_cast<uint16_t>(r.idx), key, val, true};
+            }
+        }
+
+        // Compact leaf — dispatch on key size
+        auto do_compact = [&]<typename K>() -> iter_entry_t {
+            using CO = compact_ops<K, VALUE, ALLOC>;
+            K suffix = static_cast<K>(d.suffix(ik));
+            unsigned entries = get_header(node)->entries();
+            const K* kd = CO::keys(node, hs);
+
+            if (dir == dir_t::FWD) {
+                if (suffix >= static_cast<K>(d.nk_max())) return {};
+                K target = suffix + 1;
+                const K* base = adaptive_search<K>::find_base_first(kd, entries, target);
+                uint16_t pos = static_cast<uint16_t>(base - kd);
+                if (kd[pos] < target) { ++pos; if (pos >= entries) return {}; }
+                uint64_t key = d.to_ik(pfx, static_cast<uint64_t>(kd[pos]));
+                return {node, pos, 0, key, CO::val_ptr(node, entries, hs, pos), true};
+            } else {
+                if (suffix == 0) return {};
+                K target = suffix - 1;
+                const K* base = adaptive_search<K>::find_base(kd, entries, target);
+                uint16_t pos = static_cast<uint16_t>(base - kd);
+                if (kd[pos] > target) return {};
+                uint64_t key = d.to_ik(pfx, static_cast<uint64_t>(kd[pos]));
+                return {node, pos, 0, key, CO::val_ptr(node, entries, hs, pos), true};
+            }
+        };
+
+        if (nk_bits <= U16_BITS) return do_compact.template operator()<uint16_t>();
+        if (nk_bits <= U32_BITS) return do_compact.template operator()<uint32_t>();
+        return do_compact.template operator()<uint64_t>();
     }
 
     // ==================================================================

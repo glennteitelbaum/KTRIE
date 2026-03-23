@@ -289,27 +289,27 @@ public:
 
     // Walk from a leaf: get parent byte + leaf_parent, then walk bitmask chain.
     static iter_entry_t walk_from_leaf(uint64_t* leaf, dir_t dir) noexcept {
-        uint8_t byte = static_cast<uint8_t>(get_header(leaf)->parent_byte());
+        uint16_t byte = get_header(leaf)->parent_byte();
         uint64_t* parent = leaf_parent(leaf);
         return walk_bm_chain(parent, byte, dir);
     }
 
     // Walk from a bitmask node: get parent byte + bm_parent, then walk chain.
     static iter_entry_t walk_from_bm(uint64_t* bm_node, dir_t dir) noexcept {
-        uint8_t byte = static_cast<uint8_t>(get_header(bm_node)->parent_byte());
+        uint16_t byte = get_header(bm_node)->parent_byte();
         uint64_t* parent = bm_parent(bm_node);
         return walk_bm_chain(parent, byte, dir);
     }
 
     // Walk bitmask parent chain. All nodes are bitmask.
-    static iter_entry_t walk_bm_chain(uint64_t* parent, uint8_t byte, dir_t dir) noexcept {
+    static iter_entry_t walk_bm_chain(uint64_t* parent, uint16_t byte, dir_t dir) noexcept {
         while (byte != node_header_t::ROOT_BYTE) {
             uint64_t bm_ptr = BO::node_bm_ptr(parent);
             auto [sib, found] = (dir == dir_t::FWD)
-                ? BO::bm_next_sibling(bm_ptr, byte)
-                : BO::bm_prev_sibling(bm_ptr, byte);
+                ? BO::bm_next_sibling(bm_ptr, static_cast<uint8_t>(byte))
+                : BO::bm_prev_sibling(bm_ptr, static_cast<uint8_t>(byte));
             if (found) return BO::descend_edge_loop(sib, dir);
-            byte = static_cast<uint8_t>(get_header(parent)->parent_byte());
+            byte = get_header(parent)->parent_byte();
             parent = bm_parent(parent);
         }
         return {};
@@ -357,12 +357,13 @@ public:
     iter_entry_t lower_bound_entry(const KEY& key) const noexcept {
         uint64_t ik = key_to_u64(key);
         return tracked_descent_fwd(ik, [](uint64_t* leaf, uint64_t ik_) -> iter_entry_t {
+            // Exact match?
             auto fn = get_find_fn(leaf);
             auto r = fn(leaf, ik_);
             if (r.found) return r;
-            auto fn_adv = get_find_adv(leaf);
-            r = fn_adv(leaf, ik_, dir_t::FWD);
-            if (r.found) return r;
+            // First entry > ik in this leaf (key-based, cold path)
+            auto r2 = OPS::leaf_first_after(leaf, ik_, dir_t::FWD);
+            if (r2.found) return r2;
             return walk_from_leaf(leaf, dir_t::FWD);
         });
     }
@@ -370,8 +371,8 @@ public:
     iter_entry_t upper_bound_entry(const KEY& key) const noexcept {
         uint64_t ik = key_to_u64(key);
         return tracked_descent_fwd(ik, [](uint64_t* leaf, uint64_t ik_) -> iter_entry_t {
-            auto fn_adv = get_find_adv(leaf);
-            auto r = fn_adv(leaf, ik_, dir_t::FWD);
+            // First entry > ik in this leaf (key-based, cold path)
+            auto r = OPS::leaf_first_after(leaf, ik_, dir_t::FWD);
             if (r.found) return r;
             return walk_from_leaf(leaf, dir_t::FWD);
         });
