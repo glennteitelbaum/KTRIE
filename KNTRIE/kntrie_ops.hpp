@@ -748,7 +748,7 @@ struct kntrie_ops {
             }
         }
 
-        bld.dealloc_node(const_cast<uint64_t*>(node), CO::total_from_val_offset(hdr));
+        bld.dealloc_node(const_cast<uint64_t*>(node), CO::alloc_total_u64(hdr->alloc_u64()));
 
         // Locate the inserted entry in the new subtree (cache-hot)
         iter_entry_t lp;
@@ -1145,7 +1145,7 @@ struct kntrie_ops {
             leaf = bld.alloc_node(total_u64, false);
             auto* lh = get_header(leaf);
             lh->set_entries(static_cast<uint16_t>(total_entries));
-            CO::set_val_offset(leaf, total_u64);
+            CO::set_capacity(leaf, total_u64);
 
             NK* dk = CO::keys(leaf, hu);
             VST* dv = CO::vals_mut(leaf);

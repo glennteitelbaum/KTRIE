@@ -95,12 +95,15 @@ struct compact_ops {
         return hu + (kb + vb) / U64_BYTES;
     }
 
-    // --- capacity: max entries that fit in an allocation ---
+    // --- val_offset_u64: u64 position where values begin, from capacity ---
+    // 2-3 ALU ops, hidden by the cache miss that follows.
+    static constexpr size_t val_offset_u64(size_t cap) noexcept {
+        return LEAF_HEADER_U64 + align_up(cap * sizeof(K), U64_BYTES) / U64_BYTES;
+    }
 
-    static constexpr bool has_room(unsigned entries, const node_header_t* h) noexcept {
-        size_t key_end = LEAF_HEADER_U64
-            + align_up(static_cast<size_t>(entries + 1) * sizeof(K), U64_BYTES) / U64_BYTES;
-        return key_end <= h->alloc_u64();
+    // --- has_room: can one more entry fit? alloc_u64 stores capacity ---
+    static bool has_room(unsigned entries, const node_header_t* h) noexcept {
+        return entries + 1 <= h->alloc_u64();
     }
 
     // Value block size in u64s for a given entry count
@@ -113,7 +116,8 @@ struct compact_ops {
 
     // Max entries that fit in a total allocation
     static constexpr size_t capacity_for(size_t total_u64) noexcept {
-        size_t lo = 0, hi = (total_u64 - LEAF_HEADER_U64) * U64_BYTES / sizeof(K);
+        size_t lo = 0;
+        size_t hi = (total_u64 - LEAF_HEADER_U64) * U64_BYTES / sizeof(K);
         while (lo < hi) {
             size_t mid = lo + (hi - lo + 1) / 2;
             if (size_u64(mid) <= total_u64) lo = mid; else hi = mid - 1;
@@ -121,18 +125,16 @@ struct compact_ops {
         return lo;
     }
 
-    // Set alloc_u64 = value offset for a given total allocation
-    static void set_val_offset(uint64_t* node, size_t total_u64) noexcept {
-        size_t cap = capacity_for(total_u64);
-        size_t val_off = total_u64 - val_block_u64(cap);
-        get_header(node)->set_alloc_u64(static_cast<uint16_t>(val_off));
+    // Recover total allocation from stored capacity (cold — dealloc/shrink)
+    // Deterministic: cap → size_u64 → round_up_u64 always recovers original.
+    static size_t alloc_total_u64(size_t cap) noexcept {
+        return round_up_u64(size_u64(cap));
     }
 
-    // Recover total allocation from val_offset (cold — dealloc/shrink only)
-    static size_t total_from_val_offset(const node_header_t* h) noexcept {
-        size_t val_off = h->alloc_u64();
-        size_t key_cap = (val_off - LEAF_HEADER_U64) * U64_BYTES / sizeof(K);
-        return val_off + val_block_u64(key_cap);
+    // Set alloc_u64 = capacity for a given total allocation
+    static void set_capacity(uint64_t* node, size_t total_u64) noexcept {
+        size_t cap = capacity_for(total_u64);
+        get_header(node)->set_alloc_u64(static_cast<uint16_t>(cap));
     }
 
     // ==================================================================
@@ -146,7 +148,7 @@ struct compact_ops {
         uint64_t* node = bld.alloc_node(total, false);
         auto* h = get_header(node);
         h->set_entries(count);
-        set_val_offset(node, total);
+        set_capacity(node, total);
         if (count > 0) {
             std::memcpy(keys(node, hu), sorted_keys, count * sizeof(K));
             if constexpr (VT::IS_BOOL) {
@@ -192,12 +194,12 @@ struct compact_ops {
             for (unsigned i = 0; i < entries; ++i)
                 bld.destroy_value(vd[i]);
         }
-        bld.dealloc_node(node, total_from_val_offset(h));
+        bld.dealloc_node(node, alloc_total_u64(h->alloc_u64()));
     }
 
     // Free node memory only — values have been transferred elsewhere
     static void dealloc_node_only(uint64_t* node, BLD& bld) {
-        bld.dealloc_node(node, total_from_val_offset(get_header(node)));
+        bld.dealloc_node(node, alloc_total_u64(get_header(node)->alloc_u64()));
     }
 
     // ==================================================================
@@ -248,7 +250,7 @@ struct compact_ops {
             auto* nh = get_header(nn);
             copy_leaf_header(node, nn);
             nh->set_entries(new_entries);
-            set_val_offset(nn, total);
+            set_capacity(nn, total);
             
             set_leaf_fns(nn, get_header(nn)->skip() > 0);
 
@@ -273,7 +275,7 @@ struct compact_ops {
                 if (tail > 0) VT::copy_uninit(ov + ins, tail, nv + ins + 1);
             }
 
-            bld.dealloc_node(node, total_from_val_offset(h));
+            bld.dealloc_node(node, alloc_total_u64(h->alloc_u64()));
             return {tag_leaf(nn), true, false, nullptr,
                     nn, static_cast<uint16_t>(ins)};
         }
@@ -322,14 +324,15 @@ struct compact_ops {
 
         // Shrink check
         size_t needed_u64 = size_u64(nc, hs);
-        size_t current_total = total_from_val_offset(h);
+        size_t old_cap = h->alloc_u64();
+        size_t current_total = alloc_total_u64(old_cap);
         if (should_shrink_u64(current_total, needed_u64)) [[unlikely]] {
             size_t total = round_up_u64(needed_u64);
             uint64_t* nn = bld.alloc_node(total, false);
             auto* nh = get_header(nn);
             copy_leaf_header(node, nn);
             nh->set_entries(nc);
-            set_val_offset(nn, total);
+            set_capacity(nn, total);
             
             set_leaf_fns(nn, get_header(nn)->skip() > 0);
 
@@ -391,19 +394,23 @@ public:
     }
 
     static VST* vals_mut(uint64_t* node) noexcept {
-        return reinterpret_cast<VST*>(node + get_header(node)->alloc_u64());
+        size_t cap = get_header(node)->alloc_u64();
+        return reinterpret_cast<VST*>(node + val_offset_u64(cap));
     }
     static const VST* vals(const uint64_t* node) noexcept {
-        return reinterpret_cast<const VST*>(node + get_header(node)->alloc_u64());
+        size_t cap = get_header(node)->alloc_u64();
+        return reinterpret_cast<const VST*>(node + val_offset_u64(cap));
     }
 
     static bool_slots bool_vals_mut(uint64_t* node) noexcept {
+        size_t cap = get_header(node)->alloc_u64();
         return bool_slots{ reinterpret_cast<uint64_t*>(
-            node + get_header(node)->alloc_u64()) };
+            node + val_offset_u64(cap)) };
     }
     static bool_slots bool_vals(const uint64_t* node) noexcept {
+        size_t cap = get_header(node)->alloc_u64();
         return bool_slots{ const_cast<uint64_t*>(reinterpret_cast<const uint64_t*>(
-            node + get_header(node)->alloc_u64())) };
+            node + val_offset_u64(cap))) };
     }
     // ==================================================================
     // Value pointer helper — return const VALUE* at position

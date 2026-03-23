@@ -674,7 +674,7 @@ private:
                 leaf = bld_v.alloc_node(total_u64, false);
                 auto* lh = get_header(leaf);
                 lh->set_entries(static_cast<uint16_t>(size_v));
-                CO::set_val_offset(leaf, total_u64);
+                CO::set_capacity(leaf, total_u64);
 
                 NK* dk = CO::keys(leaf, hu);
                 auto* dv = CO::vals_mut(leaf);
