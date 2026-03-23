@@ -96,29 +96,20 @@ inline bool tst_sign(uint64_t v) noexcept {
 //  NK only at leaf storage boundary via nk_for_bits_t<BITS>)
 
 // ==========================================================================
-// Freelist size classes
-//
-// ==========================================================================
-// Allocation size classes (1.5x growth scheme)
-//
-// ≤128 u64s: step sizes for in-place growth padding.
-// >128 u64s: power-of-2 with midpoints.
+// Allocation size classes — single canonical table
 // ==========================================================================
 
-inline constexpr size_t FREE_MAX  = 128;
-inline constexpr size_t NUM_BINS  = 12;
-inline constexpr size_t BIN_SIZES[NUM_BINS] = {4, 6, 8, 10, 14, 18, 26, 34, 48, 69, 98, 128};
+inline constexpr size_t ALLOC_CLASS_TABLE[] = {
+    4, 6, 8, 10, 14, 18, 26, 34, 48, 69, 98, 128,
+    194, 256, 386, 512, 770, 1024, 1538, 2048,
+    3074, 4096, 6146, 8192, 12290, 16384
+};
+inline constexpr size_t NUM_ALLOC_CLASSES = sizeof(ALLOC_CLASS_TABLE) / sizeof(size_t);
 
 inline constexpr size_t round_up_u64(size_t n) noexcept {
-    if (n <= FREE_MAX) {
-        for (size_t i = 0; i < NUM_BINS; ++i)
-            if (n <= BIN_SIZES[i]) return BIN_SIZES[i];
-    }
-    int bit  = static_cast<int>(std::bit_width(n - 1));
-    size_t pow2 = size_t{1} << bit;
-    static constexpr size_t MIDPOINT_MIN_BIAS = 2;  // ensures mid > pow2/2 for smallest sizes
-    size_t mid  = pow2 / 2 + pow2 / 4 + MIDPOINT_MIN_BIAS;
-    return (n <= mid) ? mid : pow2;
+    for (size_t i = 0; i < NUM_ALLOC_CLASSES; ++i)
+        if (n <= ALLOC_CLASS_TABLE[i]) return ALLOC_CLASS_TABLE[i];
+    return n;  // beyond table — exact
 }
 
 // Shrink when allocated exceeds the class for SHRINK_FACTOR × the needed size.

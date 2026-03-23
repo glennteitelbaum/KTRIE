@@ -196,16 +196,15 @@ struct kntrie_ops {
                 static_cast<uint8_t>(pos));
             return BO::bl_val_ref_at(node, hs, slot);
         }
-        unsigned entries = get_header(node)->entries();
         if (nk_bits <= U16_BITS) {
             return *reinterpret_cast<VALUE*>(
-                &compact_ops<uint16_t, VALUE, ALLOC>::vals_mut(node, entries, hs)[pos]);
+                &compact_ops<uint16_t, VALUE, ALLOC>::vals_mut(node)[pos]);
         } else if (nk_bits <= U32_BITS) {
             return *reinterpret_cast<VALUE*>(
-                &compact_ops<uint32_t, VALUE, ALLOC>::vals_mut(node, entries, hs)[pos]);
+                &compact_ops<uint32_t, VALUE, ALLOC>::vals_mut(node)[pos]);
         } else {
             return *reinterpret_cast<VALUE*>(
-                &compact_ops<uint64_t, VALUE, ALLOC>::vals_mut(node, entries, hs)[pos]);
+                &compact_ops<uint64_t, VALUE, ALLOC>::vals_mut(node)[pos]);
         }
     }
 
@@ -226,15 +225,14 @@ struct kntrie_ops {
             return {&vbm.words[word_idx], bit_idx};
         }
         // compact leaf: packed bits in bool_slots after keys
-        unsigned entries = get_header(node)->entries();
         if (nk_bits <= U16_BITS) {
-            auto bv = compact_ops<uint16_t, VALUE, ALLOC>::bool_vals_mut(node, entries, hs);
+            auto bv = compact_ops<uint16_t, VALUE, ALLOC>::bool_vals_mut(node);
             return {&bv.data[pos / U64_BITS], static_cast<uint8_t>(pos % U64_BITS)};
         } else if (nk_bits <= U32_BITS) {
-            auto bv = compact_ops<uint32_t, VALUE, ALLOC>::bool_vals_mut(node, entries, hs);
+            auto bv = compact_ops<uint32_t, VALUE, ALLOC>::bool_vals_mut(node);
             return {&bv.data[pos / U64_BITS], static_cast<uint8_t>(pos % U64_BITS)};
         } else {
-            auto bv = compact_ops<uint64_t, VALUE, ALLOC>::bool_vals_mut(node, entries, hs);
+            auto bv = compact_ops<uint64_t, VALUE, ALLOC>::bool_vals_mut(node);
             return {&bv.data[pos / U64_BITS], static_cast<uint8_t>(pos % U64_BITS)};
         }
     }
@@ -294,7 +292,7 @@ struct kntrie_ops {
                 uint16_t pos = static_cast<uint16_t>(base - kd);
                 if (kd[pos] < target) { ++pos; if (pos >= entries) return {}; }
                 uint64_t key = d.to_ik(pfx, static_cast<uint64_t>(kd[pos]));
-                return {node, pos, 0, key, CO::val_ptr(node, entries, hs, pos), true};
+                return {node, pos, 0, key, CO::val_ptr(node, pos), true};
             } else {
                 if (suffix == 0) return {};
                 K target = suffix - 1;
@@ -302,7 +300,7 @@ struct kntrie_ops {
                 uint16_t pos = static_cast<uint16_t>(base - kd);
                 if (kd[pos] > target) return {};
                 uint64_t key = d.to_ik(pfx, static_cast<uint64_t>(kd[pos]));
-                return {node, pos, 0, key, CO::val_ptr(node, entries, hs, pos), true};
+                return {node, pos, 0, key, CO::val_ptr(node, pos), true};
             }
         };
 

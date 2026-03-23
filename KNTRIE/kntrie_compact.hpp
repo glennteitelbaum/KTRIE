@@ -97,8 +97,42 @@ struct compact_ops {
 
     // --- capacity: max entries that fit in an allocation ---
 
-    static constexpr bool has_room(unsigned entries, unsigned alloc_u64) noexcept {
-        return size_u64(entries + 1) <= alloc_u64;
+    static constexpr bool has_room(unsigned entries, const node_header_t* h) noexcept {
+        size_t key_end = LEAF_HEADER_U64
+            + align_up(static_cast<size_t>(entries + 1) * sizeof(K), U64_BYTES) / U64_BYTES;
+        return key_end <= h->alloc_u64();
+    }
+
+    // Value block size in u64s for a given entry count
+    static constexpr size_t val_block_u64(size_t count) noexcept {
+        if constexpr (VT::IS_BOOL)
+            return bool_slots::u64_for(count);
+        else
+            return align_up(count * sizeof(VST), U64_BYTES) / U64_BYTES;
+    }
+
+    // Max entries that fit in a total allocation
+    static constexpr size_t capacity_for(size_t total_u64) noexcept {
+        size_t lo = 0, hi = (total_u64 - LEAF_HEADER_U64) * U64_BYTES / sizeof(K);
+        while (lo < hi) {
+            size_t mid = lo + (hi - lo + 1) / 2;
+            if (size_u64(mid) <= total_u64) lo = mid; else hi = mid - 1;
+        }
+        return lo;
+    }
+
+    // Set alloc_u64 = value offset for a given total allocation
+    static void set_val_offset(uint64_t* node, size_t total_u64) noexcept {
+        size_t cap = capacity_for(total_u64);
+        size_t val_off = total_u64 - val_block_u64(cap);
+        get_header(node)->set_alloc_u64(static_cast<uint16_t>(val_off));
+    }
+
+    // Recover total allocation from val_offset (cold — dealloc/shrink only)
+    static size_t total_from_val_offset(const node_header_t* h) noexcept {
+        size_t val_off = h->alloc_u64();
+        size_t key_cap = (val_off - LEAF_HEADER_U64) * U64_BYTES / sizeof(K);
+        return val_off + val_block_u64(key_cap);
     }
 
     // ==================================================================
@@ -108,20 +142,20 @@ struct compact_ops {
     static uint64_t* make_leaf(const K* sorted_keys, const VST* values,
                                unsigned count, BLD& bld) {
         constexpr size_t hu = LEAF_HEADER_U64;
-        size_t au64 = round_up_u64(size_u64(count, hu));
-        uint64_t* node = bld.alloc_node(au64, false);
+        size_t total = round_up_u64(size_u64(count, hu));
+        uint64_t* node = bld.alloc_node(total, false);
         auto* h = get_header(node);
         h->set_entries(count);
-        h->set_alloc_u64(au64);
+        set_val_offset(node, total);
         if (count > 0) {
             std::memcpy(keys(node, hu), sorted_keys, count * sizeof(K));
             if constexpr (VT::IS_BOOL) {
-                auto bv = bool_vals_mut(node, count, hu);
+                auto bv = bool_vals_mut(node);
                 bv.clear_all(count);
                 for (unsigned i = 0; i < count; ++i)
                     bv.set(i, values[i]);
             } else {
-                VT::copy_uninit(values, count, vals_mut(node, count, hu));
+                VT::copy_uninit(values, count, vals_mut(node));
             }
         }
         return node;
@@ -134,14 +168,13 @@ struct compact_ops {
     template<typename Fn>
     static void for_each(const uint64_t* node, const node_header_t* h, Fn&& cb) {
         unsigned entries = h->entries();
-        size_t hs = LEAF_HEADER_U64;
-        const K* kd = keys(node, hs);
+        const K* kd = keys(node, LEAF_HEADER_U64);
         if constexpr (VT::IS_BOOL) {
-            auto bv = bool_vals(node, entries, hs);
+            auto bv = bool_vals(node);
             for (unsigned i = 0; i < entries; ++i)
                 cb(kd[i], bv.get(i));
         } else {
-            const VST* vd = vals(node, entries, hs);
+            const VST* vd = vals(node);
             for (unsigned i = 0; i < entries; ++i)
                 cb(kd[i], vd[i]);
         }
@@ -154,18 +187,17 @@ struct compact_ops {
     static void destroy_and_dealloc(uint64_t* node, BLD& bld) {
         auto* h = get_header(node);
         if constexpr (VT::HAS_DESTRUCTOR) {
+            VST* vd = vals_mut(node);
             unsigned entries = h->entries();
-            size_t hs = LEAF_HEADER_U64;
-            VST* vd = vals_mut(node, entries, hs);
             for (unsigned i = 0; i < entries; ++i)
                 bld.destroy_value(vd[i]);
         }
-        bld.dealloc_node(node, h->alloc_u64());
+        bld.dealloc_node(node, total_from_val_offset(h));
     }
 
     // Free node memory only — values have been transferred elsewhere
     static void dealloc_node_only(uint64_t* node, BLD& bld) {
-        bld.dealloc_node(node, get_header(node)->alloc_u64());
+        bld.dealloc_node(node, total_from_val_offset(get_header(node)));
     }
 
     // ==================================================================
@@ -191,9 +223,9 @@ struct compact_ops {
             unsigned idx = static_cast<unsigned>(base - kd);
             if constexpr (ASSIGN) {
                 if constexpr (VT::IS_BOOL) {
-                    bool_vals_mut(node, entries, hs).set(idx, value);
+                    bool_vals_mut(node).set(idx, value);
                 } else {
-                    VST* vd = vals_mut(node, entries, hs);
+                    VST* vd = vals_mut(node);
                     bld.destroy_value(vd[idx]);
                     VT::init_slot(&vd[idx], value);
                 }
@@ -209,80 +241,56 @@ struct compact_ops {
         int ins = static_cast<int>(base - kd) + (*base < suffix);
 
         // Grow if no room
-        if (!has_room(entries, h->alloc_u64())) [[unlikely]] {
+        if (!has_room(entries, h)) [[unlikely]] {
             unsigned new_entries = entries + 1;
-            size_t au64 = round_up_u64(size_u64(new_entries, hs));
-            uint64_t* nn = bld.alloc_node(au64, false);
+            size_t total = round_up_u64(size_u64(new_entries, hs));
+            uint64_t* nn = bld.alloc_node(total, false);
             auto* nh = get_header(nn);
             copy_leaf_header(node, nn);
             nh->set_entries(new_entries);
-            nh->set_alloc_u64(au64);
+            set_val_offset(nn, total);
             
             set_leaf_fns(nn, get_header(nn)->skip() > 0);
 
             K* nk = keys(nn, hs);
-            // Copy keys with gap at ins
-            if (ins > 0)
-                std::memcpy(nk, kd, ins * sizeof(K));
+            std::memcpy(nk, kd, ins * sizeof(K));
             nk[ins] = suffix;
             int tail = entries - ins;
-            if (tail > 0)
-                std::memcpy(nk + ins + 1, kd + ins, tail * sizeof(K));
+            std::memcpy(nk + ins + 1, kd + ins, tail * sizeof(K));
 
             if constexpr (VT::IS_BOOL) {
-                auto old_bv = bool_vals(node, entries, hs);
-                auto new_bv = bool_vals_mut(nn, new_entries, hs);
+                auto old_bv = bool_vals(node);
+                auto new_bv = bool_vals_mut(nn);
                 new_bv.clear_all(new_entries);
                 for (int i = 0; i < ins; ++i) new_bv.set(i, old_bv.get(i));
                 new_bv.set(ins, value);
                 for (unsigned i = ins; i < entries; ++i) new_bv.set(i + 1, old_bv.get(i));
             } else {
-                VST* ov = vals_mut(node, entries, hs);
-                VST* nv = vals_mut(nn, new_entries, hs);
+                VST* ov = vals_mut(node);
+                VST* nv = vals_mut(nn);
                 if (ins > 0) VT::copy_uninit(ov, ins, nv);
                 VT::init_slot(&nv[ins], value);
                 if (tail > 0) VT::copy_uninit(ov + ins, tail, nv + ins + 1);
             }
 
-            bld.dealloc_node(node, h->alloc_u64());
+            bld.dealloc_node(node, total_from_val_offset(h));
             return {tag_leaf(nn), true, false, nullptr,
                     nn, static_cast<uint16_t>(ins)};
         }
 
-        // In-place: memmove tail right by 1
-        // Key array grows by sizeof(K), which may shift the value start.
         int tail = entries - ins;
         if constexpr (VT::IS_BOOL) {
-            auto bv = bool_vals_mut(node, entries, hs);
-            if (tail > 0) {
-                std::memmove(kd + ins + 1, kd + ins, tail * sizeof(K));
-                bv.shift_right_1(ins, tail);
-            }
+            auto bv = bool_vals_mut(node);
+            std::memmove(kd + ins + 1, kd + ins, tail * sizeof(K));
+            bv.shift_right_1(ins, tail);
             kd[ins] = suffix;
             bv.set(ins, value);
         } else {
-            VST* old_vd = vals_mut(node, entries, hs);
-            VST* new_vd = vals_mut(node, entries + 1, hs);
-            if (new_vd != old_vd) {
-                // Value offset changed — relocate all values first (right shift)
-                std::memmove(new_vd, old_vd, entries * sizeof(VST));
-                // Shift tail values for insertion gap
-                if (tail > 0)
-                    std::memmove(new_vd + ins + 1, new_vd + ins, tail * sizeof(VST));
-                // Now safe to shift keys (may overwrite old value area)
-                if (tail > 0)
-                    std::memmove(kd + ins + 1, kd + ins, tail * sizeof(K));
-                kd[ins] = suffix;
-                VT::init_slot(&new_vd[ins], value);
-            } else {
-                // No relocation needed
-                if (tail > 0) {
-                    std::memmove(kd + ins + 1, kd + ins, tail * sizeof(K));
-                    std::memmove(old_vd + ins + 1, old_vd + ins, tail * sizeof(VST));
-                }
-                kd[ins] = suffix;
-                VT::init_slot(&old_vd[ins], value);
-            }
+            VST* vd = vals_mut(node);
+            std::memmove(kd + ins + 1, kd + ins, tail * sizeof(K));
+            std::memmove(vd + ins + 1, vd + ins, tail * sizeof(VST));
+            kd[ins] = suffix;
+            VT::init_slot(&vd[ins], value);
         }
         h->set_entries(entries + 1);
         return {tag_leaf(node), true, false, nullptr,
@@ -312,72 +320,54 @@ struct compact_ops {
             return {0, true, 0};
         }
 
-        // Shrink check: does the allocation class drop?
+        // Shrink check
         size_t needed_u64 = size_u64(nc, hs);
-        if (should_shrink_u64(h->alloc_u64(), needed_u64)) [[unlikely]] {
-            size_t au64 = round_up_u64(needed_u64);
-            uint64_t* nn = bld.alloc_node(au64, false);
+        size_t current_total = total_from_val_offset(h);
+        if (should_shrink_u64(current_total, needed_u64)) [[unlikely]] {
+            size_t total = round_up_u64(needed_u64);
+            uint64_t* nn = bld.alloc_node(total, false);
             auto* nh = get_header(nn);
             copy_leaf_header(node, nn);
             nh->set_entries(nc);
-            nh->set_alloc_u64(au64);
+            set_val_offset(nn, total);
             
             set_leaf_fns(nn, get_header(nn)->skip() > 0);
 
             K* nk = keys(nn, hs);
-            // Copy keys skipping idx
-            if (idx > 0) std::memcpy(nk, kd, idx * sizeof(K));
+            std::memcpy(nk, kd, idx * sizeof(K));
             unsigned tail = entries - idx - 1;
-            if (tail > 0) std::memcpy(nk + idx, kd + idx + 1, tail * sizeof(K));
+            std::memcpy(nk + idx, kd + idx + 1, tail * sizeof(K));
 
             if constexpr (VT::IS_BOOL) {
-                auto old_bv = bool_vals(node, entries, hs);
-                auto new_bv = bool_vals_mut(nn, nc, hs);
+                auto old_bv = bool_vals(node);
+                auto new_bv = bool_vals_mut(nn);
                 new_bv.clear_all(nc);
                 for (unsigned i = 0; i < idx; ++i) new_bv.set(i, old_bv.get(i));
                 for (unsigned i = idx + 1; i < entries; ++i) new_bv.set(i - 1, old_bv.get(i));
             } else {
-                const VST* ov = vals(node, entries, hs);
-                VST* nv = vals_mut(nn, nc, hs);
+                const VST* ov = vals(node);
+                VST* nv = vals_mut(nn);
                 if (idx > 0) VT::copy_uninit(ov, idx, nv);
                 if constexpr (VT::HAS_DESTRUCTOR)
                     bld.destroy_value(const_cast<VST&>(ov[idx]));
                 if (tail > 0) VT::copy_uninit(ov + idx + 1, tail, nv + idx);
             }
 
-            bld.dealloc_node(node, h->alloc_u64());
+            bld.dealloc_node(node, current_total);
             return {tag_leaf(nn), true, nc};
         }
 
-        // In-place: memmove tail left by 1
-        // Key array shrinks by sizeof(K), which may shift value start left.
         unsigned tail = entries - idx - 1;
         if constexpr (VT::IS_BOOL) {
-            auto bv = bool_vals_mut(node, entries, hs);
-            if (tail > 0) {
-                std::memmove(kd + idx, kd + idx + 1, tail * sizeof(K));
-                bv.shift_left_1(idx + 1, tail);
-            }
+            auto bv = bool_vals_mut(node);
+            std::memmove(kd + idx, kd + idx + 1, tail * sizeof(K));
+            bv.shift_left_1(idx + 1, tail);
         } else {
-            VST* old_vd = vals_mut(node, entries, hs);
-            VST* new_vd = vals_mut(node, nc, hs);
+            VST* vd = vals_mut(node);
             if constexpr (VT::HAS_DESTRUCTOR)
-                bld.destroy_value(old_vd[idx]);
-            if (new_vd != old_vd) {
-                // Value offset changed — shift keys first, then relocate values left
-                if (tail > 0)
-                    std::memmove(kd + idx, kd + idx + 1, tail * sizeof(K));
-                // Copy values skipping idx directly to new position
-                if (idx > 0)
-                    std::memmove(new_vd, old_vd, idx * sizeof(VST));
-                if (tail > 0)
-                    std::memmove(new_vd + idx, old_vd + idx + 1, tail * sizeof(VST));
-            } else {
-                if (tail > 0) {
-                    std::memmove(kd + idx, kd + idx + 1, tail * sizeof(K));
-                    std::memmove(old_vd + idx, old_vd + idx + 1, tail * sizeof(VST));
-                }
-            }
+                bld.destroy_value(vd[idx]);
+            std::memmove(kd + idx, kd + idx + 1, tail * sizeof(K));
+            std::memmove(vd + idx, vd + idx + 1, tail * sizeof(VST));
         }
         h->set_entries(nc);
         return {tag_leaf(node), true, nc};
@@ -400,26 +390,20 @@ public:
         return reinterpret_cast<const K*>(node + header_size);
     }
 
-    static VST* vals_mut(uint64_t* node, size_t total, size_t header_size) noexcept {
-        size_t kb = align_up(total * sizeof(K), U64_BYTES);
-        return reinterpret_cast<VST*>(
-            reinterpret_cast<char*>(node + header_size) + kb);
+    static VST* vals_mut(uint64_t* node) noexcept {
+        return reinterpret_cast<VST*>(node + get_header(node)->alloc_u64());
     }
-    static const VST* vals(const uint64_t* node, size_t total, size_t header_size) noexcept {
-        size_t kb = align_up(total * sizeof(K), U64_BYTES);
-        return reinterpret_cast<const VST*>(
-            reinterpret_cast<const char*>(node + header_size) + kb);
+    static const VST* vals(const uint64_t* node) noexcept {
+        return reinterpret_cast<const VST*>(node + get_header(node)->alloc_u64());
     }
 
-    static bool_slots bool_vals_mut(uint64_t* node, size_t total, size_t header_size) noexcept {
-        size_t kb = align_up(total * sizeof(K), U64_BYTES);
+    static bool_slots bool_vals_mut(uint64_t* node) noexcept {
         return bool_slots{ reinterpret_cast<uint64_t*>(
-            reinterpret_cast<char*>(node + header_size) + kb) };
+            node + get_header(node)->alloc_u64()) };
     }
-    static bool_slots bool_vals(const uint64_t* node, size_t total, size_t header_size) noexcept {
-        size_t kb = align_up(total * sizeof(K), U64_BYTES);
+    static bool_slots bool_vals(const uint64_t* node) noexcept {
         return bool_slots{ const_cast<uint64_t*>(reinterpret_cast<const uint64_t*>(
-            reinterpret_cast<const char*>(node + header_size) + kb)) };
+            node + get_header(node)->alloc_u64())) };
     }
     // ==================================================================
     // Value pointer helper — return const VALUE* at position
@@ -427,11 +411,11 @@ public:
 public:
 
     // val pointer for iter_entry_t. Non-bool: &vals[pos]. Bool: bool_slots.data base.
-    static void* val_ptr(uint64_t* node, unsigned entries, size_t hs, uint16_t pos) noexcept {
+    static void* val_ptr(uint64_t* node, uint16_t pos) noexcept {
         if constexpr (VT::IS_BOOL)
-            return bool_vals_mut(node, entries, hs).data;
+            return bool_vals_mut(node).data;
         else
-            return &vals_mut(node, entries, hs)[pos];
+            return &vals_mut(node)[pos];
     }
 
     // ==================================================================
@@ -457,7 +441,7 @@ public:
 
         if (kd[pos] != suffix) [[unlikely]] return {};
         uint64_t key = d.to_ik(leaf_prefix(node), static_cast<uint64_t>(suffix));
-        return {node, pos, 0, key, val_ptr(node, entries, hs, pos), true};
+        return {node, pos, 0, key, val_ptr(node, pos), true};
     }
 
     // ==================================================================
@@ -502,7 +486,7 @@ public:
         uint16_t pos = (dir == dir_t::FWD) ? 0
             : static_cast<uint16_t>(entries - 1);
         uint64_t key = d.to_ik(pfx, static_cast<uint64_t>(kd[pos]));
-        return {node, pos, 0, key, val_ptr(node, entries, hs, pos), true};
+        return {node, pos, 0, key, val_ptr(node, pos), true};
     }
 
     // ==================================================================
