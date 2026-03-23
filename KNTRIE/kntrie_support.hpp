@@ -112,6 +112,9 @@ inline constexpr size_t round_up_u64(size_t n) noexcept {
     return n;  // beyond table — exact
 }
 
+// Max u64s for node-allocator-managed values (values larger use std allocator)
+inline constexpr size_t MAX_NODE_ALLOC_U64 = 128;
+
 // Shrink when allocated exceeds the class for SHRINK_FACTOR × the needed size.
 inline constexpr bool should_shrink_u64(size_t allocated, size_t needed) noexcept {
     return allocated > round_up_u64(needed * SHRINK_FACTOR);
@@ -1101,7 +1104,7 @@ struct builder<VALUE, false, ALLOC> {
     void dealloc_node(uint64_t* p, size_t u64_count) noexcept { base_v.dealloc_node(p, u64_count); }
 
     slot_type store_value(const VALUE& val) {
-        if constexpr (VAL_U64 <= FREE_MAX) {
+        if constexpr (VAL_U64 <= MAX_NODE_ALLOC_U64) {
             size_t sz = VAL_U64;
             uint64_t* p = base_v.alloc_node(sz, false);
             std::construct_at(reinterpret_cast<VALUE*>(p), val);
@@ -1116,7 +1119,7 @@ struct builder<VALUE, false, ALLOC> {
 
     void destroy_value(slot_type& s) noexcept {
         std::destroy_at(s);
-        if constexpr (VAL_U64 <= FREE_MAX) {
+        if constexpr (VAL_U64 <= MAX_NODE_ALLOC_U64) {
             base_v.dealloc_node(reinterpret_cast<uint64_t*>(s), VAL_U64);
         } else {
             VA va(base_v.get_allocator());

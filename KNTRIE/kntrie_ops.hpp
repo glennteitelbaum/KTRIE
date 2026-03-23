@@ -628,27 +628,98 @@ struct kntrie_ops {
                                                 uint64_t ik, VST value,
                                                 BLD& bld) {
         using NK = nk_for_bits_t<BITS>;
+        using CO = compact_ops<NK, VALUE, ALLOC>;
+        constexpr int NK_BITS = static_cast<int>(sizeof(NK) * CHAR_BIT);
         NK suffix = leaf_ops_t<BITS>::template to_suffix<BITS>(ik);
+        uint8_t new_top_byte = static_cast<uint8_t>(suffix >> (NK_BITS - CHAR_BIT));
 
         uint16_t old_count = hdr->entries();
+        constexpr size_t hs = LEAF_HEADER_U64;
+
+        // Direct pointers into old leaf — no top-level temp arrays
+        const NK* old_keys = CO::keys(node, hs);
+        const VST* old_vals = CO::vals(node);
+
+        // Find insertion point in old sorted array
+        unsigned ins = 0;
+        while (ins < old_count && old_keys[ins] < suffix) ++ins;
+
+        // Partition by top byte into children
+        uint8_t indices[BYTE_VALUES];
+        uint64_t child_ptrs[BYTE_VALUES];
+        int n_children = 0;
+
+        size_t i = 0;
+
+        // Loop 1: byte ranges < new_top_byte — old slices directly
+        while (i < old_count) {
+            uint8_t ti = static_cast<uint8_t>(old_keys[i] >> (NK_BITS - CHAR_BIT));
+            if (ti >= new_top_byte) break;
+            size_t start = i;
+            while (i < old_count &&
+                   static_cast<uint8_t>(old_keys[i] >> (NK_BITS - CHAR_BIT)) == ti) ++i;
+            size_t cc = i - start;
+            uint64_t child_ik = (ik & safe_prefix_mask<BITS>())
+                | leaf_ops_t<BITS>::template suffix_to_u64<BITS>(old_keys[start]);
+            indices[n_children] = ti;
+            child_ptrs[n_children] = build_node_from_arrays_tagged<BITS>(
+                const_cast<NK*>(old_keys + start), const_cast<VST*>(old_vals + start),
+                cc, child_ik, bld);
+            n_children++;
+        }
+
+        // Loop 2: byte == new_top_byte — merge old range + new entry
+        {
+            size_t range_start = i;
+            while (i < old_count &&
+                   static_cast<uint8_t>(old_keys[i] >> (NK_BITS - CHAR_BIT)) == new_top_byte) ++i;
+            size_t range_old = i - range_start;
+            size_t range_new = range_old + 1;
+            unsigned local_ins = ins - static_cast<unsigned>(range_start);
+
+            // Small heap alloc for this one range only (not 4097)
+            auto mk = std::make_unique<NK[]>(range_new);
+            auto mv = std::make_unique<VST[]>(range_new);
+            std::memcpy(mk.get(), old_keys + range_start, local_ins * sizeof(NK));
+            mk[local_ins] = suffix;
+            std::memcpy(mk.get() + local_ins + 1, old_keys + range_start + local_ins,
+                         (range_old - local_ins) * sizeof(NK));
+            std::memcpy(mv.get(), old_vals + range_start, local_ins * sizeof(VST));
+            mv[local_ins] = value;
+            std::memcpy(mv.get() + local_ins + 1, old_vals + range_start + local_ins,
+                         (range_old - local_ins) * sizeof(VST));
+
+            indices[n_children] = new_top_byte;
+            child_ptrs[n_children] = build_node_from_arrays_tagged<BITS>(
+                mk.get(), mv.get(), range_new, ik, bld);
+            n_children++;
+        }
+
+        // Loop 3: byte ranges > new_top_byte — old slices directly
+        while (i < old_count) {
+            uint8_t ti = static_cast<uint8_t>(old_keys[i] >> (NK_BITS - CHAR_BIT));
+            size_t start = i;
+            while (i < old_count &&
+                   static_cast<uint8_t>(old_keys[i] >> (NK_BITS - CHAR_BIT)) == ti) ++i;
+            size_t cc = i - start;
+            uint64_t child_ik = (ik & safe_prefix_mask<BITS>())
+                | leaf_ops_t<BITS>::template suffix_to_u64<BITS>(old_keys[start]);
+            indices[n_children] = ti;
+            child_ptrs[n_children] = build_node_from_arrays_tagged<BITS>(
+                const_cast<NK*>(old_keys + start), const_cast<VST*>(old_vals + start),
+                cc, child_ik, bld);
+            n_children++;
+        }
+
         size_t total = old_count + 1;
-        auto wk = std::make_unique<NK[]>(total);
-        auto wv = std::make_unique<VST[]>(total);
+        uint64_t child_tagged;
+        if (n_children == 1)
+            child_tagged = child_ptrs[0];
+        else
+            child_tagged = tag_bitmask(
+                BO::make_bitmask(indices, child_ptrs, n_children, bld, total));
 
-        size_t wi = 0;
-        bool ins = false;
-        leaf_for_each<BITS>(node, hdr, [&](NK s, VST v) {
-            if (!ins && suffix < s) {
-                wk[wi] = suffix; wv[wi] = value; wi++; ins = true;
-            }
-            wk[wi] = s; wv[wi] = v; wi++;
-        });
-        if (!ins) { wk[wi] = suffix; wv[wi] = value; }
-
-        uint64_t child_tagged = build_node_from_arrays_tagged<BITS>(
-            wk.get(), wv.get(), total, ik, bld);
-
-        // Propagate old skip to new child.
+        // Propagate old skip to new child
         uint8_t ps = hdr->skip();
         if (ps > 0) {
             if (child_tagged & LEAF_BIT) {
@@ -664,24 +735,21 @@ struct kntrie_ops {
             } else {
                 constexpr int BS = byte_shift<BITS>();
                 uint8_t pfx_bytes[MAX_SKIP];
-                for (uint8_t i = 0; i < ps; ++i)
-                    pfx_bytes[i] = static_cast<uint8_t>(ik >> (BS + CHAR_BIT * (ps - i)));
+                for (uint8_t pi = 0; pi < ps; ++pi)
+                    pfx_bytes[pi] = static_cast<uint8_t>(ik >> (BS + CHAR_BIT * (ps - pi)));
                 uint64_t* bm_node = bm_to_node(child_tagged);
                 child_tagged = BO::wrap_in_chain(bm_node, pfx_bytes, ps, bld);
             }
         }
 
-        bld.dealloc_node(const_cast<uint64_t*>(node), hdr->alloc_u64());
+        bld.dealloc_node(const_cast<uint64_t*>(node), CO::total_from_val_offset(hdr));
 
-        // Locate the inserted entry in the new subtree (cache-hot).
+        // Locate the inserted entry in the new subtree (cache-hot)
         iter_entry_t lp;
         if (child_tagged & LEAF_BIT) {
             uint64_t* leaf = untag_leaf_mut(child_tagged);
             lp = get_find_fn(leaf)(leaf, ik);
         } else {
-            // Descent through bitmask (possibly skip chain).
-            // Shifted starts at the subtree root: BITS bytes consumed
-            // minus ps skip bytes now inside the chain.
             constexpr int CONSUMED_BITS = KEY_BITS - BITS;
             int shift_amt = CONSUMED_BITS - ps * CHAR_BIT;
             uint64_t shifted = (shift_amt > 0) ? (ik << shift_amt) : ik;
