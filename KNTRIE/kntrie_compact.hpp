@@ -211,7 +211,7 @@ struct compact_ops {
         // Grow if no room
         if (!has_room(entries, h->alloc_u64())) [[unlikely]] {
             unsigned new_entries = entries + 1;
-            size_t au64 = round_up_u64(size_u64(new_entries * GROW_NUMER / GROW_DENOM, hs));
+            size_t au64 = round_up_u64(size_u64(new_entries, hs));
             uint64_t* nn = bld.alloc_node(au64, false);
             auto* nh = get_header(nn);
             copy_leaf_header(node, nn);
