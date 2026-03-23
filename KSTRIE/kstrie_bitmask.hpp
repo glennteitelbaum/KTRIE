@@ -23,7 +23,7 @@ struct kstrie_bitmask {
     //   [child_ptrs Nc*8B][eos_ptr 8B][skip bytes padded to 8B]
     // ------------------------------------------------------------------
 
-    static constexpr size_t CHILD_BITMAP_OFF = 2;                           // u64 units (after header + desc)
+    static constexpr size_t CHILD_BITMAP_OFF = 3;                           // u64 units (after header + parent_ptr + total_tail)
     static constexpr size_t SENTINEL_OFF     = CHILD_BITMAP_OFF + BITMAP_WORDS; // after bitmap
     static constexpr size_t CHILD_SLOTS_OFF  = SENTINEL_OFF + 1;             // after sentinel
 
@@ -34,7 +34,7 @@ struct kstrie_bitmask {
 
     // --- Child bitmap (fixed offset) ---
 
-    static constexpr size_t BITMAP_BYTE_OFF = 2 * U64_BYTES;
+    static constexpr size_t BITMAP_BYTE_OFF = CHILD_BITMAP_OFF * U64_BYTES;
 
     static bitmap_type* get_bitmap(uint64_t* node, const hdr_type& /*h*/) noexcept {
         return reinterpret_cast<bitmap_type*>(reinterpret_cast<uint8_t*>(node) + BITMAP_BYTE_OFF);
@@ -141,8 +141,8 @@ struct kstrie_bitmask {
 
     static constexpr size_t needed_u64(uint8_t skip_len,
                                         uint16_t child_count) noexcept {
-        // header(1) + desc(1) + bitmap(BU) + sentinel(1) + children(Nc) + eos(1) + skip
-        size_t u64s = 2 + BITMAP_WORDS + 1 + child_count + 1;
+        // header(1) + parent_ptr(1) + total_tail(1) + bitmap(BU) + sentinel(1) + children(Nc) + eos(1) + skip
+        size_t u64s = 3 + BITMAP_WORDS + 1 + child_count + 1;
         if (skip_len > 0)
             u64s += div_ceil(align_up(static_cast<size_t>(skip_len), U64_BYTES),
                              U64_BYTES);
@@ -161,6 +161,7 @@ struct kstrie_bitmask {
         h.set_bitmask(true);
         h.set_skip_len(skip_len);
         h.count = 0;
+        node[NODE_PARENT_PTR] = 0;  // null parent until linked
         node[NODE_TOTAL_TAIL] = 0;
         // Set sentinel
         slots::store_child(node + SENTINEL_OFF, 0, compact_type::sentinel());
@@ -182,6 +183,7 @@ struct kstrie_bitmask {
         h.set_bitmask(true);
         h.set_skip_len(skip_len);
         h.count = n_buckets;
+        node[NODE_PARENT_PTR] = 0;  // null parent until linked
         node[NODE_TOTAL_TAIL] = 0;
         // Sentinel
         slots::store_child(node + SENTINEL_OFF, 0, compact_type::sentinel());
@@ -240,6 +242,7 @@ struct kstrie_bitmask {
         hdr_type& nh = hdr_type::from_node(nn);
         nh.copy_from(h);
         nh.count = new_cc;
+        nn[NODE_PARENT_PTR] = node[NODE_PARENT_PTR];
         nn[NODE_TOTAL_TAIL] = node[NODE_TOTAL_TAIL];
         slots::store_child(nn + SENTINEL_OFF, 0, compact_type::sentinel());
         *get_bitmap(nn, nh) = *bm;

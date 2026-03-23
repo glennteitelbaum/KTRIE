@@ -36,7 +36,8 @@ inline constexpr size_t U64_BYTES = sizeof(uint64_t);
 
 // Named node-word indices (u64 offsets into node allocation)
 inline constexpr size_t NODE_HEADER      = 0;
-inline constexpr size_t NODE_TOTAL_TAIL = 1;  // bitmask only: u64 sum of children's keysuffix bytes
+inline constexpr size_t NODE_PARENT_PTR  = 1;  // bitmask: parent pointer
+inline constexpr size_t NODE_TOTAL_TAIL  = 2;  // bitmask only: u64 sum of children's keysuffix bytes
 
 template <typename ALLOC>
 struct kstrie_memory;
@@ -525,8 +526,8 @@ struct node_header {
         if (is_compact()) {
             return (static_cast<size_t>(slots_off) + slots_t::value_u64s(count)) * U64_BYTES;
         }
-        // bitmask: header + desc + bitmap + sentinel + children + eos + skip
-        size_t u64s = 2 + BITMAP_WORDS + 1 + count + 1;
+        // bitmask: header + parent_ptr + total_tail + bitmap + sentinel + children + eos + skip
+        size_t u64s = 3 + BITMAP_WORDS + 1 + count + 1;
         if (has_skip()) u64s += div_ceil(align_up(skip_bytes(), U64_BYTES), U64_BYTES);
         return u64s * U64_BYTES;
     }
@@ -558,8 +559,8 @@ struct node_header {
 
     // --- Compact-typed accessors ---
 
-    // Compact parallel arrays start after header(8B) + ck_prefix(8B)
-    static constexpr size_t COMPACT_ARRAYS_OFF = 2 * U64_BYTES;
+    // Compact parallel arrays start after header(8B) + ck_prefix(8B) + parent_ptr(8B)
+    static constexpr size_t COMPACT_ARRAYS_OFF = 3 * U64_BYTES;
 
     [[nodiscard]] const uint8_t* get_compact_index(const uint64_t* node) const noexcept {
         return reinterpret_cast<const uint8_t*>(node) + COMPACT_ARRAYS_OFF;
@@ -633,6 +634,9 @@ inline constexpr uint32_t COMPACT_ENTRY_KEY_MAX = COMPACT_SUFFIX_LEN_MAX;
 inline constexpr uint32_t BYTE_VALUES          = 1u << CHAR_BIT;            // 256
 inline constexpr uint32_t BITMASK_EOS_SLOTS    = 1;                          // one EOS child slot
 inline constexpr uint32_t BITMASK_MAX_CHILDREN = BYTE_VALUES + BITMASK_EOS_SLOTS;  // 257
+
+// Parent byte sentinel: node is root (no parent)
+inline constexpr uint16_t ROOT_PARENT_BYTE = 256;
 
 enum class insert_mode : uint8_t { INSERT, UPSERT, ASSIGN };
 enum class insert_outcome : uint8_t { INSERTED, UPDATED, FOUND };

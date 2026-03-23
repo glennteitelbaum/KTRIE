@@ -45,7 +45,8 @@ struct kstrie_compact {
     using match_status = typename skip_type::match_status;
 
     // Sentinel: all-zeros compact(0). Static, never freed (alloc_u64=0).
-    static inline constinit uint64_t sentinel_data_[3] = {};
+    // 4 u64s: header + ck_prefix + parent_ptr + start of L array — all zero-safe.
+    static inline constinit uint64_t sentinel_data_[4] = {};
     static uint64_t* sentinel() noexcept { return sentinel_data_; }
 
     // Compute a subtree's total-tail contribution (keysuffix cost).
@@ -75,7 +76,7 @@ struct kstrie_compact {
         uint16_t cap;
         uint16_t keysuffix_used;
         uint16_t skip_data_off;   // byte offset from node start to skip bytes
-        uint16_t reserved_padding_;  // must remain zero; aligns ck_prefix to 8 bytes
+        uint16_t parent_byte;     // dispatch byte in parent (ROOT_PARENT_BYTE = root)
     };
 
     static constexpr size_t CK_PREFIX_OFF = U64_BYTES;  // byte offset: right after header
@@ -86,6 +87,27 @@ struct kstrie_compact {
     static const ck_prefix& get_prefix(const uint64_t* node,
                                         const hdr_type& h) noexcept {
         return get_prefix(const_cast<uint64_t*>(node), h);
+    }
+
+    // ------------------------------------------------------------------
+    // Parent pointer: node[2] for compact nodes
+    // ------------------------------------------------------------------
+
+    static constexpr size_t COMPACT_PARENT_PTR = 2;  // u64 offset
+
+    static uint64_t* get_parent(const uint64_t* node) noexcept {
+        return reinterpret_cast<uint64_t*>(
+            static_cast<std::uintptr_t>(node[COMPACT_PARENT_PTR]));
+    }
+    static void set_parent(uint64_t* node, uint64_t* parent) noexcept {
+        node[COMPACT_PARENT_PTR] = static_cast<uint64_t>(
+            reinterpret_cast<std::uintptr_t>(parent));
+    }
+    static uint16_t get_parent_byte(const uint64_t* node, const hdr_type& h) noexcept {
+        return get_prefix(node, h).parent_byte;
+    }
+    static void set_parent_byte(uint64_t* node, const hdr_type& h, uint16_t byte) noexcept {
+        get_prefix(node, h).parent_byte = byte;
     }
 
     // ------------------------------------------------------------------
@@ -130,7 +152,7 @@ struct kstrie_compact {
     // ------------------------------------------------------------------
 
     // All parallel arrays are padded to 8-entry blocks.
-    // cap = align_up(count, 8). With COMPACT_ARRAYS_OFF = 16:
+    // cap = align_up(count, 8). With COMPACT_ARRAYS_OFF = 24:
     //   lengths  at 16,          size = cap bytes
     //   firsts   at 16 + cap,    size = cap bytes
     //   offsets  at 16 + 2*cap,  size = cap * sizeof(ks_offset_type) bytes
@@ -212,7 +234,7 @@ struct kstrie_compact {
         p.cap            = cap;
         p.keysuffix_used = 0;
         p.skip_data_off  = static_cast<uint16_t>(ck_skip_off(cap));
-        p.reserved_padding_ = 0;
+        p.parent_byte = ROOT_PARENT_BYTE;
 
         if (h.has_skip()) [[unlikely]]
             std::memcpy(reinterpret_cast<uint8_t*>(node) + p.skip_data_off,
