@@ -102,7 +102,7 @@ bytes_for(), u64_for()
 `bool_slots` manages the packed storage; `bool_ref` provides the proxy
 reference that the live iterator returns.
 
-### 1.5 Add bool_ref proxy — TODO (needed for kntrie<K,bool> support)
+### 1.5 Add bool_ref proxy — PARTIAL (bool_ref struct added to support, bool_ref_at added to ops, val_bm_mut made public. Still needed: bool_ref_at_pos in impl, iterator reference conditional on IS_BOOL, restore private after val_bm_mut)
 
 ```cpp
 struct bool_ref {
@@ -120,7 +120,7 @@ struct bool_ref {
 };
 ```
 
-### 1.6 value_traits cleanup — TODO (remove IS_BOOL as_ptr dead branch after bool_ref added)
+### 1.6 value_traits cleanup — TODO (remove IS_BOOL as_ptr dead branch, trivial once §1.5 compiles)
 
 Old:
 ```cpp

@@ -214,6 +214,32 @@ struct kntrie_ops {
         return value_ref_at(const_cast<uint64_t*>(node), pos);
     }
 
+    // bool_ref_at — packed bit proxy for IS_BOOL live iterators.
+    static bool_ref bool_ref_at(uint64_t* node, uint16_t pos) noexcept {
+        depth_t d = get_depth(node);
+        constexpr size_t hs = LEAF_HEADER_U64;
+        uint8_t nk_bits = U64_BITS - d.shift;
+        if (nk_bits <= U8_BITS) {
+            // bitmap leaf: pos is byte value, val_bm is after key bitmap
+            auto& vbm = BO::val_bm_mut(node, hs);
+            unsigned word_idx = pos / U64_BITS;
+            uint8_t  bit_idx  = static_cast<uint8_t>(pos % U64_BITS);
+            return {&vbm.words[word_idx], bit_idx};
+        }
+        // compact leaf: packed bits in bool_slots after keys
+        unsigned entries = get_header(node)->entries();
+        if (nk_bits <= U16_BITS) {
+            auto bv = compact_ops<uint16_t, VALUE, ALLOC>::bool_vals_mut(node, entries, hs);
+            return {&bv.data[pos / U64_BITS], static_cast<uint8_t>(pos % U64_BITS)};
+        } else if (nk_bits <= U32_BITS) {
+            auto bv = compact_ops<uint32_t, VALUE, ALLOC>::bool_vals_mut(node, entries, hs);
+            return {&bv.data[pos / U64_BITS], static_cast<uint8_t>(pos % U64_BITS)};
+        } else {
+            auto bv = compact_ops<uint64_t, VALUE, ALLOC>::bool_vals_mut(node, entries, hs);
+            return {&bv.data[pos / U64_BITS], static_cast<uint8_t>(pos % U64_BITS)};
+        }
+    }
+
     // ==================================================================
     // Make single leaf — narrow to storage NK at boundary
     // ==================================================================

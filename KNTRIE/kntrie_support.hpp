@@ -826,6 +826,28 @@ public:
 };
 
 // ==========================================================================
+// bool_ref — proxy for packed bit in bool_slots or val_bm.
+// Acts like bool& but reads/writes a single bit in a uint64_t word.
+// ==========================================================================
+
+struct bool_ref {
+    uint64_t* word;
+    uint8_t   bit;
+
+    operator bool() const noexcept {
+        return (*word >> bit) & 1;
+    }
+    bool_ref& operator=(bool v) noexcept {
+        if (v) *word |=  (uint64_t{1} << bit);
+        else   *word &= ~(uint64_t{1} << bit);
+        return *this;
+    }
+    bool_ref& operator=(const bool_ref& o) noexcept {
+        return *this = static_cast<bool>(o);
+    }
+};
+
+// ==========================================================================
 // Value traits
 // ==========================================================================
 

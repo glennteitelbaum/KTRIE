@@ -1062,6 +1062,7 @@ private:
     }
 
     // --- Bitmap256 leaf: value bitmap for bool (sits after presence bitmap) ---
+public:
     static const bitmap_256_t& val_bm(const uint64_t* n, size_t header_size) noexcept {
         return *reinterpret_cast<const bitmap_256_t*>(n + header_size + BITMAP_WORDS);
     }
