@@ -74,7 +74,7 @@ struct bitmask_ops {
     };
 
     static child_lookup lookup(const uint64_t* node, uint8_t idx) noexcept {
-        return lookup_at(node, 1, idx);
+        return lookup_at(node, HEADER_U64, idx);
     }
 
     // ==================================================================
@@ -82,7 +82,7 @@ struct bitmask_ops {
     // ==================================================================
 
     static void set_child(uint64_t* node, int slot, uint64_t tagged_ptr) noexcept {
-        real_children_mut(node, 1)[slot] = tagged_ptr;
+        real_children_mut(node, HEADER_U64)[slot] = tagged_ptr;
     }
 
     // ==================================================================
@@ -190,7 +190,7 @@ struct bitmask_ops {
     static uint64_t* add_child(uint64_t* node, node_header_t* h,
                                 uint8_t idx, uint64_t child_tagged,
                                 BLD& bld) {
-        return add_child_at(node, h, 1, idx, child_tagged, bld);
+        return add_child_at(node, h, HEADER_U64, idx, child_tagged, bld);
     }
 
     // ==================================================================
@@ -214,7 +214,7 @@ struct bitmask_ops {
 
     static uint64_t* remove_child(uint64_t* node, node_header_t* h,
                                    int slot, uint8_t idx, BLD& bld) {
-        return remove_child_at(node, h, 1, slot, idx, bld);
+        return remove_child_at(node, h, HEADER_U64, slot, idx, bld);
     }
 
     // ==================================================================
@@ -420,11 +420,11 @@ struct bitmask_ops {
     // Extract collapse info from a standalone bitmask (sc == 0, entries() == 1)
     static collapse_info standalone_collapse_info(const uint64_t* node) noexcept {
         collapse_info ci;
-        const bitmap_256_t& bmp = bm(node, 1);
+        const bitmap_256_t& bmp = bm(node, HEADER_U64);
         ci.bytes[0] = bmp.first_set_bit();
         ci.total_skip = 1;
-        ci.sole_child = real_children(node, 1)[0];
-        ci.sole_entries = *descendants_ptr(node, 1, 1);
+        ci.sole_child = real_children(node, HEADER_U64)[0];
+        ci.sole_entries = *descendants_ptr(node, HEADER_U64, 1);
         return ci;
     }
 
