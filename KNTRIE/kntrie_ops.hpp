@@ -708,11 +708,7 @@ struct kntrie_ops {
             uint16_t new_pos = 0;
             auto leaf_tagged = depth_switch(depth + 1, [&]<int BITS>() {
                 new_leaf = make_single_leaf<BITS>(ik, value, bld);
-                // Single entry: compact pos=0, bitmap pos=byte value
-                if constexpr (BITS <= CHAR_BIT) {
-                    new_pos = static_cast<uint16_t>(
-                        static_cast<uint8_t>(depth_t::suffix_at<BITS>(ik)));
-                }
+                new_pos = single_entry_pos<BITS>(ik);
                 return tag_leaf(new_leaf);
             });
 
