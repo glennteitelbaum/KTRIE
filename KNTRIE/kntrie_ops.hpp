@@ -727,14 +727,17 @@ struct kntrie_ops {
 
         // Parent fixup on unwind
         if (cr.tagged_ptr != cl.child) [[unlikely]] {
+            uint8_t byte = static_cast<uint8_t>(shifted >> U64_TOP_BYTE_SHIFT);
             if (sc > 0) [[unlikely]]
                 BO::chain_set_child(node, sc, cl.slot, cr.tagged_ptr);
             else
                 BO::set_child(node, cl.slot, cr.tagged_ptr);
+            link_child(node, cr.tagged_ptr, byte);
         }
         if (cr.inserted) [[likely]]
             inc_descendants(node, hdr);
-        return {tag_bitmask(node), cr.inserted, false};
+        return {tag_bitmask(node), cr.inserted, false, cr.existing_value,
+                cr.leaf, cr.pos};
     }
 
     // --- Leaf insert: compile-time NK dispatch ---
@@ -833,6 +836,7 @@ struct kntrie_ops {
                     BO::chain_set_child(node, sc, cl.slot, cr.tagged_ptr);
                 else
                     BO::set_child(node, cl.slot, cr.tagged_ptr);
+                link_child(node, cr.tagged_ptr, ti);
             }
             uint64_t exact = dec_descendants(node, hdr);
             if (exact <= COMPACT_MAX) [[unlikely]] {
