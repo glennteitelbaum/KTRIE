@@ -102,7 +102,7 @@ bytes_for(), u64_for()
 `bool_slots` manages the packed storage; `bool_ref` provides the proxy
 reference that the live iterator returns.
 
-### 1.5 Add bool_ref proxy — PARTIAL (bool_ref struct added to support, bool_ref_at added to ops, val_bm_mut made public. Still needed: bool_ref_at_pos in impl, iterator reference conditional on IS_BOOL, restore private after val_bm_mut)
+### 1.5 Add bool_ref proxy — DONE (bool_ref struct, bool_ref_at in ops, bool_ref_at_pos in impl, iterator/at/operator[] conditioned on IS_BOOL, val_bm_mut public)
 
 ```cpp
 struct bool_ref {
@@ -120,7 +120,7 @@ struct bool_ref {
 };
 ```
 
-### 1.6 value_traits cleanup — TODO (remove IS_BOOL as_ptr dead branch, trivial once §1.5 compiles)
+### 1.6 value_traits cleanup — DONE (as_ptr IS_BOOL branch already removed)
 
 Old:
 ```cpp
@@ -772,7 +772,7 @@ be emulated with erase+insert but that defeats the purpose.
 
 ## 7 Design Decisions
 
-### 7.1 Insert pos propagation — TODO (currently two-walk via insert then find_with_pos; should propagate pos from compact insert up through insert_node)
+### 7.1 Insert pos propagation — TODO (leaf/pos already filled by compact/bitmap insert; insert_node splits/first-insert paths leave leaf=null. Fix: insert_with_pos checks r.leaf, falls back to find_with_pos only on null — single-walk 99%+ of inserts)
 
 The entire insert chain must propagate `{leaf*, pos}` back to the
 caller. Current return type:

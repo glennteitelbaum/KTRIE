@@ -1069,6 +1069,7 @@ public:
     static bitmap_256_t& val_bm_mut(uint64_t* n, size_t header_size) noexcept {
         return *reinterpret_cast<bitmap_256_t*>(n + header_size + BITMAP_WORDS);
     }
+private:
 
     // --- Bitmask node: descendants count (single u64 after children) ---
     static const uint64_t* descendants_ptr(const uint64_t* n, size_t header_size, unsigned nc) noexcept {

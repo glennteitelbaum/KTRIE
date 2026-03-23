@@ -35,13 +35,22 @@ public:
     using difference_type = std::ptrdiff_t;
     using allocator_type  = ALLOC;
 
+    static constexpr bool IS_BOOL = std::is_same_v<VALUE, bool>;
+
     // ==================================================================
     // Iterator — live, bidirectional
     //
     // Points into the trie structure. operator*() returns a pair with a
     // reference to the value, not a copy. Invalidated by any modification
     // to the container (same as std::unordered_map).
+    // For VALUE=bool, the mapped reference is a bool_ref proxy into
+    // packed bit storage.
     // ==================================================================
+
+    using mapped_ref       = std::conditional_t<IS_BOOL,
+                                kntrie_detail::bool_ref, VALUE&>;
+    using const_mapped_ref = std::conditional_t<IS_BOOL,
+                                bool, const VALUE&>;
 
     class iterator {
         friend class kntrie;
@@ -59,10 +68,10 @@ public:
         using iterator_category = std::bidirectional_iterator_tag;
         using value_type        = std::pair<const KEY, VALUE>;
         using difference_type   = std::ptrdiff_t;
-        using reference         = std::pair<const KEY, VALUE&>;
+        using reference         = std::pair<const KEY, mapped_ref>;
 
         struct arrow_proxy {
-            std::pair<const KEY, VALUE&> p;
+            reference p;
             auto* operator->() noexcept { return &p; }
         };
         using pointer = arrow_proxy;
@@ -71,8 +80,12 @@ public:
 
         reference operator*() const noexcept {
             KEY k = impl_v->key_at_pos(leaf_v, pos_v);
-            VALUE& v = impl_t::value_ref_at_pos(leaf_v, pos_v);
-            return {from_unsigned(to_unsigned(k)), v};
+            KEY fk = from_unsigned(to_unsigned(k));
+            if constexpr (IS_BOOL) {
+                return {fk, impl_t::bool_ref_at_pos(leaf_v, pos_v)};
+            } else {
+                return {fk, impl_t::value_ref_at_pos(leaf_v, pos_v)};
+            }
         }
 
         arrow_proxy operator->() const noexcept {
@@ -159,20 +172,23 @@ public:
     // Element access
     // ==================================================================
 
-    VALUE& at(const KEY& key) {
+    mapped_ref at(const KEY& key) {
         auto r = impl_.find_with_pos(to_unsigned(key));
         if (!r.found) throw std::out_of_range("kntrie::at");
-        return impl_t::value_ref_at_pos(r.node, r.pos);
+        if constexpr (IS_BOOL) return impl_t::bool_ref_at_pos(r.node, r.pos);
+        else return impl_t::value_ref_at_pos(r.node, r.pos);
     }
-    const VALUE& at(const KEY& key) const {
+    const_mapped_ref at(const KEY& key) const {
         auto r = impl_.find_with_pos(to_unsigned(key));
         if (!r.found) throw std::out_of_range("kntrie::at");
-        return impl_t::value_cref_at_pos(r.node, r.pos);
+        if constexpr (IS_BOOL) return impl_t::bool_ref_at_pos(const_cast<uint64_t*>(r.node), r.pos);
+        else return impl_t::value_cref_at_pos(r.node, r.pos);
     }
 
-    VALUE& operator[](const KEY& key) {
+    mapped_ref operator[](const KEY& key) {
         auto r = impl_.insert_with_pos(to_unsigned(key), VALUE{});
-        return impl_t::value_ref_at_pos(r.leaf, r.pos);
+        if constexpr (IS_BOOL) return impl_t::bool_ref_at_pos(r.leaf, r.pos);
+        else return impl_t::value_ref_at_pos(r.leaf, r.pos);
     }
 
     // ==================================================================

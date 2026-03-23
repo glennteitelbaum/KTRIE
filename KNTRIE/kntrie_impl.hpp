@@ -293,6 +293,10 @@ public:
         return reinterpret_cast<const VALUE&>(OPS::value_cref_at(leaf, pos));
     }
 
+    static bool_ref bool_ref_at_pos(uint64_t* leaf, uint16_t pos) noexcept {
+        return OPS::bool_ref_at(leaf, pos);
+    }
+
 public:
     // ==================================================================
     // Insert / Insert-or-assign / Assign
