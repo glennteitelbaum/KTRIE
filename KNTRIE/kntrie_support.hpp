@@ -350,8 +350,8 @@ struct iter_entry_t {
 // find_fn: exact match by key.
 using find_fn_t = iter_entry_t (*)(uint64_t*, uint64_t) noexcept;
 
-// adv_fn: positional advance from (pos, bit). O(1).
-using adv_fn_t  = iter_entry_t (*)(uint64_t*, uint16_t, uint16_t, dir_t) noexcept;
+// adv_fn: positional advance from (pos, bit, ik, val). O(1).
+using adv_fn_t  = iter_entry_t (*)(uint64_t*, uint16_t, uint16_t, uint64_t, void*, dir_t) noexcept;
 
 // edge_fn: edge entry (first if FWD, last if BWD).
 using edge_fn_t = iter_entry_t (*)(uint64_t*, dir_t) noexcept;

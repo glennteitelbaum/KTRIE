@@ -112,13 +112,12 @@ public:
         iterator& operator++() {
             using namespace kntrie_detail;
             auto fn = get_find_adv(leaf_v);
-            auto e = fn(leaf_v, pos_v, bit_v, dir_t::FWD);
+            auto e = fn(leaf_v, pos_v, bit_v, ik_v, val_v, dir_t::FWD);
             if (e.found) {
                 leaf_v = e.leaf; pos_v = e.pos; bit_v = e.bit;
                 ik_v = e.ik; val_v = e.val;
                 return *this;
             }
-            // Walk parent chain — first parent from leaf, rest from bitmask
             auto e2 = impl_t::walk_from_leaf(leaf_v, dir_t::FWD);
             leaf_v = e2.leaf; pos_v = e2.pos; bit_v = e2.bit;
             ik_v = e2.ik; val_v = e2.val;
@@ -129,11 +128,10 @@ public:
         iterator& operator--() {
             using namespace kntrie_detail;
             if (!leaf_v) {
-                // Can't decrement end() without container — use rbegin() instead
                 return *this;
             }
             auto fn = get_find_adv(leaf_v);
-            auto e = fn(leaf_v, pos_v, bit_v, dir_t::BWD);
+            auto e = fn(leaf_v, pos_v, bit_v, ik_v, val_v, dir_t::BWD);
             if (e.found) {
                 leaf_v = e.leaf; pos_v = e.pos; bit_v = e.bit;
                 ik_v = e.ik; val_v = e.val;

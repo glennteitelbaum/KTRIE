@@ -535,26 +535,25 @@ struct bitmask_ops {
     // O(1) hot path: one word shift + tzcnt.
     // ==================================================================
 
-    static iter_entry_t find_adv_fn_bitmap(uint64_t* node, uint16_t pos, uint16_t bit, dir_t dir) noexcept {
+    static iter_entry_t find_adv_fn_bitmap(uint64_t* node, uint16_t pos, uint16_t bit,
+                                             uint64_t ik, void* val, dir_t dir) noexcept {
         constexpr size_t hs = LEAF_HEADER_U64;
-        const bitmap_256_t& bmp = bm(node, hs);
-        depth_t d = get_depth(node);
-        uint64_t pfx = leaf_prefix(node);
+        constexpr int VAL_STRIDE = VT::IS_BOOL ? 0 : static_cast<int>(sizeof(VST));
+        constexpr uint64_t LOW_BYTE_MASK = 0xFF;
+        int d_int = static_cast<int>(dir);
 
         if (dir == dir_t::FWD) {
-            auto r = bmp.next_bit_after(static_cast<uint8_t>(bit));
+            auto r = bm(node, hs).next_bit_after(static_cast<uint8_t>(bit));
             if (!r.found) return {};
-            uint16_t new_pos = pos + 1;
-            uint64_t key = d.to_ik(pfx, static_cast<uint64_t>(r.idx));
-            return {node, new_pos, static_cast<uint16_t>(r.idx),
-                    key, bm_val_ptr(node, hs, static_cast<int>(new_pos)), true};
+            return {node, static_cast<uint16_t>(pos + 1), static_cast<uint16_t>(r.idx),
+                    (ik & ~LOW_BYTE_MASK) | static_cast<uint64_t>(r.idx),
+                    static_cast<char*>(val) + d_int * VAL_STRIDE, true};
         } else {
-            auto r = bmp.prev_bit_before(static_cast<uint8_t>(bit));
+            auto r = bm(node, hs).prev_bit_before(static_cast<uint8_t>(bit));
             if (!r.found) return {};
-            uint16_t new_pos = pos - 1;
-            uint64_t key = d.to_ik(pfx, static_cast<uint64_t>(r.idx));
-            return {node, new_pos, static_cast<uint16_t>(r.idx),
-                    key, bm_val_ptr(node, hs, static_cast<int>(new_pos)), true};
+            return {node, static_cast<uint16_t>(pos - 1), static_cast<uint16_t>(r.idx),
+                    (ik & ~LOW_BYTE_MASK) | static_cast<uint64_t>(r.idx),
+                    static_cast<char*>(val) + d_int * VAL_STRIDE, true};
         }
     }
 

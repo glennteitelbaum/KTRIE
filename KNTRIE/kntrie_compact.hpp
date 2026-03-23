@@ -466,24 +466,26 @@ public:
     // No DO_SKIP needed — pos is always valid within the leaf.
     // ==================================================================
 
-    static iter_entry_t find_adv_fn(uint64_t* node, uint16_t pos, uint16_t /*bit*/, dir_t dir) noexcept {
+    static iter_entry_t find_adv_fn(uint64_t* node, uint16_t pos, uint16_t /*bit*/,
+                                     uint64_t /*ik*/, void* val, dir_t dir) noexcept {
         constexpr size_t hs = LEAF_HEADER_U64;
         unsigned entries = get_header(node)->entries();
+        int d_int = static_cast<int>(dir);
+        uint16_t next = static_cast<uint16_t>(static_cast<int>(pos) + d_int);
         if (dir == dir_t::FWD) {
-            uint16_t next = pos + 1;
             if (next >= entries) return {};
-            depth_t d = get_depth(node);
-            const K* kd = keys(node, hs);
-            uint64_t key = d.to_ik(leaf_prefix(node), static_cast<uint64_t>(kd[next]));
-            return {node, next, 0, key, val_ptr(node, entries, hs, next), true};
         } else {
             if (pos == 0) return {};
-            uint16_t prev = pos - 1;
-            depth_t d = get_depth(node);
-            const K* kd = keys(node, hs);
-            uint64_t key = d.to_ik(leaf_prefix(node), static_cast<uint64_t>(kd[prev]));
-            return {node, prev, 0, key, val_ptr(node, entries, hs, prev), true};
         }
+        depth_t d = get_depth(node);
+        const K* kd = keys(node, hs);
+        uint64_t key = d.to_ik(leaf_prefix(node), static_cast<uint64_t>(kd[next]));
+        void* new_val;
+        if constexpr (VT::IS_BOOL)
+            new_val = val;  // packed bits base doesn't move
+        else
+            new_val = static_cast<char*>(val) + d_int * static_cast<int>(sizeof(VST));
+        return {node, next, 0, key, new_val, true};
     }
 
     // ==================================================================
