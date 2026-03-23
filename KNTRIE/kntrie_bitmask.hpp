@@ -1169,6 +1169,19 @@ public:
     static bool is_bitmap_leaf(const uint64_t* node) noexcept {
         return get_depth(node).shift >= BITMAP_SHIFT_THRESHOLD;
     }
+
+    // Return the tagged bitmap pointer for sibling search, handling skip chains.
+    // For non-skip nodes: tag_bitmask(node) points to node[HEADER_U64].
+    // For skip chains: final bitmap is at node + HEADER_U64 + sc * EMBED_U64.
+    static uint64_t node_bm_ptr(const uint64_t* node) noexcept {
+        uint8_t sc = get_header(node)->skip();
+        if (sc == 0) [[likely]]
+            return tag_bitmask(node);
+        size_t offset = HEADER_U64 + static_cast<size_t>(sc) * EMBED_U64;
+        return static_cast<uint64_t>(reinterpret_cast<std::uintptr_t>(node + offset));
+    }
+
+private:
 };
 
 } // namespace gteitelbaum::kntrie_detail

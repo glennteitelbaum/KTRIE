@@ -468,17 +468,7 @@ public:
             if (h->is_root()) return {};
             uint8_t byte = static_cast<uint8_t>(h->parent_byte());
             uint64_t* parent_node = is_leaf_node ? leaf_parent(node) : bm_parent(node);
-            // For skip chain parents, use the final bitmap (not the first embed)
-            auto* ph = get_header(parent_node);
-            uint8_t psc = ph->skip();
-            uint64_t parent_bm_ptr;
-            if (psc > 0) [[unlikely]] {
-                // Skip chain: final bitmap at node + HEADER_U64 + sc * EMBED_U64
-                parent_bm_ptr = static_cast<uint64_t>(reinterpret_cast<std::uintptr_t>(
-                    parent_node + HEADER_U64 + static_cast<size_t>(psc) * BO::EMBED_U64));
-            } else {
-                parent_bm_ptr = tag_bitmask(parent_node);
-            }
+            uint64_t parent_bm_ptr = BO::node_bm_ptr(parent_node);
             auto [sib, found] = (dir == dir_t::FWD)
                 ? BO::bm_next_sibling(parent_bm_ptr, byte)
                 : BO::bm_prev_sibling(parent_bm_ptr, byte);
