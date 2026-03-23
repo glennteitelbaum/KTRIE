@@ -77,6 +77,10 @@ public:
         iterator(uint64_t* leaf, uint16_t pos, uint16_t bit, uint64_t ik, void* val)
             : leaf_v(leaf), pos_v(pos), bit_v(bit), ik_v(ik), val_v(val) {}
 
+        // End sentinel: leaf_v=null, val_v stashes impl* for --end()
+        explicit iterator(impl_t* impl)
+            : val_v(static_cast<void*>(impl)) {}
+
     public:
         using iterator_category = std::bidirectional_iterator_tag;
         using value_type        = std::pair<const KEY, VALUE>;
@@ -128,6 +132,13 @@ public:
         iterator& operator--() {
             using namespace kntrie_detail;
             if (!leaf_v) {
+                // End sentinel: val_v holds impl* for reaching last element
+                auto* impl = static_cast<impl_t*>(val_v);
+                if (!impl) return *this;
+                auto e = impl->edge_entry(dir_t::BWD);
+                if (!e.leaf) return *this;  // empty container
+                leaf_v = e.leaf; pos_v = e.pos; bit_v = e.bit;
+                ik_v = e.ik; val_v = e.val;
                 return *this;
             }
             auto fn = get_find_adv(leaf_v);
@@ -389,14 +400,14 @@ public:
         return iterator(impl_.edge_entry(kntrie_detail::dir_t::FWD));
     }
     iterator end() noexcept {
-        return iterator{};
+        return iterator{&impl_};
     }
     const_iterator begin() const noexcept {
         return const_iterator(const_cast<impl_t&>(impl_).edge_entry(
             kntrie_detail::dir_t::FWD));
     }
     const_iterator end() const noexcept {
-        return const_iterator{};
+        return const_iterator{const_cast<impl_t*>(&impl_)};
     }
     const_iterator cbegin() const noexcept { return begin(); }
     const_iterator cend()   const noexcept { return end(); }

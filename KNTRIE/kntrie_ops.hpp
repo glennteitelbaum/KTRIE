@@ -258,22 +258,30 @@ struct kntrie_ops {
                 if (!r.found) return {};
                 uint64_t key = d.to_ik(pfx, static_cast<uint64_t>(r.idx));
                 void* val;
-                if constexpr (VT::IS_BOOL)
+                uint16_t ret_pos;
+                if constexpr (VT::IS_BOOL) {
                     val = &BO::val_bm_mut(node, hs).words[0];
-                else
+                    ret_pos = static_cast<uint16_t>(r.idx);
+                } else {
                     val = &BO::bl_vals_mut(node, hs)[r.slot];
-                return {node, static_cast<uint16_t>(r.slot),
+                    ret_pos = static_cast<uint16_t>(r.slot);
+                }
+                return {node, ret_pos,
                         static_cast<uint16_t>(r.idx), key, val, true};
             } else {
                 auto r = bmp.prev_set_before(suffix);
                 if (!r.found) return {};
                 uint64_t key = d.to_ik(pfx, static_cast<uint64_t>(r.idx));
                 void* val;
-                if constexpr (VT::IS_BOOL)
+                uint16_t ret_pos;
+                if constexpr (VT::IS_BOOL) {
                     val = &BO::val_bm_mut(node, hs).words[0];
-                else
+                    ret_pos = static_cast<uint16_t>(r.idx);
+                } else {
                     val = &BO::bl_vals_mut(node, hs)[r.slot];
-                return {node, static_cast<uint16_t>(r.slot),
+                    ret_pos = static_cast<uint16_t>(r.slot);
+                }
+                return {node, ret_pos,
                         static_cast<uint16_t>(r.idx), key, val, true};
             }
         }
@@ -445,14 +453,15 @@ struct kntrie_ops {
             if constexpr (BITS > U8_BITS) {
                 using CNK = nk_for_bits_t<BITS - CHAR_BIT>;
                 constexpr int CNK_BITS = static_cast<int>(sizeof(CNK) * CHAR_BIT);
+                // Reconstruct root-level ik BEFORE narrowing — narrowing may
+                // clobber suf[start] when scratch aliases the suf array.
+                uint64_t child_ik = (ik & safe_prefix_mask<BITS>())
+                    | leaf_ops_t<BITS>::template suffix_to_u64<BITS>(suf[start]);
                 CNK* cs = reinterpret_cast<CNK*>(scratch);
                 for (size_t j = 0; j < cc; ++j) {
                     NK shifted = static_cast<NK>(suf[start + j] << CHAR_BIT);
                     cs[j] = static_cast<CNK>(shifted >> (NK_BITS - CNK_BITS));
                 }
-                // Reconstruct root-level ik from this group's first suffix
-                uint64_t child_ik = (ik & safe_prefix_mask<BITS>())
-                    | leaf_ops_t<BITS>::template suffix_to_u64<BITS>(suf[start]);
                 child_tagged[n_children] = build_node_from_arrays_tagged<BITS - CHAR_BIT>(
                     cs, vals + start, cc, child_ik, bld, scratch);
             }

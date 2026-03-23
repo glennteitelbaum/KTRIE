@@ -525,7 +525,10 @@ struct bitmask_ops {
         if (!bmp.has_bit(suffix)) [[unlikely]] return {};
         int slot = bmp.find_slot<slot_mode::FAST_EXIT>(suffix);
         uint64_t key = d.to_ik(leaf_prefix(node), static_cast<uint64_t>(suffix));
-        return {node, static_cast<uint16_t>(slot), static_cast<uint16_t>(suffix),
+        // IS_BOOL: pos = suffix (byte value) so operator* indexes val_bm correctly.
+        // Non-bool: pos = slot (ordinal) for val pointer stride.
+        uint16_t ret_pos = VT::IS_BOOL ? static_cast<uint16_t>(suffix) : static_cast<uint16_t>(slot);
+        return {node, ret_pos, static_cast<uint16_t>(suffix),
                 key, bm_val_ptr(node, hs, slot), true};
     }
 
@@ -539,21 +542,26 @@ struct bitmask_ops {
                                              uint64_t ik, void* val, dir_t dir) noexcept {
         constexpr size_t hs = LEAF_HEADER_U64;
         constexpr int VAL_STRIDE = VT::IS_BOOL ? 0 : static_cast<int>(sizeof(VST));
-        constexpr uint64_t LOW_BYTE_MASK = 0xFF;
         int d_int = static_cast<int>(dir);
+        depth_t d = get_depth(node);
+        uint64_t pfx = leaf_prefix(node);
 
         if (dir == dir_t::FWD) {
             auto r = bm(node, hs).next_bit_after(static_cast<uint8_t>(bit));
             if (!r.found) return {};
-            return {node, static_cast<uint16_t>(pos + 1), static_cast<uint16_t>(r.idx),
-                    (ik & ~LOW_BYTE_MASK) | static_cast<uint64_t>(r.idx),
-                    static_cast<char*>(val) + d_int * VAL_STRIDE, true};
+            uint64_t key = d.to_ik(pfx, static_cast<uint64_t>(r.idx));
+            uint16_t ret_pos = VT::IS_BOOL ? static_cast<uint16_t>(r.idx)
+                                           : static_cast<uint16_t>(pos + 1);
+            return {node, ret_pos, static_cast<uint16_t>(r.idx),
+                    key, static_cast<char*>(val) + d_int * VAL_STRIDE, true};
         } else {
             auto r = bm(node, hs).prev_bit_before(static_cast<uint8_t>(bit));
             if (!r.found) return {};
-            return {node, static_cast<uint16_t>(pos - 1), static_cast<uint16_t>(r.idx),
-                    (ik & ~LOW_BYTE_MASK) | static_cast<uint64_t>(r.idx),
-                    static_cast<char*>(val) + d_int * VAL_STRIDE, true};
+            uint64_t key = d.to_ik(pfx, static_cast<uint64_t>(r.idx));
+            uint16_t ret_pos = VT::IS_BOOL ? static_cast<uint16_t>(r.idx)
+                                           : static_cast<uint16_t>(pos - 1);
+            return {node, ret_pos, static_cast<uint16_t>(r.idx),
+                    key, static_cast<char*>(val) + d_int * VAL_STRIDE, true};
         }
     }
 
@@ -571,13 +579,15 @@ struct bitmask_ops {
         if (dir == dir_t::FWD) {
             uint8_t idx = bmp.first_set_bit();
             uint64_t key = d.to_ik(pfx, static_cast<uint64_t>(idx));
-            return {node, 0, static_cast<uint16_t>(idx),
+            uint16_t ret_pos = VT::IS_BOOL ? static_cast<uint16_t>(idx) : 0;
+            return {node, ret_pos, static_cast<uint16_t>(idx),
                     key, bm_val_ptr(node, hs, 0), true};
         } else {
             uint8_t idx = bmp.last_set_bit();
             uint16_t last_slot = static_cast<uint16_t>(entries - 1);
             uint64_t key = d.to_ik(pfx, static_cast<uint64_t>(idx));
-            return {node, last_slot, static_cast<uint16_t>(idx),
+            uint16_t ret_pos = VT::IS_BOOL ? static_cast<uint16_t>(idx) : last_slot;
+            return {node, ret_pos, static_cast<uint16_t>(idx),
                     key, bm_val_ptr(node, hs, static_cast<int>(last_slot)), true};
         }
     }
