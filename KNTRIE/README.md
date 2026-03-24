@@ -41,10 +41,7 @@ A **sorted**, **compressed** associative container for integer keys (`uint16\_t`
 
 - Supports Python via a pybind11 wrapper for the C++ implementations
 
-- Be aware that: KNTRIE uses a snapshot iterator, so a modify method is included
-
 - A Java port is available
-  - The Java ports use live iterators, not snapshots
   
 
 
