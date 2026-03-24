@@ -519,5 +519,27 @@ iterator, `at()`, `operator[]`, `insert()` returning `pair<iterator,bool>`.
    - const_mapped_ref = conditional_t<IS_BITMAP, bool, const VALUE&>
    - operator[] uses bool_ref for bool specialization
    - Bool insert + operator[] tests pass ASAN clean
-10. ⬜ Remove modify, erase_when, assign, find_value, iter_next/prev/min/max
+10. 🔶 Remove snapshot-only APIs
+   **Done (kstrie.hpp):**
+   - iter_upper_bound removed
+   - iter_lower_bound + find_ge_impl removed
+   - iter_next + find_next_impl removed
+   - iter_prev + find_prev_impl removed
+   - find_max_impl removed
+   - iter_min / iter_max removed
+   - find_value removed
+   **Keeping (used by prefix()):**
+   - find_min_impl, find_min_impl_tail, iter_prefix_bounds,
+     find_prefix_first_in_compact, find_prefix_past_in_compact
+   **Remaining (kstrie_impl.hpp):**
+   - modify_inner (~663-690)
+   - modify_dispatch (~875-893)
+   - modify_or_insert_dispatch (~894-934)
+   - erase_when (~965-1000)
+   - erase_when_node (~1795-1870)
+   - modify_or_insert_node (~2127-2256)
+   **Remaining (kstrie_compact.hpp):**
+   - modify_existing
+   - modify_or_insert
+   - erase_when_pos
 11. ⬜ Test: sequential, shuffled, iteration order, reverse, copy, EOS keys
