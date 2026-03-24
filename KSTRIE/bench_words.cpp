@@ -579,7 +579,7 @@ int main(int argc, char* argv[]) {
     std::mt19937_64 rng(42);
     std::shuffle(all_words.begin(), all_words.end(), rng);
 
-    size_t max_n = std::min(all_words.size(), size_t(10000));
+    size_t max_n = all_words.size();
     std::fprintf(stderr, "Loaded %zu words from %s\n", max_n, words_file);
 
     // Build size ladder: ~20 points from 100 to max_n

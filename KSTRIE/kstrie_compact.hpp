@@ -971,14 +971,25 @@ struct kstrie_compact {
         uint32_t child_skip_len = old_skip > child_skip_off
                                 ? old_skip - child_skip_off : 0;
 
+        // Read dispatch byte BEFORE reskip — reskip may free old node
+        // that skip_data points into.
+        uint8_t exist_byte = skip_data[match_len];
+
+        // Copy skip prefix for parent before reskip invalidates it
+        uint8_t skip_prefix[256];
+        if (match_len > 0)
+            std::memcpy(skip_prefix, skip_data, match_len);
+
+        // Copy child suffix skip before reskip invalidates it
+        uint8_t child_skip_buf[256];
+        if (child_skip_len > 0)
+            std::memcpy(child_skip_buf, skip_data + child_skip_off, child_skip_len);
+
         // Reskip existing compact: skip becomes old_skip[match_len+1..]
         uint64_t* existing = reskip(node, h, mem,
             static_cast<uint8_t>(child_skip_len),
-            child_skip_len > 0 ? skip_data + child_skip_off : nullptr);
+            child_skip_len > 0 ? child_skip_buf : nullptr);
         hdr_type& eh = hdr_type::from_node(existing);
-
-        // Existing child's dispatch byte
-        uint8_t exist_byte = skip_data[match_len];
 
         // New entry suffix
         uint32_t new_off = consumed + match_len;
@@ -994,7 +1005,7 @@ struct kstrie_compact {
             uint64_t* cld[1] = {existing};
             uint64_t* parent = bitmask_ops::create_with_children(
                 mem, static_cast<uint8_t>(match_len),
-                match_len > 0 ? skip_data : nullptr,
+                match_len > 0 ? skip_prefix : nullptr,
                 bkt, cld, 1);
             // Set EOS child
             hdr_type& ph = hdr_type::from_node(parent);
@@ -1034,7 +1045,7 @@ struct kstrie_compact {
         }
         uint64_t* parent = bitmask_ops::create_with_children(
             mem, static_cast<uint8_t>(match_len),
-            match_len > 0 ? skip_data : nullptr,
+            match_len > 0 ? skip_prefix : nullptr,
             bkt, cld, 2);
         parent[NODE_TOTAL_TAIL] = subtree_tail(existing)
                                 + subtree_tail(new_child)
