@@ -521,25 +521,24 @@ iterator, `at()`, `operator[]`, `insert()` returning `pair<iterator,bool>`.
    - Bool insert + operator[] tests pass ASAN clean
 10. 🔶 Remove snapshot-only APIs
    **Done (kstrie.hpp):**
-   - iter_upper_bound removed
-   - iter_lower_bound + find_ge_impl removed
-   - iter_next + find_next_impl removed
-   - iter_prev + find_prev_impl removed
-   - find_max_impl removed
-   - iter_min / iter_max removed
-   - find_value removed
-   **Keeping (used by prefix()):**
-   - find_min_impl, find_min_impl_tail, iter_prefix_bounds,
-     find_prefix_first_in_compact, find_prefix_past_in_compact
-   **Remaining (kstrie_impl.hpp):**
-   - modify_inner (~663-690)
-   - modify_dispatch (~875-893)
-   - modify_or_insert_dispatch (~894-934)
-   - erase_when (~965-1000)
-   - erase_when_node (~1795-1870)
-   - modify_or_insert_node (~2127-2256)
-   **Remaining (kstrie_compact.hpp):**
-   - modify_existing
-   - modify_or_insert
-   - erase_when_pos
+   - iter_upper_bound, iter_lower_bound + find_ge_impl removed
+   - iter_next + find_next_impl, iter_prev + find_prev_impl removed
+   - find_max_impl, iter_min / iter_max, find_value removed
+   - prefix() rewritten as single-walk: constructs iterators directly
+     via edge_entry + find_prefix_first_pos / find_prefix_past_pos.
+     No double descent.
+   - find_prefix_first_pos, find_prefix_past_pos added (position-returning)
+   **Dead code remaining to delete (kstrie.hpp):**
+   - find_min_impl (~807-842) — was used by iter_prefix_bounds, now dead
+   - iter_prefix_bounds + prefix_result (~955-1086)
+   - find_prefix_first_in_compact (~1087-1121)
+   - find_prefix_past_in_compact (~1122-1154)
+   **Keeping (used by new prefix helpers):**
+   - append_unmapped
+   - find_ge_iter
+   **Remaining to remove (kstrie_impl.hpp):**
+   - modify_inner, modify_dispatch, modify_or_insert_dispatch
+   - erase_when, erase_when_node, modify_or_insert_node
+   **Remaining to remove (kstrie_compact.hpp):**
+   - modify_existing, modify_or_insert, erase_when_pos
 11. ⬜ Test: sequential, shuffled, iteration order, reverse, copy, EOS keys
