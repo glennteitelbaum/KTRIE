@@ -22,10 +22,6 @@ Concepts that apply to both implementations
 
 - Each supports Python via a pybind11 wrapper for the C++ implementations
 
-- Be aware that: KNTRIE/KSTRIE Use snapshot iterators, so a modify method is included
-
 - A Java port is available for KNTRIE and KSTRIE
-  - The Java ports use live iterators, not snapshots
-  
 
 *Note: This was done using AI-assisted development with Claude Opus 4.6*
