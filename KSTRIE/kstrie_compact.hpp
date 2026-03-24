@@ -1407,6 +1407,10 @@ struct kstrie_compact {
         }
 
         parent[NODE_TOTAL_TAIL] = desc + static_cast<uint64_t>(count) * skip_len;
+
+        // Link all children (byte + EOS) to their parent
+        bitmask_ops::link_all_children(parent);
+
         return parent;
     }
 

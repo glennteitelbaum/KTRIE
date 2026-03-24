@@ -448,7 +448,8 @@ iterator, `at()`, `operator[]`, `insert()` returning `pair<iterator,bool>`.
 ### Changes
 
 - **kstrie_support.hpp:** NODE_PARENT_PTR(1), NODE_TOTAL_TAIL(1→2),
-  COMPACT_ARRAYS_OFF(16→24), node_size bitmask(2→3), ROOT_PARENT_BYTE
+  COMPACT_ARRAYS_OFF(16→24), node_size bitmask(2→3), ROOT_PARENT_BYTE,
+  EOS_PARENT_BYTE
 - **kstrie_compact.hpp:** ck_prefix.reserved_→parent_byte,
   COMPACT_PARENT_PTR, parent accessors, comment updates
 - **kstrie_bitmask.hpp:** CHILD_BITMAP_OFF(2→3), BITMAP_BYTE_OFF(derived),
@@ -469,18 +470,34 @@ iterator, `at()`, `operator[]`, `insert()` returning `pair<iterator,bool>`.
 
 ## 10 Implementation Order
 
-1. kstrie_support.hpp: NODE_PARENT_PTR, NODE_TOTAL_TAIL shift, COMPACT_ARRAYS_OFF,
-   node_size, ROOT_PARENT_BYTE
-2. kstrie_compact.hpp: ck_prefix.parent_byte, COMPACT_PARENT_PTR, parent accessors,
-   init parent_byte in alloc_compact_ks
-3. kstrie_bitmask.hpp: CHILD_BITMAP_OFF, BITMAP_BYTE_OFF, needed_u64, parent_ptr
-   init in create/create_with_children/reskip/insert_child, parent accessors
-4. Compile check — all existing tests must pass (layout shift is mechanical)
-5. kstrie_impl.hpp: link_child, mark_root, wire into mutation paths
-6. kstrie_impl.hpp: clone_tree_into parent re-link
-7. kstrie.hpp: iterator class with key_v, operator++/--, walk_from_leaf, edge_entry
-8. kstrie.hpp: public API wrapper (at, operator[], find returning iterator,
-   insert returning pair<iterator,bool>, erase(iterator), etc.)
-9. IS_BOOL bool_ref proxy
-10. Remove modify, erase_when, assign, find_value, iter_next/prev/min/max
-11. Test: sequential, shuffled, iteration order, reverse, copy, EOS keys
+1. ✅ kstrie_support.hpp: NODE_PARENT_PTR, NODE_TOTAL_TAIL shift, COMPACT_ARRAYS_OFF,
+   node_size, ROOT_PARENT_BYTE, EOS_PARENT_BYTE, dir_t enum
+2. ✅ kstrie_compact.hpp: ck_prefix.parent_byte, sentinel[4], COMPACT_PARENT_PTR,
+   parent accessors, init parent_byte in alloc_compact_ks, comment updates
+3. ✅ kstrie_bitmask.hpp: CHILD_BITMAP_OFF, BITMAP_BYTE_OFF, needed_u64, parent_ptr
+   init in create/create_with_children/reskip/insert_child, parent accessors,
+   link_child_to_parent, link_all_children, parent linking wired into
+   replace_child, set_eos_child, insert_child (both paths), reskip,
+   build_node_from_entries
+4. ✅ Compile check + ASAN — existing tests pass after layout shift
+5. ✅ kstrie_impl.hpp: set_root() helper with ROOT_PARENT_BYTE marking.
+   All 11 non-sentinel `root_v = X` replaced with `set_root(X)`.
+   replace_child and set_eos_child auto-link children (done in step 3).
+   Added get_root_mut(), find_for_iter() returning leaf+pos+prefix_len.
+6. ✅ kstrie_impl.hpp: clone_tree_into and clone_tree — link_all_children
+   after bitmask clone. Copy constructor uses set_root.
+7. ✅ kstrie.hpp: Live const_iterator with key_v, parent-walk operator++/--,
+   edge_entry (min/max descent), walk_from_leaf, rebuild_suffix.
+   Incremental prefix tracking: within-leaf swaps only suffix portion.
+   Cross-leaf truncates key_v at divergence point, rebuilds only from
+   there down — O(skip+suffix) for the common sibling-in-same-parent case.
+   find() uses find_for_iter (single walk).
+   lower_bound uses find_ge_iter (single walk).
+   upper_bound uses lower_bound + advance (single walk + 1 step).
+   prefix() still uses double-walk (snapshot bounds + find_for_iter) — future.
+   All 10 tests pass + ASAN clean.
+8. ⬜ kstrie.hpp: public API wrapper (at, operator[], mutable find returning
+   iterator, insert returning pair<iterator,bool>, erase(iterator), etc.)
+9. ⬜ IS_BOOL bool_ref proxy
+10. ⬜ Remove modify, erase_when, assign, find_value, iter_next/prev/min/max
+11. ⬜ Test: sequential, shuffled, iteration order, reverse, copy, EOS keys

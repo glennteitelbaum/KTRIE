@@ -49,6 +49,20 @@ private:
         root_v = compact_type::sentinel();
     }
 
+    // Set root and mark parent_byte = ROOT_PARENT_BYTE.
+    void set_root(uint64_t* node) {
+        root_v = node;
+        if (!node || node == compact_type::sentinel()) return;
+        hdr_type h = hdr_type::from_node(node);
+        if (h.is_compact()) {
+            compact_type::set_parent(node, nullptr);
+            compact_type::set_parent_byte(node, h, ROOT_PARENT_BYTE);
+        } else {
+            bitmask_type::set_parent(node, nullptr);
+            bitmask_type::set_parent_byte(node, ROOT_PARENT_BYTE);
+        }
+    }
+
     void destroy_tree(uint64_t* node) {
         if (!node || node == compact_type::sentinel()) return;
         hdr_type h = hdr_type::from_node(node);
@@ -126,6 +140,8 @@ private:
             uint64_t* old_eos = bitmask_type::eos_child(node, h);
             bitmask_type::set_eos_child(copy, ch,
                 clone_tree_into(old_eos, dest));
+            // Re-link all children to point to the new copy as parent
+            bitmask_type::link_all_children(copy);
         }
         return copy;
     }
@@ -705,7 +721,7 @@ public:
         if (!o.root_v) {
             root_v = compact_type::sentinel();
         } else {
-            root_v = clone_tree(o.root_v);
+            set_root(clone_tree(o.root_v));
         }
     }
 
@@ -745,6 +761,8 @@ private:
             hdr_type& ch = hdr_type::from_node(copy);
             uint64_t* old_eos = bitmask_type::eos_child(node, h);
             bitmask_type::set_eos_child(copy, ch, clone_tree(old_eos));
+            // Re-link all children to point to the new copy as parent
+            bitmask_type::link_all_children(copy);
         }
         return copy;
     }
@@ -765,7 +783,53 @@ public:
     // ------------------------------------------------------------------
 
     [[nodiscard]] const uint64_t* get_root() const noexcept { return root_v; }
+    [[nodiscard]] uint64_t* get_root_mut() noexcept { return root_v; }
     [[nodiscard]] uint64_t* get_sentinel() const noexcept { return compact_type::sentinel(); }
+
+    // find_for_iter: find key, return leaf + position for iterator construction.
+    // Returns {nullptr, 0} on miss.
+    struct iter_find_result {
+        uint64_t* leaf = nullptr;
+        uint16_t  pos  = 0;
+        size_t    prefix_len = 0;  // key bytes consumed before leaf suffix
+    };
+
+    iter_find_result find_for_iter(std::string_view key) const noexcept {
+        const uint8_t* raw = reinterpret_cast<const uint8_t*>(key.data());
+        uint32_t len = static_cast<uint32_t>(key.size());
+
+        uint8_t stack_buf[256];
+        auto [mapped, raw_buf] = get_mapped<CHARMAP>(raw, len,
+                                              stack_buf, sizeof(stack_buf));
+        std::unique_ptr<uint8_t[]> heap_guard(raw_buf);
+
+        uint64_t* node = const_cast<uint64_t*>(root_v);
+        uint32_t consumed = 0;
+        hdr_type h;
+
+        for (;;) {
+            if (node == compact_type::sentinel()) return {};
+            h = hdr_type::from_node(node);
+            if (h.has_skip()) [[unlikely]] {
+                if (!skip_type::match_skip_fast(node, h, mapped, len, consumed))
+                    return {};
+            }
+            if (!h.is_bitmap()) [[unlikely]] break;
+            if (consumed == len) [[unlikely]] {
+                node = bitmask_type::eos_child(node, h);
+                if (node == compact_type::sentinel()) return {};
+                h = hdr_type::from_node(node);
+                break;
+            }
+            node = bitmask_type::dispatch(node, h, mapped[consumed++]);
+        }
+        // node is compact
+        auto [found, pos] = compact_type::find_pos(
+            node, h, mapped + consumed, len - consumed);
+        if (!found) return {};
+        return {node, static_cast<uint16_t>(pos),
+                static_cast<size_t>(len - compact_type::lengths(node, h)[pos])};
+    }
 
     // ------------------------------------------------------------------
     // Lookup
@@ -836,7 +900,7 @@ public:
             // Empty trie: insert default, don't call fn
             insert_result r = insert_node(root_v, mapped, len, default_val,
                                            0, insert_mode::INSERT);
-            root_v = r.node;
+            set_root(r.node);
             if (r.outcome == insert_outcome::INSERTED) size_v++;
             return false;
         }
@@ -844,7 +908,7 @@ public:
         insert_result r = modify_or_insert_node(root_v, mapped, len,
                                                  default_val, 0,
                                                  std::forward<F>(fn));
-        root_v = r.node;
+        set_root(r.node);
         if (r.outcome == insert_outcome::INSERTED) {
             size_v++;
             return false;
@@ -869,7 +933,7 @@ public:
             return 0;
 
         if (r.status == erase_status::DONE) {
-            root_v = r.leaf;
+            set_root(r.leaf);
             size_v--;
             return 1;
         }
@@ -884,7 +948,7 @@ public:
             mem_v.free_node(r.leaf);
             root_v = compact_type::sentinel();
         } else {
-            root_v = r.leaf;
+            set_root(r.leaf);
         }
         size_v--;
         return 1;
@@ -911,7 +975,7 @@ public:
             return false;
 
         if (r.status == erase_status::DONE) {
-            root_v = r.leaf;
+            set_root(r.leaf);
             size_v--;
             return true;
         }
@@ -922,7 +986,7 @@ public:
             mem_v.free_node(r.leaf);
             root_v = compact_type::sentinel();
         } else {
-            root_v = r.leaf;
+            set_root(r.leaf);
         }
         size_v--;
         return true;
@@ -956,7 +1020,7 @@ public:
     mem_type& get_mem() noexcept { return mem_v; }
 
     void set_root(uint64_t* new_root, size_t new_size) {
-        root_v = new_root;
+        set_root(new_root);
         size_v = new_size;
     }
 
@@ -1151,7 +1215,7 @@ public:
             return n;
         }
         auto r = prefix_erase_node(root_v, mapped, len, 0);
-        root_v = r.node;
+        set_root(r.node);
         size_v -= r.erased;
         return r.erased;
     }
@@ -1189,7 +1253,7 @@ public:
             return {root_v, stolen, n, 0};
         }
         auto r = prefix_split_node(root_v, mapped, len, 0);
-        root_v = r.source;
+        set_root(r.source);
         size_v -= r.count;
         return r;
     }
@@ -1866,7 +1930,7 @@ private:
         std::unique_ptr<uint8_t[]> heap_guard(raw_buf);
 
         insert_result r = insert_node(root_v, mapped, len, value, 0, mode);
-        root_v = r.node;
+        set_root(r.node);
 
         if (r.outcome == insert_outcome::INSERTED) {
             size_v++;

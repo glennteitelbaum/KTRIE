@@ -637,9 +637,12 @@ inline constexpr uint32_t BITMASK_MAX_CHILDREN = BYTE_VALUES + BITMASK_EOS_SLOTS
 
 // Parent byte sentinel: node is root (no parent)
 inline constexpr uint16_t ROOT_PARENT_BYTE = 256;
+// Parent byte for EOS children (end-of-string at a bitmask level)
+inline constexpr uint16_t EOS_PARENT_BYTE  = 257;
 
 enum class insert_mode : uint8_t { INSERT, UPSERT, ASSIGN };
 enum class insert_outcome : uint8_t { INSERTED, UPDATED, FOUND };
+enum class dir_t : int8_t { FWD = +1, BWD = -1 };
 
 struct insert_result {
     uint64_t*      node;

@@ -71,6 +71,7 @@ struct kstrie_bitmask {
     static void set_eos_child(uint64_t* node, const hdr_type& h,
                                uint64_t* eos_node) noexcept {
         slots::store_child(eos_child_ptr(node, h), 0, eos_node);
+        link_child_to_parent(node, eos_node, EOS_PARENT_BYTE);
     }
 
     static bool has_eos(const uint64_t* node, const hdr_type& h) noexcept {
@@ -127,12 +128,13 @@ struct kstrie_bitmask {
         return slots::load_child(node + CHILD_SLOTS_OFF, slot);
     }
 
-    // replace_child: bitmap lookup via count_below + store
+    // replace_child: bitmap lookup via count_below + store + link parent
     static void replace_child(uint64_t* node, const hdr_type& h,
                               uint8_t idx, uint64_t* new_child) noexcept {
         const bitmap_type* bm = get_bitmap(node, h);
         int slot = bm->count_below(idx);
         slots::store_child(child_slots(node), slot, new_child);
+        link_child_to_parent(node, new_child, static_cast<uint16_t>(idx));
     }
 
     // ------------------------------------------------------------------
@@ -234,6 +236,8 @@ struct kstrie_bitmask {
             // Restore eos + skip at new positions
             slots::store_child(eos_child_ptr(node, h), 0, old_eos);
             if (slen > 0) std::memcpy(get_bitmask_skip(node, h), skip_buf, slen);
+            // Link new child to this parent
+            link_child_to_parent(node, child, static_cast<uint16_t>(idx));
             return node;
         }
 
@@ -255,6 +259,8 @@ struct kstrie_bitmask {
         if (after > 0) slots::copy_children(new_cs, pos + 1, old_cs, pos, after);
         slots::store_child(eos_child_ptr(nn, nh), 0, old_eos);
         if (slen > 0) std::memcpy(get_bitmask_skip(nn, nh), skip_buf, slen);
+        // Children's parent pointers still reference old node — relink all
+        link_all_children(nn);
         mem.free_node(node);
         return nn;
     }
@@ -300,6 +306,7 @@ struct kstrie_bitmask {
         nh.copy_from(h);
         nh.set_skip_len(new_skip_len);
         nh.count = h.count;
+        nn[NODE_PARENT_PTR] = node[NODE_PARENT_PTR];
         nn[NODE_TOTAL_TAIL] = node[NODE_TOTAL_TAIL];
         slots::store_child(nn + SENTINEL_OFF, 0, compact_type::sentinel());
         std::memcpy(nn + CHILD_BITMAP_OFF, node + CHILD_BITMAP_OFF, BITMAP_BYTES);
@@ -307,8 +314,67 @@ struct kstrie_bitmask {
         slots::store_child(eos_child_ptr(nn, nh), 0, eos_child(node, h));
         if (nh.has_skip()) [[unlikely]]
             std::memcpy(get_bitmask_skip(nn, nh), new_skip_data, new_skip_len);
+        // Children's parent pointers still reference old node — relink
+        link_all_children(nn);
         mem.free_node(node);
         return nn;
+    }
+
+    // ------------------------------------------------------------------
+    // Parent pointer: node[NODE_PARENT_PTR] for bitmask nodes.
+    // parent_byte stored in header.slots_off (unused for bitmask).
+    // ------------------------------------------------------------------
+
+    static uint64_t* get_parent(const uint64_t* node) noexcept {
+        return reinterpret_cast<uint64_t*>(
+            static_cast<std::uintptr_t>(node[NODE_PARENT_PTR]));
+    }
+    static void set_parent(uint64_t* node, uint64_t* parent) noexcept {
+        node[NODE_PARENT_PTR] = static_cast<uint64_t>(
+            reinterpret_cast<std::uintptr_t>(parent));
+    }
+    static uint16_t get_parent_byte(const uint64_t* node) noexcept {
+        return hdr_type::from_node(node).slots_off;
+    }
+    static void set_parent_byte(uint64_t* node, uint16_t byte) noexcept {
+        hdr_type::from_node(node).slots_off = byte;
+    }
+
+    // ------------------------------------------------------------------
+    // Link helpers: set parent pointers on all children of a bitmask node.
+    // Called after create_with_children or after realloc moves a bitmask.
+    // ------------------------------------------------------------------
+
+    static void link_child_to_parent(uint64_t* parent, uint64_t* child,
+                                      uint16_t byte) noexcept {
+        if (!child || child == compact_type::sentinel()) return;
+        hdr_type ch = hdr_type::from_node(child);
+        if (ch.is_compact()) {
+            compact_type::set_parent(child, parent);
+            compact_type::set_parent_byte(child, ch, byte);
+        } else {
+            set_parent(child, parent);
+            set_parent_byte(child, byte);
+        }
+    }
+
+    // Link all byte children + EOS of a bitmask node.
+    static void link_all_children(uint64_t* node) noexcept {
+        hdr_type h = hdr_type::from_node(node);
+        const bitmap_type* bm = get_bitmap(node, h);
+        const uint64_t* cs = child_slots(node);
+        int bit = -1;
+        for (uint16_t i = 0; i < h.count; ++i) {
+            bit = bm->find_next_set(bit + 1);
+            uint64_t* child = slots::load_child(cs, i);
+            link_child_to_parent(node, child, static_cast<uint16_t>(bit));
+        }
+        // EOS child gets a special byte (ROOT_PARENT_BYTE repurposed? No — use 0xFFFF)
+        // EOS is identified by parent walk checking has_eos, not by byte value.
+        // Use ROOT_PARENT_BYTE+1 = 257 as EOS parent_byte sentinel.
+        uint64_t* eos = eos_child(node, h);
+        if (eos != compact_type::sentinel())
+            link_child_to_parent(node, eos, EOS_PARENT_BYTE);
     }
 
 };
