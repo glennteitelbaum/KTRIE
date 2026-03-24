@@ -269,7 +269,7 @@ static void bench_one(const Workload& w, std::vector<Row>& rows, bool verbose) {
     size_t kstrie_mem, map_mem, umap_mem;
     {
         using TrieT = gteitelbaum::kstrie<int32_t,
-                        gteitelbaum::identity_char_map,
+                        gteitelbaum::kstrie_traits::identity_char_map,
                         TrackingAlloc<uint64_t>>;
         g_alloc_total = 0;
         TrieT t;
@@ -316,20 +316,20 @@ static void bench_one(const Workload& w, std::vector<Row>& rows, bool verbose) {
             k_ins = std::min(k_ins, now_ms() - t0);
 
             { uint64_t s = 0; double ti = now_ms();
-              for (auto it = trie.begin(); it != trie.end(); ++it) s += it.value();
+              for (auto it = trie.begin(); it != trie.end(); ++it) s += (*it).second;
               k_iter = std::min(k_iter, now_ms() - ti); do_not_optimize(s); }
 
             uint64_t cs = 0;
             double t1 = now_ms();
             for (int r = 0; r < w.find_iters; ++r)
-                for (auto i : fnd_idx[r]) { auto* v = trie.find(w.find_fnd[i]); cs += v ? *v : 0; }
+                for (auto i : fnd_idx[r]) { auto it = trie.find(w.find_fnd[i]); cs += (it!=trie.end()) ? (*it).second : 0; }
             k_fnd = std::min(k_fnd, (now_ms() - t1) / w.find_iters);
             do_not_optimize(cs);
 
             cs = 0;
             double t1n = now_ms();
             for (int r = 0; r < w.find_iters; ++r)
-                for (auto i : nf_idx[r]) { auto* v = trie.find(w.find_nf[i]); cs += v ? *v : 0; }
+                for (auto i : nf_idx[r]) { auto it = trie.find(w.find_nf[i]); cs += (it!=trie.end()) ? (*it).second : 0; }
             k_nf = std::min(k_nf, (now_ms() - t1n) / w.find_iters);
             do_not_optimize(cs);
 
