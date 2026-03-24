@@ -137,12 +137,11 @@ public:
         const_iterator(impl_t* impl, uint64_t* leaf, uint16_t pos)
             : leaf_v(leaf), pos_v(pos), impl_p(impl) {}
 
-        // Free key buffer and reset
+        // Free key buffer. len/cap are stale but never read —
+        // ensure_key() overwrites all three when key_buf is set.
         void invalidate_key() const noexcept {
             delete[] key_buf;
             key_buf = nullptr;
-            key_len = 0;
-            key_cap = 0;
         }
 
         // Build key on demand by walking from leaf to root via prepend
