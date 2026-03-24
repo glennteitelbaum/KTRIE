@@ -1009,8 +1009,7 @@ struct kstrie_compact {
                 bkt, cld, 1);
             // Set EOS child
             hdr_type& ph = hdr_type::from_node(parent);
-            *bitmask_ops::eos_child_ptr(parent, ph) =
-                reinterpret_cast<uintptr_t>(eos_node);
+            bitmask_ops::set_eos_child(parent, ph, eos_node);
             // total_tail = children's tail + all entries * parent_skip
             hdr_type eh2 = hdr_type::from_node(existing);
             uint64_t n_entries = static_cast<uint64_t>(eh2.count) + 1;

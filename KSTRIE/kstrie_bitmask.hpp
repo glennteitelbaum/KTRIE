@@ -201,6 +201,8 @@ struct kstrie_bitmask {
         // Skip
         if (h.has_skip()) [[unlikely]]
             std::memcpy(get_bitmask_skip(node, h), skip_data, skip_len);
+        // Link children's parent pointers to this new node
+        link_all_children(node);
         return node;
     }
 
