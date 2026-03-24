@@ -149,6 +149,7 @@ struct Row {
 };
 
 constexpr int TRIALS = 3;
+constexpr size_t MAP_CAP = 50000;
 
 // ==========================================================================
 // bench_one
@@ -177,17 +178,18 @@ static void bench_one(const Workload& w, std::vector<Row>& rows, bool verbose) {
     }
 
     // ---- Memory measurement ----
-    size_t kstrie_mem, map_mem, umap_mem;
+    size_t kstrie_mem = 0, map_mem = 0, umap_mem = 0;
+    bool run_map = (n <= MAP_CAP);
     {
         using TrieT = gteitelbaum::kstrie<int32_t,
-                        gteitelbaum::identity_char_map,
+                        gteitelbaum::kstrie_traits::identity_char_map,
                         TrackingAlloc<uint64_t>>;
         g_alloc_total = 0;
         TrieT t;
         for (size_t i = 0; i < n; ++i) t.insert(w.keys[i], (int32_t)i);
         kstrie_mem = g_alloc_total;
     }
-    {
+    if (run_map) {
         using MapT = std::map<std::string, int32_t, std::less<std::string>,
                               TrackingAlloc<std::pair<const std::string, int32_t>>>;
         g_alloc_total = 0;
@@ -227,20 +229,20 @@ static void bench_one(const Workload& w, std::vector<Row>& rows, bool verbose) {
             k_ins = std::min(k_ins, now_ms() - t0);
 
             { uint64_t s = 0; double ti = now_ms();
-              for (auto it = trie.begin(); it != trie.end(); ++it) s += it.value();
+              for (auto it = trie.begin(); it != trie.end(); ++it) s += (*it).second;
               k_iter = std::min(k_iter, now_ms() - ti); do_not_optimize(s); }
 
             uint64_t cs = 0;
             double t1 = now_ms();
             for (int r = 0; r < w.find_iters; ++r)
-                for (auto i : fnd_idx[r]) { auto* v = trie.find(w.find_fnd[i]); cs += v ? *v : 0; }
+                for (auto i : fnd_idx[r]) { auto it = trie.find(w.find_fnd[i]); cs += (it!=trie.end()) ? (*it).second : 0; }
             k_fnd = std::min(k_fnd, (now_ms() - t1) / w.find_iters);
             do_not_optimize(cs);
 
             cs = 0;
             double t1n = now_ms();
             for (int r = 0; r < w.find_iters; ++r)
-                for (auto i : nf_idx[r]) { auto* v = trie.find(w.find_nf[i]); cs += v ? *v : 0; }
+                for (auto i : nf_idx[r]) { auto it = trie.find(w.find_nf[i]); cs += (it!=trie.end()) ? (*it).second : 0; }
             k_nf = std::min(k_nf, (now_ms() - t1n) / w.find_iters);
             do_not_optimize(cs);
 
@@ -255,7 +257,7 @@ static void bench_one(const Workload& w, std::vector<Row>& rows, bool verbose) {
         }
 
         // ---- map ----
-        {
+        if (run_map) {
             std::map<std::string, int32_t> m;
             double t0 = now_ms();
             for (auto i : insert_order) m.emplace(w.keys[i], (int32_t)i);
@@ -327,7 +329,8 @@ static void bench_one(const Workload& w, std::vector<Row>& rows, bool verbose) {
     }
 
     rows.push_back({w.pattern, n, "kstrie", k_fnd, k_nf, k_ins, k_ers, k_iter, kstrie_mem});
-    rows.push_back({w.pattern, n, "map",    m_fnd, m_nf, m_ins, m_ers, m_iter, map_mem});
+    if (run_map)
+        rows.push_back({w.pattern, n, "map",    m_fnd, m_nf, m_ins, m_ers, m_iter, map_mem});
     rows.push_back({w.pattern, n, "umap",   u_fnd, u_nf, u_ins, u_ers, u_iter, umap_mem});
 }
 
