@@ -152,7 +152,7 @@ public:
             if (pos_v + 1 < h.count) {
                 // Hot path: advance within leaf
                 ++pos_v;
-                rebuild_suffix();
+                rebuild_suffix(h);
                 return *this;
             }
             // Cold path: walk to next leaf
@@ -175,7 +175,7 @@ public:
             if (pos_v > 0) {
                 // Hot path: retreat within leaf
                 --pos_v;
-                rebuild_suffix();
+                rebuild_suffix(hdr_type::from_node(leaf_v));
                 return *this;
             }
             // Cold path: walk to prev leaf
@@ -200,17 +200,24 @@ public:
 
     private:
         // Rebuild suffix portion of key_v from current leaf_v/pos_v.
-        void rebuild_suffix() {
-            hdr_type h = hdr_type::from_node(leaf_v);
-            const uint8_t* L = compact_type::lengths(leaf_v, h);
-            const uint8_t* F = compact_type::firsts(leaf_v, h);
-            const kstrie_detail::ks_offset_type* O = compact_type::offsets(leaf_v, h);
-            const uint8_t* B = compact_type::keysuffix(leaf_v, h);
+        // Header h is passed from caller to avoid redundant from_node.
+        void rebuild_suffix(const hdr_type& h) {
+            const auto& pfx = compact_type::get_prefix(leaf_v, h);
+            const uint8_t* base = reinterpret_cast<const uint8_t*>(leaf_v)
+                                + hdr_type::COMPACT_ARRAYS_OFF;
+            const uint8_t* L = base;
+            const uint8_t* F = base + pfx.cap;
+            const kstrie_detail::ks_offset_type* O =
+                reinterpret_cast<const kstrie_detail::ks_offset_type*>(F + pfx.cap);
+            const uint8_t* B = reinterpret_cast<const uint8_t*>(leaf_v)
+                             + pfx.skip_data_off + h.skip_bytes();
 
-            key_v.resize(prefix_len_v);
             uint8_t klen = L[pos_v];
+            key_v.resize(prefix_len_v);
+            key_v.reserve(prefix_len_v + klen);
             if (klen > 0) [[likely]] {
-                key_v.push_back(static_cast<char>(CHARMAP::from_index(F[pos_v])));
+                key_v.push_back(static_cast<char>(
+                    CHARMAP::from_index(F[pos_v])));
                 if (klen > 1) [[likely]]
                     append_unmapped(key_v, B + O[pos_v], klen - 1);
             }
@@ -245,7 +252,7 @@ public:
                     else
                         pos_v = static_cast<uint16_t>(h.count - 1);
                     prefix_len_v = key_v.size();
-                    rebuild_suffix();
+                    rebuild_suffix(h);
                     return;
                 }
 
@@ -641,7 +648,7 @@ public:
                 first.leaf_v = const_cast<uint64_t*>(node);
                 first.pos_v = static_cast<uint16_t>(pos);
                 first.prefix_len_v = first.key_v.size();
-                first.rebuild_suffix();
+                first.rebuild_suffix(h);
             } else {
                 // Whole subtree
                 first.edge_entry(const_cast<uint64_t*>(node),
@@ -660,7 +667,7 @@ public:
                     last.leaf_v = const_cast<uint64_t*>(node);
                     last.pos_v = static_cast<uint16_t>(past);
                     last.prefix_len_v = last.key_v.size();
-                    last.rebuild_suffix();
+                    last.rebuild_suffix(h);
                 }
                 // else: last stays at end()
             } else if (have_rt) {
@@ -852,7 +859,7 @@ private:
             it.leaf_v = const_cast<uint64_t*>(node);
             it.pos_v  = static_cast<uint16_t>(pos);
             it.prefix_len_v = it.key_v.size();
-            it.rebuild_suffix();
+            it.rebuild_suffix(h);
             return true;
         }
 
@@ -892,7 +899,7 @@ private:
             it.leaf_v = const_cast<uint64_t*>(node);
             it.pos_v  = 0;
             it.prefix_len_v = it.key_v.size();
-            it.rebuild_suffix();
+            it.rebuild_suffix(h);
             return true;
         }
         // Bitmask take_min: eos first, then first byte child

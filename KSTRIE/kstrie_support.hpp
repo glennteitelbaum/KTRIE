@@ -88,12 +88,23 @@ struct bitmap_n {
         if constexpr (WORDS == 1) {
             uint64_t mask = (uint64_t(1) << idx) - 1;
             return std::popcount(words[0] & mask);
+        } else if constexpr (WORDS == 2) {
+            int w = idx >> 6;
+            uint64_t mask = (uint64_t(1) << (idx & 63)) - 1;
+            int pc0 = std::popcount(words[0]);
+            int cnt = std::popcount(words[w] & mask);
+            cnt += pc0 & -int(w > 0);
+            return cnt;
         } else {
             int w = idx >> 6;
             uint64_t mask = (uint64_t(1) << (idx & 63)) - 1;
-            int cnt = 0;
-            for (int i = 0; i < w; ++i) cnt += std::popcount(words[i]);
-            cnt += std::popcount(words[w] & mask);
+            int pc0 = std::popcount(words[0]);
+            int pc1 = std::popcount(words[1]);
+            int pc2 = std::popcount(words[2]);
+            int cnt = std::popcount(words[w] & mask);
+            cnt += pc0 & -int(w > 0);
+            cnt += pc1 & -int(w > 1);
+            cnt += pc2 & -int(w > 2);
             return cnt;
         }
     }

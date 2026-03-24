@@ -1000,8 +1000,14 @@ public:
 
     static void append_unmapped(std::string& out,
                                 const uint8_t* data, uint32_t len) {
-        for (uint32_t i = 0; i < len; ++i)
-            out.push_back(static_cast<char>(CHARMAP::from_index(data[i])));
+        if (len == 0) [[unlikely]] return;
+        if constexpr (CHARMAP::IS_IDENTITY) {
+            out.append(reinterpret_cast<const char*>(data), len);
+        } else {
+            out.reserve(out.size() + len);
+            for (uint32_t i = 0; i < len; ++i)
+                out.push_back(static_cast<char>(CHARMAP::from_index(data[i])));
+        }
     }
 
     uint64_t* reskip_with_prefix(uint64_t* node,
