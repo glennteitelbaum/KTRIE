@@ -998,13 +998,13 @@ public:
         return true;
     }
 
-    static void append_unmapped(std::string& out,
+    template<typename StringOut>
+    static void append_unmapped(StringOut& out,
                                 const uint8_t* data, uint32_t len) {
         if (len == 0) [[unlikely]] return;
         if constexpr (CHARMAP::IS_IDENTITY) {
             out.append(reinterpret_cast<const char*>(data), len);
         } else {
-            out.reserve(out.size() + len);
             for (uint32_t i = 0; i < len; ++i)
                 out.push_back(static_cast<char>(CHARMAP::from_index(data[i])));
         }

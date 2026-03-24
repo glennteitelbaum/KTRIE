@@ -75,12 +75,25 @@ public:
 
     kstrie() = default;
     ~kstrie() = default;
-    kstrie(kstrie&&) noexcept = default;
-    kstrie& operator=(kstrie&&) noexcept = default;
-    kstrie(const kstrie&) = default;
-    kstrie& operator=(const kstrie&) = default;
 
-    void swap(kstrie& o) noexcept { impl_v.swap(o.impl_v); }
+    kstrie(kstrie&& o) noexcept : impl_v(std::move(o.impl_v)) { fix_end(); }
+    kstrie& operator=(kstrie&& o) noexcept {
+        impl_v = std::move(o.impl_v);
+        fix_end();
+        return *this;
+    }
+    kstrie(const kstrie& o) : impl_v(o.impl_v) { fix_end(); }
+    kstrie& operator=(const kstrie& o) {
+        impl_v = o.impl_v;
+        fix_end();
+        return *this;
+    }
+
+    void swap(kstrie& o) noexcept {
+        impl_v.swap(o.impl_v);
+        fix_end();
+        o.fix_end();
+    }
     friend void swap(kstrie& a, kstrie& b) noexcept { a.swap(b); }
 
     // ------------------------------------------------------------------
@@ -103,63 +116,189 @@ public:
     // ------------------------------------------------------------------
     // const_iterator — live, bidirectional, parent-walk navigation.
     // Invalidated by any mutation (same as std::unordered_map).
-    // operator* returns: key as string_view into iterator buffer,
-    // value by const ref into the trie node.
-    // Move-only (fast_string is non-copyable).
+    // Key reconstruction is lazy — only built on dereference via
+    // lazy_key proxy. Value-only iteration has zero key overhead.
     // ------------------------------------------------------------------
 
     class const_iterator {
         friend class kstrie;
 
-        uint64_t*   leaf_v       = nullptr;  // compact node (null = end)
-        uint16_t    pos_v        = 0;        // slot index in L/F/O/values
-        kstrie_detail::fast_string key_v;    // cached reconstructed key
-        size_t      prefix_len_v = 0;        // key_v length before entry suffix
-        impl_t*     impl_p       = nullptr;  // for --end() and root access
+        uint64_t*  leaf_v   = nullptr;  // compact node (null = end)
+        uint16_t   pos_v    = 0;        // slot index
+        mutable char*   key_buf  = nullptr;  // owned buffer
+        mutable size_t  key_len  = 0;
+        mutable size_t  key_cap  = 0;
+        impl_t*    impl_p  = nullptr;   // for --end() and root access
 
         // End sentinel
         explicit const_iterator(impl_t* impl) : impl_p(impl) {}
 
-        // Positioned: copies key into fast_string
-        const_iterator(impl_t* impl, uint64_t* leaf, uint16_t pos,
-                       std::string_view key, size_t pfx_len)
-            : leaf_v(leaf), pos_v(pos), prefix_len_v(pfx_len), impl_p(impl) {
-            key_v.append(key.data(), key.size());
+        // Positioned (lazy — no key built)
+        const_iterator(impl_t* impl, uint64_t* leaf, uint16_t pos)
+            : leaf_v(leaf), pos_v(pos), impl_p(impl) {}
+
+        // Free key buffer and reset
+        void invalidate_key() const noexcept {
+            delete[] key_buf;
+            key_buf = nullptr;
+            key_len = 0;
+            key_cap = 0;
+        }
+
+        // Build key on demand by walking from leaf to root via prepend
+        void ensure_key() const {
+            if (key_buf) return;  // already built
+
+            kstrie_detail::fast_string fs;
+
+            // Step 1: leaf suffix + leaf skip
+            hdr_type lh = hdr_type::from_node(leaf_v);
+            const auto& pfx = compact_type::get_prefix(leaf_v, lh);
+            const uint8_t* base = reinterpret_cast<const uint8_t*>(leaf_v)
+                                + hdr_type::COMPACT_ARRAYS_OFF;
+            const uint8_t* L = base;
+            const uint8_t* F = base + pfx.cap;
+            const kstrie_detail::ks_offset_type* O =
+                reinterpret_cast<const kstrie_detail::ks_offset_type*>(F + pfx.cap);
+            const uint8_t* B = reinterpret_cast<const uint8_t*>(leaf_v)
+                             + pfx.skip_data_off + lh.skip_bytes();
+
+            const uint8_t* skip = hdr_type::get_skip(leaf_v, lh);
+            size_t skip_len = lh.skip_bytes();
+            uint8_t klen = L[pos_v];
+
+            if (klen == 0) [[unlikely]]
+                fs.prepend(skip, skip_len);
+            else if (klen == 1)
+                fs.prepend(skip, skip_len,
+                           CHARMAP::from_index(F[pos_v]));
+            else
+                fs.prepend(skip, skip_len,
+                           CHARMAP::from_index(F[pos_v]),
+                           B + O[pos_v], klen - 1);
+
+            // Step 2: walk up from leaf to root
+            // Leaf is always compact. Parents are always bitmask.
+            uint64_t* node = compact_type::get_parent(leaf_v);
+            uint16_t nb = compact_type::get_parent_byte(leaf_v, lh);
+
+            while (node) {
+                hdr_type h = hdr_type::from_node(node);
+                const uint8_t* nsk = hdr_type::get_skip(node, h);
+                size_t nsk_len = h.skip_bytes();
+
+                if (nb == kstrie_detail::EOS_PARENT_BYTE) [[unlikely]]
+                    fs.prepend(nsk, nsk_len);
+                else
+                    fs.prepend(nsk, nsk_len,
+                               CHARMAP::from_index(static_cast<uint8_t>(nb)));
+
+                nb = bitmask_type::get_parent_byte(node);
+                node = bitmask_type::get_parent(node);
+            }
+
+            // Transfer buffer ownership from fast_string to iterator
+            key_buf = fs.buf_pv;
+            key_len = fs.len_v;
+            key_cap = fs.cap_v;
+            fs.buf_pv = nullptr;  // prevent fast_string from interfering
         }
 
     public:
+        // -----------------------------------------------------------
+        // lazy_key proxy — defers key construction until use
+        // -----------------------------------------------------------
+
+        struct lazy_key {
+            const const_iterator* it_p;
+
+            operator std::string() const {
+                it_p->ensure_key();
+                return std::string(it_p->key_buf, it_p->key_len);
+            }
+
+            friend bool operator==(const lazy_key& a, std::string_view b) {
+                a.it_p->ensure_key();
+                return std::string_view(a.it_p->key_buf, a.it_p->key_len) == b;
+            }
+            friend bool operator<(const lazy_key& a, std::string_view b) {
+                a.it_p->ensure_key();
+                return std::string_view(a.it_p->key_buf, a.it_p->key_len) < b;
+            }
+            friend bool operator<(std::string_view a, const lazy_key& b) {
+                b.it_p->ensure_key();
+                return a < std::string_view(b.it_p->key_buf, b.it_p->key_len);
+            }
+            friend bool operator>(const lazy_key& a, std::string_view b) { return b < a; }
+            friend bool operator>(std::string_view a, const lazy_key& b) { return b < a; }
+            friend bool operator<=(const lazy_key& a, std::string_view b) { return !(b < a); }
+            friend bool operator>=(const lazy_key& a, std::string_view b) { return !(a < b); }
+            friend bool operator<=(std::string_view a, const lazy_key& b) { return !(b < a); }
+            friend bool operator>=(std::string_view a, const lazy_key& b) { return !(a < b); }
+            friend bool operator!=(const lazy_key& a, std::string_view b) { return !(a == b); }
+        };
+
         using iterator_category = std::bidirectional_iterator_tag;
-        using value_type        = std::pair<std::string_view, VALUE>;
+        using value_type        = std::pair<std::string, VALUE>;
         using difference_type   = std::ptrdiff_t;
-        using reference         = std::pair<std::string_view, const VALUE&>;
+        using reference         = std::pair<lazy_key, const VALUE&>;
 
         struct arrow_proxy {
-            std::pair<std::string_view, const VALUE&> p;
+            std::pair<lazy_key, const VALUE&> p;
             const auto* operator->() const noexcept { return &p; }
         };
         using pointer = arrow_proxy;
 
         const_iterator() = default;
 
-        // Move only — copy deleted
-        const_iterator(const_iterator&&) = default;
-        const_iterator& operator=(const_iterator&&) = default;
+        ~const_iterator() { delete[] key_buf; }
+
+        // Move only — steals buffer pointer
+        const_iterator(const_iterator&& o) noexcept
+            : leaf_v(o.leaf_v), pos_v(o.pos_v),
+              key_buf(o.key_buf), key_len(o.key_len), key_cap(o.key_cap),
+              impl_p(o.impl_p) {
+            o.key_buf = nullptr;
+            o.leaf_v = nullptr;
+        }
+
+        const_iterator& operator=(const_iterator&& o) noexcept {
+            if (this != &o) {
+                delete[] key_buf;
+                leaf_v  = o.leaf_v;
+                pos_v   = o.pos_v;
+                key_buf = o.key_buf;
+                key_len = o.key_len;
+                key_cap = o.key_cap;
+                impl_p  = o.impl_p;
+                o.key_buf = nullptr;
+                o.leaf_v = nullptr;
+            }
+            return *this;
+        }
+
         const_iterator(const const_iterator&) = delete;
         const_iterator& operator=(const const_iterator&) = delete;
 
         reference operator*() const {
             hdr_type h = hdr_type::from_node(leaf_v);
             const auto* vb = h.get_compact_slots(leaf_v);
-            return {std::string_view(key_v), *slots_type::load_value(vb, pos_v)};
+            return {lazy_key{this}, *slots_type::load_value(vb, pos_v)};
         }
 
         arrow_proxy operator->() const { return {**this}; }
 
+        // Direct value access — no key build, no allocation
+        const VALUE& value() const {
+            hdr_type h = hdr_type::from_node(leaf_v);
+            return *slots_type::load_value(h.get_compact_slots(leaf_v), pos_v);
+        }
+
         const_iterator& operator++() {
+            invalidate_key();
             hdr_type h = hdr_type::from_node(leaf_v);
             if (pos_v + 1 < h.count) {
                 ++pos_v;
-                rebuild_suffix(h);
                 return *this;
             }
             walk(kstrie_detail::dir_t::FWD);
@@ -167,13 +306,13 @@ public:
         }
 
         const_iterator& operator--() {
+            invalidate_key();
             if (!leaf_v) {
                 walk_to_edge(kstrie_detail::dir_t::BWD);
                 return *this;
             }
             if (pos_v > 0) {
                 --pos_v;
-                rebuild_suffix(hdr_type::from_node(leaf_v));
                 return *this;
             }
             walk(kstrie_detail::dir_t::BWD);
@@ -190,53 +329,17 @@ public:
         }
 
     private:
-        // Append unmapped bytes to key_v: identity → memcpy, else per-byte
-        void append_key_unmapped(const uint8_t* data, uint32_t len) {
-            if constexpr (CHARMAP::IS_IDENTITY) {
-                key_v.append(data, len);
-            } else {
-                for (uint32_t i = 0; i < len; ++i)
-                    key_v.push_back(static_cast<char>(
-                        CHARMAP::from_index(data[i])));
-            }
-        }
-
-        void rebuild_suffix(const hdr_type& h) {
-            const auto& pfx = compact_type::get_prefix(leaf_v, h);
-            const uint8_t* base = reinterpret_cast<const uint8_t*>(leaf_v)
-                                + hdr_type::COMPACT_ARRAYS_OFF;
-            const uint8_t* L = base;
-            const uint8_t* F = base + pfx.cap;
-            const kstrie_detail::ks_offset_type* O =
-                reinterpret_cast<const kstrie_detail::ks_offset_type*>(F + pfx.cap);
-            const uint8_t* B = reinterpret_cast<const uint8_t*>(leaf_v)
-                             + pfx.skip_data_off + h.skip_bytes();
-
-            uint8_t klen = L[pos_v];
-            key_v.truncate(prefix_len_v);
-            if (klen > 0) [[likely]] {
-                key_v.push_back(static_cast<char>(
-                    CHARMAP::from_index(F[pos_v])));
-                if (klen > 1) [[likely]]
-                    append_key_unmapped(B + O[pos_v], klen - 1);
-            }
-        }
-
         void walk_to_edge(kstrie_detail::dir_t dir) {
             uint64_t* root = impl_p->get_root_mut();
             if (root == compact_type::sentinel()) return;
-            key_v.clear();
             edge_entry(root, dir);
         }
 
+        // Pure descent — no key ops
         void edge_entry(uint64_t* node, kstrie_detail::dir_t dir) {
             using dir_t = kstrie_detail::dir_t;
             while (true) {
                 hdr_type h = hdr_type::from_node(node);
-
-                if (h.has_skip()) [[unlikely]]
-                    append_key_unmapped(hdr_type::get_skip(node, h),
-                                       h.skip_bytes());
 
                 if (h.is_compact()) {
                     leaf_v = node;
@@ -244,8 +347,6 @@ public:
                         pos_v = 0;
                     else
                         pos_v = static_cast<uint16_t>(h.count - 1);
-                    prefix_len_v = key_v.size();
-                    rebuild_suffix(h);
                     return;
                 }
 
@@ -258,10 +359,7 @@ public:
                     const auto* bm = bitmask_type::get_bitmap(node, h);
                     int idx = bm->find_next_set(0);
                     if (idx < 0) [[unlikely]] return;
-                    uint8_t byte = static_cast<uint8_t>(idx);
-                    key_v.push_back(static_cast<char>(
-                        CHARMAP::from_index(byte)));
-                    int slot = bm->count_below(byte);
+                    int slot = bm->count_below(static_cast<uint8_t>(idx));
                     node = bitmask_type::child_by_slot(node, h, slot);
                 } else {
                     const auto* bm = bitmask_type::get_bitmap(node, h);
@@ -269,10 +367,7 @@ public:
                         static_cast<int>(CHARMAP::BITMAP_WORDS) * 64 - 1;
                     int idx = bm->find_prev_set(MAX_BIT);
                     if (idx >= 0) {
-                        uint8_t byte = static_cast<uint8_t>(idx);
-                        key_v.push_back(static_cast<char>(
-                            CHARMAP::from_index(byte)));
-                        int slot = bm->count_below(byte);
+                        int slot = bm->count_below(static_cast<uint8_t>(idx));
                         node = bitmask_type::child_by_slot(node, h, slot);
                         continue;
                     }
@@ -286,6 +381,7 @@ public:
             }
         }
 
+        // Pure navigation — no key ops
         void walk(kstrie_detail::dir_t dir) {
             using dir_t = kstrie_detail::dir_t;
             using namespace kstrie_detail;
@@ -294,27 +390,18 @@ public:
             uint64_t* parent = compact_type::get_parent(leaf_v);
             uint16_t byte = compact_type::get_parent_byte(leaf_v, lh);
 
-            size_t depth = prefix_len_v - lh.skip_bytes();
-
             while (byte != ROOT_PARENT_BYTE) {
                 hdr_type ph = hdr_type::from_node(parent);
                 const auto* bm = bitmask_type::get_bitmap(parent, ph);
 
                 if (dir == dir_t::FWD) {
                     int sib = -1;
-                    if (byte == EOS_PARENT_BYTE) {
+                    if (byte == EOS_PARENT_BYTE)
                         sib = bm->find_next_set(0);
-                    } else {
+                    else
                         sib = bm->find_next_set(byte + 1);
-                    }
                     if (sib >= 0) {
-                        if (byte != EOS_PARENT_BYTE)
-                            depth -= 1;
-                        key_v.truncate(depth);
-                        uint8_t sb = static_cast<uint8_t>(sib);
-                        key_v.push_back(static_cast<char>(
-                            CHARMAP::from_index(sb)));
-                        int slot = bm->count_below(sb);
+                        int slot = bm->count_below(static_cast<uint8_t>(sib));
                         edge_entry(bitmask_type::child_by_slot(
                             parent, ph, slot), dir_t::FWD);
                         return;
@@ -323,29 +410,19 @@ public:
                     if (byte != EOS_PARENT_BYTE) {
                         int sib = bm->find_prev_set(byte - 1);
                         if (sib >= 0) {
-                            depth -= 1;
-                            key_v.truncate(depth);
-                            uint8_t sb = static_cast<uint8_t>(sib);
-                            key_v.push_back(static_cast<char>(
-                                CHARMAP::from_index(sb)));
-                            int slot = bm->count_below(sb);
+                            int slot = bm->count_below(static_cast<uint8_t>(sib));
                             edge_entry(bitmask_type::child_by_slot(
                                 parent, ph, slot), dir_t::BWD);
                             return;
                         }
                         uint64_t* eos = bitmask_type::eos_child(parent, ph);
                         if (eos != compact_type::sentinel()) {
-                            depth -= 1;
-                            key_v.truncate(depth);
                             edge_entry(eos, dir_t::BWD);
                             return;
                         }
                     }
                 }
 
-                if (byte != EOS_PARENT_BYTE)
-                    depth -= 1;
-                depth -= ph.skip_bytes();
                 byte = bitmask_type::get_parent_byte(parent);
                 parent = bitmask_type::get_parent(parent);
             }
@@ -359,6 +436,13 @@ public:
     using reverse_iterator       = std::reverse_iterator<const_iterator>;
     using const_reverse_iterator = std::reverse_iterator<const_iterator>;
 
+private:
+    mutable const_iterator end_v{const_cast<impl_t*>(&impl_v)};
+
+    void fix_end() noexcept { end_v.impl_p = const_cast<impl_t*>(&impl_v); }
+
+public:
+
     // ------------------------------------------------------------------
     // Iterator access
     // ------------------------------------------------------------------
@@ -371,12 +455,10 @@ public:
         return it;
     }
 
-    const_iterator end() const {
-        return const_iterator(const_cast<impl_t*>(&impl_v));
-    }
+    const const_iterator& end() const noexcept { return end_v; }
 
     const_iterator cbegin() const { return begin(); }
-    const_iterator cend() const { return end(); }
+    const const_iterator& cend() const noexcept { return end_v; }
 
     reverse_iterator rbegin() const { return reverse_iterator(end()); }
     reverse_iterator rend() const { return reverse_iterator(begin()); }
@@ -390,7 +472,7 @@ public:
         auto r = impl_v.insert_for_iter(key, value,
                      kstrie_detail::insert_mode::INSERT);
         bool inserted = (r.outcome == kstrie_detail::insert_outcome::INSERTED);
-        return {make_iter_from_result(r, key), inserted};
+        return {make_iter_from_result(r), inserted};
     }
 
     std::pair<const_iterator, bool> insert_or_assign(std::string_view key,
@@ -398,7 +480,7 @@ public:
         auto r = impl_v.insert_for_iter(key, value,
                      kstrie_detail::insert_mode::UPSERT);
         bool inserted = (r.outcome == kstrie_detail::insert_outcome::INSERTED);
-        return {make_iter_from_result(r, key), inserted};
+        return {make_iter_from_result(r), inserted};
     }
 
     template <typename... Args>
@@ -410,55 +492,45 @@ public:
     template <typename... Args>
     std::pair<const_iterator, bool> try_emplace(std::string_view key,
                                                  Args&&... args) {
-        // Check existence first to avoid constructing value unnecessarily
         auto r = impl_v.find_for_iter(key);
-        if (r.leaf) {
-            size_t pfx = key.size() - compact_type::lengths(r.leaf,
-                hdr_type::from_node(r.leaf))[r.pos];
+        if (r.leaf)
             return {const_iterator(const_cast<impl_t*>(&impl_v),
-                                   r.leaf, r.pos, std::string(key), pfx),
-                    false};
-        }
+                                   r.leaf, r.pos), false};
         VALUE v(std::forward<Args>(args)...);
         return insert(key, v);
     }
 
     size_type erase(std::string_view key) { return impl_v.erase(key); }
 
-    const_iterator erase(const_iterator pos) {
+    const_iterator erase(const const_iterator& pos) {
         if (pos == end()) return end();
-        // Save the next key before erasing — erase invalidates all iterators.
-        const_iterator next = pos;
-        ++next;
-        bool had_next = (next != end());
-        std::string next_key;
-        if (had_next) next_key = next.key_v;
-        impl_v.erase(pos.key_v);
-        if (!had_next) return end();
-        // Re-find the next key (leaf pointers may have changed)
-        auto r = impl_v.find_for_iter(next_key);
-        if (!r.leaf) return end();
-        return make_iter_from_result(
-            kstrie_detail::insert_result{nullptr,
-                kstrie_detail::insert_outcome::FOUND, r.leaf, r.pos},
-            next_key);
+        // Build key from iterator position, erase, find next
+        std::string key = (*pos).first;
+        impl_v.erase(key);
+        return lower_bound(key);
     }
 
-    const_iterator erase(const_iterator first, const_iterator last) {
-        // Collect keys, then erase — iterators invalidate on mutation
+    const_iterator erase(const const_iterator& first, const const_iterator& last) {
+        if (first == last) {
+            if (last == end()) return end();
+            std::string lk = (*last).first;
+            return lower_bound(lk);
+        }
+        std::string first_key = (*first).first;
+        std::string last_key;
+        bool have_last = (last != end());
+        if (have_last) last_key = (*last).first;
+
         std::vector<std::string> keys;
-        for (auto it = first; it != last; ++it)
-            keys.push_back((*it).first);
+        for (auto it = lower_bound(first_key); it != end(); ++it) {
+            std::string k = (*it).first;
+            if (have_last && k >= last_key) break;
+            keys.push_back(std::move(k));
+        }
         for (auto& k : keys)
             impl_v.erase(k);
-        if (last == end()) return end();
-        // Re-find last's key (it may have shifted)
-        auto r = impl_v.find_for_iter(last.key_v);
-        if (!r.leaf) return end();
-        size_t pfx = last.key_v.size() - compact_type::lengths(r.leaf,
-            hdr_type::from_node(r.leaf))[r.pos];
-        return const_iterator(const_cast<impl_t*>(&impl_v),
-                              r.leaf, r.pos, last.key_v, pfx);
+        if (!have_last) return end();
+        return lower_bound(last_key);
     }
 
     void clear() noexcept { impl_v.clear(); }
@@ -498,8 +570,7 @@ public:
     const_iterator find(std::string_view key) const {
         auto r = impl_v.find_for_iter(key);
         if (!r.leaf) return end();
-        return const_iterator(const_cast<impl_t*>(&impl_v),
-                              r.leaf, r.pos, std::string(key), r.prefix_len);
+        return const_iterator(const_cast<impl_t*>(&impl_v), r.leaf, r.pos);
     }
 
     // ------------------------------------------------------------------
@@ -523,7 +594,8 @@ public:
     const_iterator upper_bound(std::string_view key) const {
         auto it = lower_bound(key);
         if (it == end()) return it;
-        if (it.key_v == key) ++it;
+        // Build key lazily for comparison
+        if ((*it).first == key) ++it;
         return it;
     }
 
@@ -546,10 +618,8 @@ public:
             const uint64_t* bm_node;
             hdr_type        h;
             int             next_idx;
-            std::string     prefix;
         };
 
-        std::string path;
         right_turn best_rt{};
         bool have_rt = false;
 
@@ -569,14 +639,9 @@ public:
                 for (uint32_t i = 0; i < cmp_len; ++i) {
                     if (skip[i] != mapped[consumed + i])
                         return {end(), end()};
-                    path.push_back(static_cast<char>(
-                        CHARMAP::from_index(skip[i])));
                 }
 
                 if (remaining <= sb) {
-                    for (uint32_t j = cmp_len; j < sb; ++j)
-                        path.push_back(static_cast<char>(
-                            CHARMAP::from_index(skip[j])));
                     consumed += sb;
                     goto subtree_found;
                 }
@@ -596,7 +661,6 @@ public:
                     best_rt.bm_node  = node;
                     best_rt.h        = h;
                     best_rt.next_idx = next_sib;
-                    best_rt.prefix   = path;
                     have_rt = true;
                 }
 
@@ -604,8 +668,6 @@ public:
                 if (child == impl_v.get_sentinel()) [[unlikely]]
                     return {end(), end()};
 
-                path.push_back(static_cast<char>(
-                    CHARMAP::from_index(byte)));
                 node = child;
             }
         }
@@ -614,21 +676,16 @@ public:
         {
             hdr_type h = hdr_type::from_node(node);
 
-            // --- Build first iterator ---
+            // --- Build first iterator (lazy — just set leaf/pos) ---
             const_iterator first(const_cast<impl_t*>(&impl_v));
-            first.key_v = path;
 
             if (h.is_compact() && consumed < len) [[unlikely]] {
-                // Partial prefix match within compact node
                 int pos = find_prefix_first_pos(
                     node, h, mapped + consumed, len - consumed);
                 if (pos < 0) return {end(), end()};
                 first.leaf_v = const_cast<uint64_t*>(node);
                 first.pos_v = static_cast<uint16_t>(pos);
-                first.prefix_len_v = first.key_v.size();
-                first.rebuild_suffix(h);
             } else {
-                // Whole subtree
                 first.edge_entry(const_cast<uint64_t*>(node),
                                  kstrie_detail::dir_t::FWD);
                 if (!first.leaf_v) return {end(), end()};
@@ -641,28 +698,20 @@ public:
                 int past = find_prefix_past_pos(
                     node, h, mapped + consumed, len - consumed);
                 if (past >= 0) {
-                    last.key_v = path;
                     last.leaf_v = const_cast<uint64_t*>(node);
                     last.pos_v = static_cast<uint16_t>(past);
-                    last.prefix_len_v = last.key_v.size();
-                    last.rebuild_suffix(h);
                 }
-                // else: last stays at end()
             } else if (have_rt) {
-                uint8_t rt_byte = static_cast<uint8_t>(best_rt.next_idx);
-                last.key_v = best_rt.prefix;
-                last.key_v.push_back(static_cast<char>(
-                    CHARMAP::from_index(rt_byte)));
                 const auto* bm = bitmask_type::get_bitmap(
                     best_rt.bm_node, best_rt.h);
-                int slot = bm->count_below(rt_byte);
+                int slot = bm->count_below(
+                    static_cast<uint8_t>(best_rt.next_idx));
                 last.edge_entry(bitmask_type::child_by_slot(
                     best_rt.bm_node, best_rt.h, slot),
                     kstrie_detail::dir_t::FWD);
             }
-            // else: last stays at end() (entire trie is prefix subtree)
 
-            return {first, last};
+            return {std::move(first), std::move(last)};
         }
     }
 
@@ -769,28 +818,25 @@ public:
 private:
 
 
-    // Construct iterator from insert_result + original key.
+    // Construct iterator from insert_result (lazy — no key built).
     const_iterator make_iter_from_result(
-            const kstrie_detail::insert_result& r,
-            std::string_view key) const {
+            const kstrie_detail::insert_result& r) const {
         if (!r.leaf) return end();
-        hdr_type lh = hdr_type::from_node(r.leaf);
-        size_t pfx = key.size() - compact_type::lengths(r.leaf, lh)[r.pos];
-        return const_iterator(const_cast<impl_t*>(&impl_v),
-                              r.leaf, r.pos, std::string(key), pfx);
+        return const_iterator(const_cast<impl_t*>(&impl_v), r.leaf, r.pos);
     }
 
     // ------------------------------------------------------------------
     // Unmap helper
     // ------------------------------------------------------------------
 
-    static void append_unmapped(std::string& out, const uint8_t* data,
+    template<typename StringOut>
+    static void append_unmapped(StringOut& out, const uint8_t* data,
                                 uint32_t len) {
         impl_t::append_unmapped(out, data, len);
     }
 
     // ------------------------------------------------------------------
-    // find_ge_iter — single-walk lower_bound constructing iterator directly
+    // find_ge_iter — single-walk lower_bound, sets leaf_v/pos_v only.
     // Returns true if positioned, false if no entry >= key.
     // ------------------------------------------------------------------
 
@@ -811,18 +857,12 @@ private:
                 if (skip[i] < mapped[consumed + i])
                     return false;
                 if (skip[i] > mapped[consumed + i]) {
-                    append_unmapped(it.key_v, skip, sb);
                     consumed += sb;
                     goto take_min;
                 }
-                it.key_v.push_back(static_cast<char>(
-                    CHARMAP::from_index(skip[i])));
             }
 
             if (remaining < sb) [[unlikely]] {
-                for (uint32_t j = cmp_len; j < sb; ++j)
-                    it.key_v.push_back(static_cast<char>(
-                        CHARMAP::from_index(skip[j])));
                 consumed += sb;
                 goto take_min;
             }
@@ -836,8 +876,6 @@ private:
             if (pos >= h.count) [[unlikely]] return false;
             it.leaf_v = const_cast<uint64_t*>(node);
             it.pos_v  = static_cast<uint16_t>(pos);
-            it.prefix_len_v = it.key_v.size();
-            it.rebuild_suffix(h);
             return true;
         }
 
@@ -849,23 +887,15 @@ private:
             uint64_t* child = bitmask_type::dispatch(node, h, byte);
 
             if (child != impl_v.get_sentinel()) {
-                size_t save_len = it.key_v.size();
-                it.key_v.push_back(static_cast<char>(
-                    CHARMAP::from_index(byte)));
-
                 if (find_ge_iter(child, mapped, key_len, consumed, it))
                     [[likely]] return true;
-                it.key_v.resize(save_len);
             }
 
             const auto* bm = bitmask_type::get_bitmap(node, h);
             int next_idx = bm->find_next_set(byte + 1);
             if (next_idx < 0) [[unlikely]] return false;
 
-            uint8_t next_byte = static_cast<uint8_t>(next_idx);
-            it.key_v.push_back(static_cast<char>(
-                CHARMAP::from_index(next_byte)));
-            int slot = bm->count_below(next_byte);
+            int slot = bm->count_below(static_cast<uint8_t>(next_idx));
             it.edge_entry(bitmask_type::child_by_slot(node, h, slot),
                           kstrie_detail::dir_t::FWD);
             return true;
@@ -876,11 +906,8 @@ private:
             if (h.count == 0) [[unlikely]] return false;
             it.leaf_v = const_cast<uint64_t*>(node);
             it.pos_v  = 0;
-            it.prefix_len_v = it.key_v.size();
-            it.rebuild_suffix(h);
             return true;
         }
-        // Bitmask take_min: eos first, then first byte child
         {
             uint64_t* eos = bitmask_type::eos_child(node, h);
             if (eos != impl_v.get_sentinel()) {
@@ -890,10 +917,7 @@ private:
             const auto* bm = bitmask_type::get_bitmap(node, h);
             int idx = bm->find_next_set(0);
             if (idx < 0) [[unlikely]] return false;
-            uint8_t byte = static_cast<uint8_t>(idx);
-            it.key_v.push_back(static_cast<char>(
-                CHARMAP::from_index(byte)));
-            int slot = bm->count_below(byte);
+            int slot = bm->count_below(static_cast<uint8_t>(idx));
             it.edge_entry(bitmask_type::child_by_slot(node, h, slot),
                           kstrie_detail::dir_t::FWD);
             return true;
