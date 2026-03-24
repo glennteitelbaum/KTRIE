@@ -549,21 +549,136 @@ public:
 
     std::pair<const_iterator, const_iterator>
     prefix(std::string_view pfx) const {
-        auto [k1, v1, k2, v2] = iter_prefix_bounds(pfx);
-        const_iterator first = end(), last = end();
-        if (v1) {
-            auto r1 = impl_v.find_for_iter(k1);
-            if (r1.leaf)
-                first = const_iterator(const_cast<impl_t*>(&impl_v),
-                                       r1.leaf, r1.pos, std::move(k1), r1.prefix_len);
+        const uint8_t* raw = reinterpret_cast<const uint8_t*>(pfx.data());
+        uint32_t len = static_cast<uint32_t>(pfx.size());
+
+        uint8_t stack_buf[256];
+        auto [mapped, raw_buf] = kstrie_detail::get_mapped<CHARMAP>(raw, len,
+                                              stack_buf, sizeof(stack_buf));
+        std::unique_ptr<uint8_t[]> heap_guard(raw_buf);
+
+        struct right_turn {
+            const uint64_t* bm_node;
+            hdr_type        h;
+            int             next_idx;
+            std::string     prefix;
+        };
+
+        std::string path;
+        right_turn best_rt{};
+        bool have_rt = false;
+
+        const uint64_t* node = impl_v.get_root();
+        uint32_t consumed = 0;
+
+        while (consumed < len) {
+            if (node == impl_v.get_sentinel()) [[unlikely]] return {end(), end()};
+            hdr_type h = hdr_type::from_node(node);
+
+            if (h.has_skip()) [[unlikely]] {
+                uint32_t sb = h.skip_bytes();
+                const uint8_t* skip = hdr_type::get_skip(node, h);
+                uint32_t remaining = len - consumed;
+                uint32_t cmp_len = std::min(sb, remaining);
+
+                for (uint32_t i = 0; i < cmp_len; ++i) {
+                    if (skip[i] != mapped[consumed + i])
+                        return {end(), end()};
+                    path.push_back(static_cast<char>(
+                        CHARMAP::from_index(skip[i])));
+                }
+
+                if (remaining <= sb) {
+                    for (uint32_t j = cmp_len; j < sb; ++j)
+                        path.push_back(static_cast<char>(
+                            CHARMAP::from_index(skip[j])));
+                    consumed += sb;
+                    goto subtree_found;
+                }
+
+                consumed += sb;
+            }
+
+            if (h.is_compact()) [[unlikely]]
+                goto subtree_found;
+
+            {
+                uint8_t byte = mapped[consumed++];
+                const auto* bm = bitmask_type::get_bitmap(node, h);
+
+                int next_sib = bm->find_next_set(byte + 1);
+                if (next_sib >= 0) {
+                    best_rt.bm_node  = node;
+                    best_rt.h        = h;
+                    best_rt.next_idx = next_sib;
+                    best_rt.prefix   = path;
+                    have_rt = true;
+                }
+
+                uint64_t* child = bitmask_type::dispatch(node, h, byte);
+                if (child == impl_v.get_sentinel()) [[unlikely]]
+                    return {end(), end()};
+
+                path.push_back(static_cast<char>(
+                    CHARMAP::from_index(byte)));
+                node = child;
+            }
         }
-        if (v2) {
-            auto r2 = impl_v.find_for_iter(k2);
-            if (r2.leaf)
-                last = const_iterator(const_cast<impl_t*>(&impl_v),
-                                      r2.leaf, r2.pos, std::move(k2), r2.prefix_len);
+
+    subtree_found:
+        {
+            hdr_type h = hdr_type::from_node(node);
+
+            // --- Build first iterator ---
+            const_iterator first(const_cast<impl_t*>(&impl_v));
+            first.key_v = path;
+
+            if (h.is_compact() && consumed < len) [[unlikely]] {
+                // Partial prefix match within compact node
+                int pos = find_prefix_first_pos(
+                    node, h, mapped + consumed, len - consumed);
+                if (pos < 0) return {end(), end()};
+                first.leaf_v = const_cast<uint64_t*>(node);
+                first.pos_v = static_cast<uint16_t>(pos);
+                first.prefix_len_v = first.key_v.size();
+                first.rebuild_suffix();
+            } else {
+                // Whole subtree
+                first.edge_entry(const_cast<uint64_t*>(node),
+                                 kstrie_detail::dir_t::FWD);
+                if (!first.leaf_v) return {end(), end()};
+            }
+
+            // --- Build last (past-end) iterator ---
+            const_iterator last(const_cast<impl_t*>(&impl_v));
+
+            if (h.is_compact() && consumed < len) [[unlikely]] {
+                int past = find_prefix_past_pos(
+                    node, h, mapped + consumed, len - consumed);
+                if (past >= 0) {
+                    last.key_v = path;
+                    last.leaf_v = const_cast<uint64_t*>(node);
+                    last.pos_v = static_cast<uint16_t>(past);
+                    last.prefix_len_v = last.key_v.size();
+                    last.rebuild_suffix();
+                }
+                // else: last stays at end()
+            } else if (have_rt) {
+                uint8_t rt_byte = static_cast<uint8_t>(best_rt.next_idx);
+                last.key_v = best_rt.prefix;
+                last.key_v.push_back(static_cast<char>(
+                    CHARMAP::from_index(rt_byte)));
+                const auto* bm = bitmask_type::get_bitmap(
+                    best_rt.bm_node, best_rt.h);
+                int slot = bm->count_below(rt_byte);
+                last.edge_entry(bitmask_type::child_by_slot(
+                    best_rt.bm_node, best_rt.h, slot),
+                    kstrie_detail::dir_t::FWD);
+            }
+            // else: last stays at end() (entire trie is prefix subtree)
+
+            return {first, last};
         }
-        return {first, last};
     }
 
     // ------------------------------------------------------------------
@@ -1037,32 +1152,60 @@ private:
         return nullptr;
     }
 
-    const VALUE* find_min_impl_tail(const uint64_t* node, const hdr_type& h,
-                                    std::string& out) const {
-        if (h.is_compact()) [[unlikely]] {
-            if (h.count == 0) [[unlikely]] return nullptr;
-            const uint8_t*  L = compact_type::lengths(node, h);
-            const uint8_t*  F = compact_type::firsts(node, h);
-            const kstrie_detail::ks_offset_type* O = compact_type::offsets(node, h);
-            const uint8_t*  B = compact_type::keysuffix(node, h);
-            uint8_t klen = L[0];
+
+    // find_prefix_first_pos: position of first entry matching prefix suffix.
+    // Returns -1 if none found.
+    static int find_prefix_first_pos(const uint64_t* node, const hdr_type& h,
+                                      const uint8_t* suffix,
+                                      uint32_t suffix_len) noexcept {
+        const uint8_t* L = compact_type::lengths(node, h);
+        const uint8_t* F = compact_type::firsts(node, h);
+        const kstrie_detail::ks_offset_type* O = compact_type::offsets(node, h);
+        const uint8_t* B = compact_type::keysuffix(node, h);
+        for (int i = 0; i < h.count; ++i) {
+            uint8_t klen = L[i];
+            if (klen < suffix_len) continue;
+            uint8_t tmp[256];
             if (klen > 0) [[likely]] {
-                append_unmapped(out, &F[0], 1);
-                if (klen > 1) [[likely]] append_unmapped(out, B + O[0], klen - 1);
+                tmp[0] = F[i];
+                if (klen > 1) [[likely]] std::memcpy(tmp + 1, B + O[i], klen - 1);
             }
-            return slots_type::load_value(h.get_compact_slots(node), 0);
+            if (std::memcmp(tmp, suffix, suffix_len) == 0)
+                return i;
+            if (std::memcmp(tmp, suffix, suffix_len) > 0)
+                return -1;  // past where it would be
         }
-        // Bitmask: eos first, then first child
-        uint64_t* eos = bitmask_type::eos_child(node, h);
-        if (eos != impl_v.get_sentinel())
-            return find_min_impl(eos, out);
-        const auto* bm = bitmask_type::get_bitmap(node, h);
-        int idx = bm->find_next_set(0);
-        if (idx < 0) [[unlikely]] return nullptr;
-        uint8_t byte = static_cast<uint8_t>(idx);
-        out.push_back(static_cast<char>(CHARMAP::from_index(byte)));
-        return find_min_impl(
-            bitmask_type::child_by_slot(node, h, bm->count_below(byte)), out);
+        return -1;
+    }
+
+    // find_prefix_past_pos: position of first entry AFTER all prefix-matching entries.
+    // Returns -1 if no such entry (all remaining entries match, or none match).
+    static int find_prefix_past_pos(const uint64_t* node, const hdr_type& h,
+                                     const uint8_t* suffix,
+                                     uint32_t suffix_len) noexcept {
+        const uint8_t* L = compact_type::lengths(node, h);
+        const uint8_t* F = compact_type::firsts(node, h);
+        const kstrie_detail::ks_offset_type* O = compact_type::offsets(node, h);
+        const uint8_t* B = compact_type::keysuffix(node, h);
+        bool in_prefix = false;
+        for (int i = 0; i < h.count; ++i) {
+            uint8_t klen = L[i];
+            bool matches = false;
+            if (klen >= suffix_len) {
+                uint8_t tmp[256];
+                if (klen > 0) [[likely]] {
+                    tmp[0] = F[i];
+                    if (klen > 1) [[likely]] std::memcpy(tmp + 1, B + O[i], klen - 1);
+                }
+                matches = (std::memcmp(tmp, suffix, suffix_len) == 0);
+            }
+            if (matches) {
+                in_prefix = true;
+            } else if (in_prefix) {
+                return i;
+            }
+        }
+        return -1;
     }
 };
 
