@@ -32,10 +32,6 @@ A **sorted**, **compressed** associative container for string keys. Follows the 
 
 - Supports Python via a pybind11 wrapper for the C++ implementations
 
-- Be aware that: KSTRIE uses a snapshot iterator, so a modify method is included
-
 - A Java port is available
-  - The Java ports use live iterators, not snapshots
-  
 
 *Note: This was done using AI-assisted development with Claude Opus 4.6*
