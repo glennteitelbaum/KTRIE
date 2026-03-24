@@ -496,8 +496,28 @@ iterator, `at()`, `operator[]`, `insert()` returning `pair<iterator,bool>`.
    upper_bound uses lower_bound + advance (single walk + 1 step).
    prefix() still uses double-walk (snapshot bounds + find_for_iter) — future.
    All 10 tests pass + ASAN clean.
-8. ⬜ kstrie.hpp: public API wrapper (at, operator[], mutable find returning
-   iterator, insert returning pair<iterator,bool>, erase(iterator), etc.)
-9. ⬜ IS_BOOL bool_ref proxy
+8. ✅ Public API + insert_result leaf+pos propagation
+   - insert_result extended with leaf + pos fields (kstrie_support.hpp)
+   - compact::insert/modify_or_insert: FOUND/UPDATED/normal-INSERT set
+     leaf+pos; split/rebuild leave leaf=nullptr for caller re-find
+   - compact::finalize takes pos, propagates on no-split
+   - find_leaf_pos static helper (reusable for subtree re-find)
+   - insert_node + modify_or_insert_node: all recursive returns propagate
+     r.leaf/r.pos through EOS and child branches
+   - insert_for_iter: calls insert_node, re-finds via find_leaf_pos
+     when leaf==nullptr (split/rebuild/promote paths). Made public.
+   - Section reorder: Modifiers + Element access moved below iterator class
+   - erase(iterator) UAF fixed: save next key string, erase, re-find
+   - Public API complete: insert()→pair, insert_or_assign()→pair,
+     emplace, try_emplace, erase(key/iter/range), at(), operator[],
+     clear(). Old snapshot-based modifiers removed.
+   - operator[] returns mapped_ref (VALUE& or bool_ref)
+   - 11 API tests + 10 iterator tests, all ASAN clean.
+9. ✅ IS_BOOL bool_ref proxy
+   - bool_ref struct: word pointer + bit index, operator bool(), operator=
+   - mapped_ref = conditional_t<IS_BITMAP, bool_ref, VALUE&>
+   - const_mapped_ref = conditional_t<IS_BITMAP, bool, const VALUE&>
+   - operator[] uses bool_ref for bool specialization
+   - Bool insert + operator[] tests pass ASAN clean
 10. ⬜ Remove modify, erase_when, assign, find_value, iter_next/prev/min/max
 11. ⬜ Test: sequential, shuffled, iteration order, reverse, copy, EOS keys

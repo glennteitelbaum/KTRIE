@@ -647,6 +647,8 @@ enum class dir_t : int8_t { FWD = +1, BWD = -1 };
 struct insert_result {
     uint64_t*      node;
     insert_outcome outcome;
+    uint64_t*      leaf = nullptr;   // compact leaf containing the entry
+    uint16_t       pos  = 0;         // slot index within leaf
 };
 
 enum class erase_status : uint8_t {

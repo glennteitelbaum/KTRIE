@@ -803,19 +803,26 @@ public:
                                               stack_buf, sizeof(stack_buf));
         std::unique_ptr<uint8_t[]> heap_guard(raw_buf);
 
-        uint64_t* node = const_cast<uint64_t*>(root_v);
-        uint32_t consumed = 0;
-        hdr_type h;
+        return find_leaf_pos(const_cast<uint64_t*>(root_v), mapped, len, 0);
+    }
 
+    // find_leaf_pos: locate a key within a subtree, returning leaf + pos.
+    // Used by find_for_iter (from root) and by insert paths after
+    // split/rebuild/promote (from subtree root).
+    static iter_find_result find_leaf_pos(uint64_t* node,
+                                           const uint8_t* mapped,
+                                           uint32_t key_len,
+                                           uint32_t consumed) noexcept {
+        hdr_type h;
         for (;;) {
             if (node == compact_type::sentinel()) return {};
             h = hdr_type::from_node(node);
             if (h.has_skip()) [[unlikely]] {
-                if (!skip_type::match_skip_fast(node, h, mapped, len, consumed))
+                if (!skip_type::match_skip_fast(node, h, mapped, key_len, consumed))
                     return {};
             }
             if (!h.is_bitmap()) [[unlikely]] break;
-            if (consumed == len) [[unlikely]] {
+            if (consumed == key_len) [[unlikely]] {
                 node = bitmask_type::eos_child(node, h);
                 if (node == compact_type::sentinel()) return {};
                 h = hdr_type::from_node(node);
@@ -823,12 +830,11 @@ public:
             }
             node = bitmask_type::dispatch(node, h, mapped[consumed++]);
         }
-        // node is compact
         auto [found, pos] = compact_type::find_pos(
-            node, h, mapped + consumed, len - consumed);
+            node, h, mapped + consumed, key_len - consumed);
         if (!found) return {};
         return {node, static_cast<uint16_t>(pos),
-                static_cast<size_t>(len - compact_type::lengths(node, h)[pos])};
+                static_cast<size_t>(key_len - compact_type::lengths(node, h)[pos])};
     }
 
     // ------------------------------------------------------------------
@@ -1941,6 +1947,36 @@ private:
         return false;
     }
 
+public:
+    // insert_for_iter: like modify_impl but returns insert_result with leaf+pos
+    // for iterator construction. Re-finds via find_leaf_pos when leaf is null
+    // (split/rebuild/promote paths).
+    insert_result insert_for_iter(std::string_view key, const VALUE& value,
+                                   insert_mode mode) {
+        const uint8_t* raw = reinterpret_cast<const uint8_t*>(key.data());
+        uint32_t len = static_cast<uint32_t>(key.size());
+
+        uint8_t stack_buf[256];
+        auto [mapped, raw_buf] = get_mapped<CHARMAP>(raw, len,
+                                              stack_buf, sizeof(stack_buf));
+        std::unique_ptr<uint8_t[]> heap_guard(raw_buf);
+
+        insert_result r = insert_node(root_v, mapped, len, value, 0, mode);
+        set_root(r.node);
+
+        if (r.outcome == insert_outcome::INSERTED)
+            size_v++;
+
+        // Re-find leaf+pos if not propagated (split/rebuild/promote)
+        if (!r.leaf && r.outcome != insert_outcome::FOUND) {
+            auto f = find_leaf_pos(root_v, mapped, len, 0);
+            r.leaf = f.leaf;
+            r.pos  = f.pos;
+        }
+        return r;
+    }
+
+private:
     insert_result insert_node(uint64_t* node, const uint8_t* key_data,
                                uint32_t key_len, const VALUE& value,
                                uint32_t consumed, insert_mode mode) {
@@ -2046,7 +2082,7 @@ private:
                 node[NODE_TOTAL_TAIL] += node_tail_total(r.node) - old_et;
                 if (r.outcome == insert_outcome::INSERTED)
                     node[NODE_TOTAL_TAIL] += h.skip_bytes();
-                return {node, r.outcome};
+                return {node, r.outcome, r.leaf, r.pos};
             }
             if (mode == insert_mode::ASSIGN) return {node, insert_outcome::FOUND};
             // Create compact(1) with EOS entry
@@ -2078,7 +2114,7 @@ private:
             node[NODE_TOTAL_TAIL] += node_tail_total(r.node) - old_ct;
             if (r.outcome == insert_outcome::INSERTED)
                 node[NODE_TOTAL_TAIL] += h.skip_bytes();
-            return {node, r.outcome};
+            return {node, r.outcome, r.leaf, r.pos};
         }
     }
 
@@ -2184,7 +2220,7 @@ private:
                 node[NODE_TOTAL_TAIL] += node_tail_total(r.node) - old_et;
                 if (r.outcome == insert_outcome::INSERTED)
                     node[NODE_TOTAL_TAIL] += h.skip_bytes();
-                return {node, r.outcome};
+                return {node, r.outcome, r.leaf, r.pos};
             }
             // No EOS child — insert default
             uint64_t raw = slots_type::make_raw(default_val, mem_v.alloc_v);
@@ -2214,7 +2250,7 @@ private:
             node[NODE_TOTAL_TAIL] += node_tail_total(r.node) - old_ct;
             if (r.outcome == insert_outcome::INSERTED)
                 node[NODE_TOTAL_TAIL] += h.skip_bytes();
-            return {node, r.outcome};
+            return {node, r.outcome, r.leaf, r.pos};
         }
     }
 

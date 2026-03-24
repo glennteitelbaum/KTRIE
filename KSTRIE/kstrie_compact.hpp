@@ -338,13 +338,14 @@ struct kstrie_compact {
             const uint8_t* suffix = key_data + mr.consumed;
 
             auto [found, pos] = find_pos(node, h, suffix, suffix_len);
+            uint16_t upos = static_cast<uint16_t>(pos);
 
             if (found) {
                 // Hit: apply fn in place
                 auto* sb = h.get_compact_slots(node);
                 VALUE* vp = slots::load_value(sb, pos);
                 fn(*vp);
-                return {node, insert_outcome::UPDATED};
+                return {node, insert_outcome::UPDATED, node, upos};
             }
 
             // Miss: insert default_val (same as insert hot path)
@@ -370,7 +371,7 @@ struct kstrie_compact {
                               (tail > 0 ? suffix + 1 : nullptr), tail,
                               raw);
             h = hdr_type::from_node(node);
-            return finalize(node, h, mem);
+            return finalize(node, h, mem, upos);
         }
 
         // MISMATCH / KEY_EXHAUSTED: insert default_val
@@ -818,10 +819,10 @@ struct kstrie_compact {
     // ------------------------------------------------------------------
 
     static insert_result finalize(uint64_t* node, hdr_type& h,
-                                   mem_type& mem) {
+                                   mem_type& mem, uint16_t pos) {
         if (get_prefix(node, h).keysuffix_used > COMPACT_KEYSUFFIX_LIMIT) [[unlikely]]
-            return split_node(node, h, mem);
-        return {node, insert_outcome::INSERTED};
+            return split_node(node, h, mem);  // leaf=nullptr → caller re-finds
+        return {node, insert_outcome::INSERTED, node, pos};
     }
 
     // ------------------------------------------------------------------
@@ -856,14 +857,15 @@ struct kstrie_compact {
             const uint8_t* suffix = key_data + mr.consumed;
 
             auto [found, pos] = find_pos(node, h, suffix, suffix_len);
+            uint16_t upos = static_cast<uint16_t>(pos);
 
             if (found) {
                 if (mode == insert_mode::INSERT)
-                    return {node, insert_outcome::FOUND};
+                    return {node, insert_outcome::FOUND, node, upos};
                 auto* sb = h.get_compact_slots(node);
                 slots::destroy_value(sb, pos, mem.alloc_v);
                 slots::store_value(sb, pos, value, mem.alloc_v);
-                return {node, insert_outcome::UPDATED};
+                return {node, insert_outcome::UPDATED, node, upos};
             }
 
             if (mode == insert_mode::ASSIGN)
@@ -874,6 +876,7 @@ struct kstrie_compact {
             if (suffix_len > COMPACT_SUFFIX_LEN_MAX) [[unlikely]]
                 return rebuild_with_new(node, h, key_data, key_len, value,
                                         consumed, mr, mem);
+                // leaf=nullptr → caller re-finds
 
             // Normal in-place insert.
             uint8_t klen = static_cast<uint8_t>(suffix_len);
@@ -888,6 +891,7 @@ struct kstrie_compact {
                 if (get_prefix(node, h).keysuffix_used + delta > COMPACT_KEYSUFFIX_LIMIT) [[unlikely]]
                     return rebuild_with_new(node, h, key_data, key_len, value,
                                             consumed, mr, mem);
+                    // leaf=nullptr → caller re-finds
             }
 
             // Allocate value after pre-split check to avoid leak on redirect.
@@ -898,7 +902,7 @@ struct kstrie_compact {
                               (tail > 0 ? suffix + 1 : nullptr), tail,
                               raw);
             h = hdr_type::from_node(node);
-            return finalize(node, h, mem);
+            return finalize(node, h, mem, upos);
         }
 
         // MISMATCH or KEY_EXHAUSTED: prefix shrinks, full rebuild required.
@@ -907,6 +911,7 @@ struct kstrie_compact {
 
         return rebuild_with_new(node, h, key_data, key_len, value,
                                 consumed, mr, mem);
+        // leaf=nullptr → caller re-finds
     }
 
     // ------------------------------------------------------------------

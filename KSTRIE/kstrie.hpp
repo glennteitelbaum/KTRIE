@@ -4,6 +4,7 @@
 #include "kstrie_impl.hpp"
 #include <iterator>
 #include <optional>
+#include <stdexcept>
 #include <vector>
 
 namespace gteitelbaum {
@@ -51,6 +52,27 @@ public:
     using size_type      = typename impl_t::size_type;
     using allocator_type = typename impl_t::allocator_type;
 
+    static constexpr bool IS_BITMAP = slots_type::IS_BITMAP;
+
+    // bool_ref: proxy for mutable access to packed boolean values.
+    // Parallels std::vector<bool>::reference.
+    struct bool_ref {
+        uint64_t* word;
+        uint8_t   bit;
+        operator bool() const noexcept { return (*word >> bit) & 1; }
+        bool_ref& operator=(bool v) noexcept {
+            if (v) *word |=  (uint64_t(1) << bit);
+            else   *word &= ~(uint64_t(1) << bit);
+            return *this;
+        }
+        bool_ref& operator=(const bool_ref& o) noexcept {
+            return *this = static_cast<bool>(o);
+        }
+    };
+
+    using mapped_ref       = std::conditional_t<IS_BITMAP, bool_ref, VALUE&>;
+    using const_mapped_ref = std::conditional_t<IS_BITMAP, bool, const VALUE&>;
+
     kstrie() = default;
     ~kstrie() = default;
     kstrie(kstrie&&) noexcept = default;
@@ -77,39 +99,6 @@ public:
 
     bool contains(std::string_view key) const { return impl_v.contains(key); }
     size_type count(std::string_view key) const { return impl_v.count(key); }
-
-    // ------------------------------------------------------------------
-    // Modifiers
-    // ------------------------------------------------------------------
-
-    bool insert(std::string_view key, const VALUE& value) { return impl_v.insert(key, value); }
-    bool insert_or_assign(std::string_view key, const VALUE& value) { return impl_v.insert_or_assign(key, value); }
-    bool assign(std::string_view key, const VALUE& value) { return impl_v.assign(key, value); }
-
-    // Single-walk read-modify-write in place.
-    // fn is void(VALUE&). Returns true if key existed and was modified.
-    template<typename F>
-    bool modify(std::string_view key, F&& fn) {
-        return impl_v.modify_dispatch(key, std::forward<F>(fn));
-    }
-
-    // With default: if key exists, apply fn(value&), return true.
-    // If missing, insert default_val as-is (fn not called), return false.
-    // Single walk — no redundant traversal.
-    template<typename F>
-    bool modify(std::string_view key, F&& fn, const VALUE& default_val) {
-        return impl_v.modify_or_insert_dispatch(key, std::forward<F>(fn), default_val);
-    }
-
-    // Single-walk conditional erase: find key, test fn(const VALUE&),
-    // erase only if predicate returns true.
-    // Returns true if erased, false if not found or predicate failed.
-    template<typename F>
-    bool erase_when(std::string_view key, F&& fn) {
-        return impl_v.erase_when(key, std::forward<F>(fn));
-    }
-
-    void clear() noexcept { impl_v.clear(); }
 
     // ------------------------------------------------------------------
     // const_iterator — live, bidirectional, parent-walk navigation.
@@ -408,6 +397,114 @@ public:
     reverse_iterator rend() const { return reverse_iterator(begin()); }
     const_reverse_iterator crbegin() const { return rbegin(); }
     const_reverse_iterator crend() const { return rend(); }
+    // ------------------------------------------------------------------
+    // Modifiers
+    // ------------------------------------------------------------------
+
+    std::pair<const_iterator, bool> insert(std::string_view key, const VALUE& value) {
+        auto r = impl_v.insert_for_iter(key, value,
+                     kstrie_detail::insert_mode::INSERT);
+        bool inserted = (r.outcome == kstrie_detail::insert_outcome::INSERTED);
+        return {make_iter_from_result(r, key), inserted};
+    }
+
+    std::pair<const_iterator, bool> insert_or_assign(std::string_view key,
+                                                      const VALUE& value) {
+        auto r = impl_v.insert_for_iter(key, value,
+                     kstrie_detail::insert_mode::UPSERT);
+        bool inserted = (r.outcome == kstrie_detail::insert_outcome::INSERTED);
+        return {make_iter_from_result(r, key), inserted};
+    }
+
+    template <typename... Args>
+    std::pair<const_iterator, bool> emplace(std::string_view key, Args&&... args) {
+        VALUE v(std::forward<Args>(args)...);
+        return insert(key, v);
+    }
+
+    template <typename... Args>
+    std::pair<const_iterator, bool> try_emplace(std::string_view key,
+                                                 Args&&... args) {
+        // Check existence first to avoid constructing value unnecessarily
+        auto r = impl_v.find_for_iter(key);
+        if (r.leaf) {
+            size_t pfx = key.size() - compact_type::lengths(r.leaf,
+                hdr_type::from_node(r.leaf))[r.pos];
+            return {const_iterator(const_cast<impl_t*>(&impl_v),
+                                   r.leaf, r.pos, std::string(key), pfx),
+                    false};
+        }
+        VALUE v(std::forward<Args>(args)...);
+        return insert(key, v);
+    }
+
+    size_type erase(std::string_view key) { return impl_v.erase(key); }
+
+    const_iterator erase(const_iterator pos) {
+        if (pos == end()) return end();
+        // Save the next key before erasing — erase invalidates all iterators.
+        const_iterator next = pos;
+        ++next;
+        bool had_next = (next != end());
+        std::string next_key;
+        if (had_next) next_key = next.key_v;
+        impl_v.erase(pos.key_v);
+        if (!had_next) return end();
+        // Re-find the next key (leaf pointers may have changed)
+        auto r = impl_v.find_for_iter(next_key);
+        if (!r.leaf) return end();
+        return make_iter_from_result(
+            kstrie_detail::insert_result{nullptr,
+                kstrie_detail::insert_outcome::FOUND, r.leaf, r.pos},
+            next_key);
+    }
+
+    const_iterator erase(const_iterator first, const_iterator last) {
+        // Collect keys, then erase — iterators invalidate on mutation
+        std::vector<std::string> keys;
+        for (auto it = first; it != last; ++it)
+            keys.push_back((*it).first);
+        for (auto& k : keys)
+            impl_v.erase(k);
+        if (last == end()) return end();
+        // Re-find last's key (it may have shifted)
+        auto r = impl_v.find_for_iter(last.key_v);
+        if (!r.leaf) return end();
+        size_t pfx = last.key_v.size() - compact_type::lengths(r.leaf,
+            hdr_type::from_node(r.leaf))[r.pos];
+        return const_iterator(const_cast<impl_t*>(&impl_v),
+                              r.leaf, r.pos, last.key_v, pfx);
+    }
+
+    void clear() noexcept { impl_v.clear(); }
+
+    // ------------------------------------------------------------------
+    // Element access
+    // ------------------------------------------------------------------
+
+    const VALUE& at(std::string_view key) const {
+        const VALUE* v = impl_v.find(key);
+        if (!v) throw std::out_of_range("kstrie::at");
+        return *v;
+    }
+
+    // operator[]: find or default-insert, return mutable reference.
+    // For bool: returns bool_ref proxy. For others: returns VALUE&.
+    mapped_ref operator[](std::string_view key) {
+        auto r = impl_v.insert_for_iter(key, VALUE{},
+                     kstrie_detail::insert_mode::INSERT);
+        hdr_type h = hdr_type::from_node(r.leaf);
+        auto* vb = h.get_compact_slots(r.leaf);
+        if constexpr (IS_BITMAP) {
+            constexpr size_t LOG2_BPW = slots_type::LOG2_BPW;
+            constexpr size_t WORD_BIT_MASK = slots_type::WORD_BIT_MASK;
+            return bool_ref{vb + (r.pos >> LOG2_BPW),
+                            static_cast<uint8_t>(r.pos & WORD_BIT_MASK)};
+        } else {
+            return *slots_type::load_value(vb, r.pos);
+        }
+    }
+
 
     // ------------------------------------------------------------------
     // Lookup
@@ -552,52 +649,6 @@ public:
     }
 
     // ------------------------------------------------------------------
-    // Iterator-based modifiers
-    // ------------------------------------------------------------------
-
-    const_iterator erase(const_iterator pos) {
-        if (pos == end()) return end();
-        auto [next_key, next_val] = iter_next(pos.key_);
-        std::optional<VALUE> saved;
-        if (next_val) saved = *next_val;
-        impl_v.erase(pos.key_);
-        if (!saved) return end();
-        return {this, std::move(next_key), *saved};
-    }
-
-    size_type erase(std::string_view key) { return impl_v.erase(key); }
-
-    const_iterator erase(const_iterator first, const_iterator last) {
-        std::vector<std::string> keys;
-        for (auto it = first; it != last; ++it)
-            keys.push_back(it.key());
-        for (auto& k : keys)
-            impl_v.erase(k);
-        if (last == end()) return end();
-        auto [k, v] = iter_lower_bound(last.key());
-        if (!v) return end();
-        return {this, std::move(k), *v};
-    }
-
-    template <typename... Args>
-    std::pair<const_iterator, bool> emplace(std::string_view key, Args&&... args) {
-        VALUE v(std::forward<Args>(args)...);
-        bool inserted = impl_v.insert(key, v);
-        auto [k, vp] = iter_lower_bound(key);
-        return {const_iterator{this, std::move(k), *vp}, inserted};
-    }
-
-    template <typename... Args>
-    std::pair<const_iterator, bool> try_emplace(std::string_view key, Args&&... args) {
-        const VALUE* existing = impl_v.find(key);
-        if (existing)
-            return {const_iterator{this, std::string(key), *existing}, false};
-        VALUE v(std::forward<Args>(args)...);
-        impl_v.insert(key, v);
-        return {const_iterator{this, std::string(key), v}, true};
-    }
-
-    // ------------------------------------------------------------------
     // Comparison
     // ------------------------------------------------------------------
 
@@ -618,6 +669,17 @@ public:
 private:
 
     const VALUE* find_value(std::string_view key) const { return impl_v.find(key); }
+
+    // Construct iterator from insert_result + original key.
+    const_iterator make_iter_from_result(
+            const kstrie_detail::insert_result& r,
+            std::string_view key) const {
+        if (!r.leaf) return end();
+        hdr_type lh = hdr_type::from_node(r.leaf);
+        size_t pfx = key.size() - compact_type::lengths(r.leaf, lh)[r.pos];
+        return const_iterator(const_cast<impl_t*>(&impl_v),
+                              r.leaf, r.pos, std::string(key), pfx);
+    }
 
     // ------------------------------------------------------------------
     // Unmap helper
