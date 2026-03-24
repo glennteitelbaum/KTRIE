@@ -1,79 +1,173 @@
 <!DOCTYPE html>
-<html lang="en"><head><meta charset="utf-8"/>
-<title>kstrie vs umap — words.txt</title>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>kstrie Benchmark — words.txt</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
 <style>
-body{margin:0;background:#0f0f1a;color:#ddd;font-family:system-ui,sans-serif}
-.wrap{max-width:720px;margin:0 auto;padding:16px 12px}
-h2{margin:0 0 4px;font-size:18px;font-weight:700;text-align:center}
-.sub{text-align:center;color:#777;font-size:12px;margin:0 0 12px}
-.chart-box{margin-bottom:24px}
-.chart-box h3{margin:0 0 6px;font-size:14px;font-weight:600;text-align:center}
-canvas{background:#12122a;border-radius:8px}
-</style></head><body><div class="wrap">
-<h2>kstrie (identity / upper) vs unordered_map — 466550 words</h2>
-<p class="sub">Log-log · Per-entry · Lower is better</p>
-<div class="chart-box"><h3>Find (ns/entry)</h3><canvas id="c_find"></canvas></div>
-<div class="chart-box"><h3>Insert (ns/entry)</h3><canvas id="c_ins"></canvas></div>
-<div class="chart-box"><h3>Memory (B/entry)</h3><canvas id="c_mem"></canvas></div>
-</div><script>
-const D=[{N:100,kf:0.0016,kn:0.0019,ki:0.0329,kuf:0.0026,kun:0.0031,kui:0.0282,uf:0.0013,un:0.0012,ui:0.0071,km:2048,kum:2048,um:6424},
-{N:160,kf:0.0029,kn:0.0033,ki:0.0479,kuf:0.0048,kun:0.0055,kui:0.0478,uf:0.0021,un:0.0021,ui:0.0115,km:3072,kum:3072,um:10296},
-{N:256,kf:0.0053,kn:0.0062,ki:0.1098,kuf:0.0084,kun:0.0094,kui:0.0844,uf:0.0033,un:0.0032,ui:0.0158,km:6144,kum:6144,um:16392},
-{N:409,kf:0.0095,kn:0.0120,ki:0.1694,kuf:0.0150,kun:0.0180,kui:0.1592,uf:0.0055,un:0.0051,ui:0.0242,km:8192,kum:8192,um:26176},
-{N:655,kf:0.0143,kn:0.0160,ki:0.3126,kuf:0.0176,kun:0.0215,kui:0.2708,uf:0.0091,un:0.0089,ui:0.0387,km:15520,kum:13056,um:41968},
-{N:1048,kf:0.0386,kn:0.0467,ki:0.3943,kuf:0.0523,kun:0.0660,kui:0.3627,uf:0.0165,un:0.0165,ui:0.0614,km:21984,kum:20768,um:67560},
-{N:1677,kf:0.0941,kn:0.1092,ki:0.5729,kuf:0.1172,kun:0.1375,kui:0.5626,uf:0.0304,un:0.0296,ui:0.1057,km:33888,kum:33376,um:107840},
-{N:2684,kf:0.1900,kn:0.2196,ki:0.8890,kuf:0.2281,kun:0.2603,kui:0.8856,uf:0.0574,un:0.0632,ui:0.1565,km:55168,kum:51520,um:172328},
-{N:4294,kf:0.3567,kn:0.3967,ki:1.5409,kuf:0.5267,kun:0.4750,kui:1.5894,uf:0.1177,un:0.1354,ui:0.2579,km:82784,kum:78432,um:275256},
-{N:6871,kf:0.6470,kn:0.7244,ki:2.7756,kuf:0.7413,kun:0.9419,kui:2.9038,uf:0.2070,un:0.2351,ui:0.4588,km:126720,kum:126976,um:440368},
-{N:10995,kf:1.1333,kn:1.2515,ki:4.7239,kuf:1.2645,kun:1.4396,kui:5.1996,uf:0.4038,un:0.4407,ui:0.7585,km:207264,kum:203648,um:704624},
-{N:17592,kf:1.8635,kn:2.0209,ki:8.2845,kuf:1.9885,kun:2.2296,kui:8.8763,uf:0.7314,un:0.8163,ui:1.3347,km:322944,kum:332928,um:1127144},
-{N:28147,kf:3.0570,kn:3.3627,ki:13.9172,kuf:3.3751,kun:3.6968,kui:13.6929,uf:1.3331,un:1.4347,ui:2.4106,km:517696,kum:505760,um:1803520},
-{N:45035,kf:5.3106,kn:5.8721,ki:22.8596,kuf:6.4870,kun:6.2681,kui:22.3708,uf:2.3094,un:2.4911,ui:4.1218,km:822592,kum:820416,um:2885808},
-{N:72057,kf:9.4478,kn:10.2710,ki:38.1764,kuf:9.8584,kun:11.2604,kui:38.1956,uf:4.0129,un:4.2275,ui:8.5706,km:1294368,kum:1279648,um:4617728},
-{N:115292,kf:16.7199,kn:18.5028,ki:68.2962,kuf:17.6230,kun:19.4910,kui:73.5080,uf:7.1834,un:7.7140,ui:13.6890,km:2038272,kum:1988256,um:7390200},
-{N:184467,kf:28.8228,kn:31.6903,ki:127.1855,kuf:30.2089,kun:33.3775,kui:126.8218,uf:17.2758,un:14.6720,ui:29.3853,km:3165984,kum:3130048,um:11826880},
-{N:295147,kf:54.5011,kn:59.3060,ki:221.3734,kuf:56.8109,kun:61.5875,kui:212.7201,uf:23.5479,un:23.8647,ui:49.0314,km:4909344,kum:4832768,um:18927840},
-{N:466550,kf:97.4463,kn:109.7553,ki:376.2227,kuf:102.3610,kun:114.1200,kui:361.4707,uf:47.6980,un:50.6834,ui:96.2403,km:7512832,kum:7412288,um:29973848},
+  body { margin:0; background:#0f0f1a; color:#ddd; font-family:system-ui,sans-serif; }
+  .wrap { max-width:720px; margin:0 auto; padding:16px 12px; }
+  h2 { margin:0 0 4px; font-size:18px; font-weight:700; text-align:center; }
+  .sub { text-align:center; color:#777; font-size:12px; margin:0 0 12px; }
+  .chart-box { margin-bottom:24px; }
+  .chart-box h3 { margin:0 0 6px; font-size:14px; font-weight:600; text-align:center; }
+  canvas { background:#12122a; border-radius:8px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h2>kstrie Benchmark — words.txt (string &rarr; int32)</h2>
+  <p class="sub">Log-log &middot; Per-entry &middot; Lower is better &middot; FND=100% hit, NF=100% miss</p>
+  <div class="chart-box"><h3>Find (ns/entry)</h3><canvas id="c_find"></canvas></div>
+  <div class="chart-box"><h3>Insert (ns/entry)</h3><canvas id="c_insert"></canvas></div>
+  <div class="chart-box"><h3>Iteration (ns/entry)</h3><canvas id="c_iter"></canvas></div>
+  <div class="chart-box"><h3>Erase N/2 (ns/entry)</h3><canvas id="c_erase"></canvas></div>
+  <div class="chart-box"><h3>Memory (B/entry)</h3><canvas id="c_mem"></canvas></div>
+</div>
+<script>
+const RAW_DATA = [
+  {pattern:"words",N:100,kstrie_fnd:0.0062,kstrie_nf:0.0057,kstrie_insert:0.0361,kstrie_erase:0.0069,kstrie_iter:0.0037,kstrie_mem:2048,map_fnd:0.0069,map_nf:0.0069,map_insert:0.0208,map_erase:0.0029,map_iter:0.0013,map_mem:7200,umap_fnd:0.0027,umap_nf:0.0029,umap_insert:0.0100,umap_erase:0.0014,umap_iter:0.0002,umap_mem:6424},
+  {pattern:"words",N:160,kstrie_fnd:0.0107,kstrie_nf:0.0099,kstrie_insert:0.0509,kstrie_erase:0.0145,kstrie_iter:0.0054,kstrie_mem:3072,map_fnd:0.0129,map_nf:0.0122,map_insert:0.0367,map_erase:0.0050,map_iter:0.0019,map_mem:11520,umap_fnd:0.0047,umap_nf:0.0050,umap_insert:0.0138,umap_erase:0.0025,umap_iter:0.0003,umap_mem:10296},
+  {pattern:"words",N:256,kstrie_fnd:0.0199,kstrie_nf:0.0182,kstrie_insert:0.0995,kstrie_erase:0.0326,kstrie_iter:0.0085,kstrie_mem:6144,map_fnd:0.0359,map_nf:0.0220,map_insert:0.0506,map_erase:0.0085,map_iter:0.0029,map_mem:18432,umap_fnd:0.0077,umap_nf:0.0084,umap_insert:0.0196,umap_erase:0.0037,umap_iter:0.0005,umap_mem:16392},
+  {pattern:"words",N:409,kstrie_fnd:0.0346,kstrie_nf:0.0316,kstrie_insert:0.1806,kstrie_erase:0.0846,kstrie_iter:0.0128,kstrie_mem:8192,map_fnd:0.0401,map_nf:0.0404,map_insert:0.0907,map_erase:0.0155,map_iter:0.0046,map_mem:29448,umap_fnd:0.0127,umap_nf:0.0146,umap_insert:0.0327,umap_erase:0.0062,umap_iter:0.0012,umap_mem:26176},
+  {pattern:"words",N:655,kstrie_fnd:0.0509,kstrie_nf:0.0478,kstrie_insert:0.2891,kstrie_erase:0.1260,kstrie_iter:0.0194,kstrie_mem:17024,map_fnd:0.0710,map_nf:0.0743,map_insert:0.1250,map_erase:0.0364,map_iter:0.0077,map_mem:47160,umap_fnd:0.0209,umap_nf:0.0235,umap_insert:0.0502,umap_erase:0.0112,umap_iter:0.0027,umap_mem:41968},
+  {pattern:"words",N:1048,kstrie_fnd:0.0946,kstrie_nf:0.0899,kstrie_insert:0.4116,kstrie_erase:0.0930,kstrie_iter:0.0298,kstrie_mem:25440,map_fnd:0.1306,map_nf:0.1296,map_insert:0.2085,map_erase:0.0781,map_iter:0.0123,map_mem:75456,umap_fnd:0.0359,umap_nf:0.0415,umap_insert:0.0804,umap_erase:0.0207,umap_iter:0.0048,umap_mem:67560},
+  {pattern:"words",N:1677,kstrie_fnd:0.1622,kstrie_nf:0.1547,kstrie_insert:0.6023,kstrie_erase:0.1834,kstrie_iter:0.0470,kstrie_mem:38688,map_fnd:0.2309,map_nf:0.2291,map_insert:0.3845,map_erase:0.1502,map_iter:0.0198,map_mem:120744,umap_fnd:0.0609,umap_nf:0.0678,umap_insert:0.1329,umap_erase:0.0379,umap_iter:0.0091,umap_mem:107840},
+  {pattern:"words",N:2684,kstrie_fnd:0.2833,kstrie_nf:0.2777,kstrie_insert:0.9261,kstrie_erase:0.3536,kstrie_iter:0.0789,kstrie_mem:64544,map_fnd:0.4105,map_nf:0.4162,map_insert:0.7246,map_erase:0.2689,map_iter:0.0329,map_mem:193248,umap_fnd:0.0988,umap_nf:0.1105,umap_insert:0.2055,umap_erase:0.0682,umap_iter:0.0164,umap_mem:172328},
+  {pattern:"words",N:4294,kstrie_fnd:0.4888,kstrie_nf:0.4871,kstrie_insert:1.5614,kstrie_erase:0.7617,kstrie_iter:0.1160,kstrie_mem:90944,map_fnd:0.7201,map_nf:0.8323,map_insert:1.2630,map_erase:0.4572,map_iter:0.0535,map_mem:309168,umap_fnd:0.1621,umap_nf:0.3211,umap_insert:0.3314,umap_erase:0.1237,umap_iter:0.0285,umap_mem:275256},
+  {pattern:"words",N:6871,kstrie_fnd:0.8649,kstrie_nf:0.8770,kstrie_insert:2.8657,kstrie_erase:1.4084,kstrie_iter:0.1932,kstrie_mem:148160,map_fnd:1.4399,map_nf:1.5169,map_insert:2.2533,map_erase:0.8643,map_iter:0.0975,map_mem:494712,umap_fnd:0.2883,umap_nf:0.3265,umap_insert:0.7031,umap_erase:0.2237,umap_iter:0.0733,umap_mem:440368},
+  {pattern:"words",N:10995,kstrie_fnd:1.5298,kstrie_nf:1.7081,kstrie_insert:5.0694,kstrie_erase:2.4242,kstrie_iter:0.2871,kstrie_mem:250432,map_fnd:2.5105,map_nf:2.6120,map_insert:4.0834,map_erase:1.5680,map_iter:0.2618,map_mem:791640,umap_fnd:0.5394,umap_nf:0.6326,umap_insert:1.3132,umap_erase:0.4066,umap_iter:0.1579,umap_mem:704624},
+  {pattern:"words",N:17592,kstrie_fnd:2.5010,kstrie_nf:3.3274,kstrie_insert:9.0031,kstrie_erase:4.1334,kstrie_iter:0.4396,kstrie_mem:424288,map_fnd:4.8033,map_nf:4.7826,map_insert:7.1707,map_erase:2.8287,map_iter:0.5333,map_mem:1266624,umap_fnd:0.9916,umap_nf:1.1526,umap_insert:2.4871,umap_erase:0.7913,umap_iter:0.3475,umap_mem:1127144},
+  {pattern:"words",N:28147,kstrie_fnd:4.2683,kstrie_nf:5.3187,kstrie_insert:14.9751,kstrie_erase:6.2616,kstrie_iter:0.6899,kstrie_mem:637344,map_fnd:8.2292,map_nf:8.5381,map_insert:11.8843,map_erase:4.9879,map_iter:0.9010,map_mem:2026584,umap_fnd:1.7841,umap_nf:1.9832,umap_insert:4.6494,umap_erase:1.4527,umap_iter:0.6469,umap_mem:1803520},
+  {pattern:"words",N:45035,kstrie_fnd:7.9045,kstrie_nf:11.4482,kstrie_insert:28.1044,kstrie_erase:11.3767,kstrie_iter:1.1098,kstrie_mem:1004032,map_fnd:17.9407,map_nf:16.9741,map_insert:22.5998,map_erase:9.9002,map_iter:1.6499,map_mem:3242520,umap_fnd:2.9721,umap_nf:3.5246,umap_insert:7.3920,umap_erase:2.5448,umap_iter:1.0872,umap_mem:2885808},
+  {pattern:"words",N:72057,kstrie_fnd:14.0533,kstrie_nf:21.5904,kstrie_insert:43.2906,kstrie_erase:20.0232,kstrie_iter:1.9261,kstrie_mem:1604224,umap_fnd:5.6213,umap_nf:6.7784,umap_insert:15.5412,umap_erase:5.5347,umap_iter:2.6309,umap_mem:4617728},
+  {pattern:"words",N:115292,kstrie_fnd:26.6955,kstrie_nf:40.5866,kstrie_insert:89.3137,kstrie_erase:33.5703,kstrie_iter:2.9885,kstrie_mem:2461184,umap_fnd:12.7491,umap_nf:14.9772,umap_insert:29.4083,umap_erase:11.2592,umap_iter:7.4241,umap_mem:7390200},
+  {pattern:"words",N:184467,kstrie_fnd:51.8056,kstrie_nf:81.6276,kstrie_insert:152.9935,kstrie_erase:62.2497,kstrie_iter:5.0557,kstrie_mem:3806400,umap_fnd:41.5078,umap_nf:48.5892,umap_insert:84.3400,umap_erase:40.4862,umap_iter:26.6632,umap_mem:11826880},
+  {pattern:"words",N:295147,kstrie_fnd:114.5395,kstrie_nf:157.3831,kstrie_insert:319.9348,kstrie_erase:127.6782,kstrie_iter:9.0930,kstrie_mem:6106272,umap_fnd:83.3359,umap_nf:97.9566,umap_insert:155.1897,umap_erase:72.4114,umap_iter:44.8634,umap_mem:18927840},
+  {pattern:"words",N:466550,kstrie_fnd:202.5191,kstrie_nf:278.4175,kstrie_insert:526.1765,kstrie_erase:226.7547,kstrie_iter:13.6057,kstrie_mem:9324448,umap_fnd:127.7915,umap_nf:144.3640,umap_insert:230.6869,umap_erase:117.3321,umap_iter:72.9623,umap_mem:29973848},
 ];
 
-const L={
-  find:[
-    {k:"kf",color:"#3b82f6",dash:[],w:2.5,label:"identity FND"},
-    {k:"kn",color:"#93c5fd",dash:[6,3],w:1.5,label:"identity NF"},
-    {k:"kuf",color:"#f59e0b",dash:[],w:2.5,label:"upper FND"},
-    {k:"kun",color:"#fcd34d",dash:[6,3],w:1.5,label:"upper NF"},
-    {k:"uf",color:"#22c55e",dash:[],w:2.5,label:"umap FND"},
-    {k:"un",color:"#86efac",dash:[6,3],w:1.5,label:"umap NF"},
-  ],
-  ins:[
-    {k:"ki",color:"#3b82f6",dash:[],w:2.5,label:"identity"},
-    {k:"kui",color:"#f59e0b",dash:[],w:2.5,label:"upper"},
-    {k:"ui",color:"#22c55e",dash:[],w:2.5,label:"umap"},
-  ],
-  mem:[
-    {k:"km",color:"#3b82f6",dash:[],w:2.5,label:"identity"},
-    {k:"kum",color:"#f59e0b",dash:[],w:2.5,label:"upper"},
-    {k:"um",color:"#22c55e",dash:[],w:2.5,label:"umap"},
-  ]
-};
-function mk(id,lines,conv){
-  const ctx=document.getElementById(id).getContext("2d");
-  new Chart(ctx,{type:"line",data:{
-    labels:D.map(d=>d.N),
-    datasets:lines.map(l=>({label:l.label,data:D.map(d=>conv(d[l.k],d.N)),
-      borderColor:l.color,backgroundColor:l.color+"22",borderWidth:l.w,
-      borderDash:l.dash,pointRadius:0,pointHitRadius:8,tension:0.2,spanGaps:true}))
-  },options:{responsive:true,interaction:{mode:"index",intersect:false},
-    plugins:{legend:{display:true,labels:{color:"#bbb",font:{size:11},boxWidth:20,padding:10}},
-      tooltip:{backgroundColor:"#1a1a2e",borderColor:"#444",borderWidth:1,titleColor:"#aaa",bodyColor:"#ddd",
-        callbacks:{title:i=>{const v=i[0].parsed.x;return v>=1e6?"N="+(v/1e6).toFixed(1)+"M":v>=1e3?"N="+(v/1e3).toFixed(1)+"K":"N="+v},
-          label:i=>{const v=i.parsed.y;if(v==null)return null;const s=v<0.1?v.toFixed(3):v<10?v.toFixed(2):v<1e3?v.toFixed(1):v.toFixed(0);return" "+i.dataset.label+": "+s}}}},
-    scales:{x:{type:"logarithmic",ticks:{color:"#888",font:{size:11},callback:v=>v>=1e6?(v/1e6)+"M":v>=1e3?(v/1e3)+"K":v},grid:{color:"#2a2a3e"}},
-      y:{type:"logarithmic",ticks:{color:"#888",font:{size:10},callback:v=>v<0.1?v.toFixed(2):v<10?v.toFixed(1):v>=1e3?v.toFixed(0):v.toFixed(1)},grid:{color:"#2a2a3e"}}}}});
+
+const LINES_FIND = [
+  { key: "kstrie", suffix: "fnd", color: "#3b82f6", dash: [],    width: 2.5, label: "kstrie FND" },
+  { key: "kstrie", suffix: "nf",  color: "#93c5fd", dash: [6,3], width: 1.5, label: "kstrie NF"  },
+  { key: "map",    suffix: "fnd", color: "#ef4444", dash: [],    width: 2.5, label: "map FND"    },
+  { key: "map",    suffix: "nf",  color: "#fca5a5", dash: [6,3], width: 1.5, label: "map NF"     },
+  { key: "umap",   suffix: "fnd", color: "#22c55e", dash: [],    width: 2.5, label: "umap FND"   },
+  { key: "umap",   suffix: "nf",  color: "#86efac", dash: [6,3], width: 1.5, label: "umap NF"    },
+];
+const LINES_INSERT = [
+  { key: "kstrie", suffix: "insert", color: "#3b82f6", dash: [], width: 2.5, label: "kstrie" },
+  { key: "map",    suffix: "insert", color: "#ef4444", dash: [], width: 2.5, label: "map"    },
+  { key: "umap",   suffix: "insert", color: "#22c55e", dash: [], width: 2.5, label: "umap"   },
+];
+const LINES_ITER = [
+  { key: "kstrie", suffix: "iter", color: "#3b82f6", dash: [], width: 2.5, label: "kstrie" },
+  { key: "map",    suffix: "iter", color: "#ef4444", dash: [], width: 2.5, label: "map"    },
+  { key: "umap",   suffix: "iter", color: "#22c55e", dash: [], width: 2.5, label: "umap"   },
+];
+const LINES_ERASE = [
+  { key: "kstrie", suffix: "erase", color: "#3b82f6", dash: [], width: 2.5, label: "kstrie" },
+  { key: "map",    suffix: "erase", color: "#ef4444", dash: [], width: 2.5, label: "map"    },
+  { key: "umap",   suffix: "erase", color: "#22c55e", dash: [], width: 2.5, label: "umap"   },
+];
+const LINES_MEM = [
+  { key: "kstrie", suffix: "mem", color: "#3b82f6", dash: [],    width: 2.5, label: "kstrie" },
+  { key: "map",    suffix: "mem", color: "#ef4444", dash: [],    width: 2.5, label: "map"    },
+  { key: "umap",   suffix: "mem", color: "#22c55e", dash: [],    width: 2.5, label: "umap"   },
+];
+
+const METRICS = [
+  { id: "find",   lines: LINES_FIND,   convert: (ms, n) => (ms * 1e6) / n          },
+  { id: "insert", lines: LINES_INSERT, convert: (ms, n) => (ms * 1e6) / n          },
+  { id: "iter",   lines: LINES_ITER,   convert: (ms, n) => (ms * 1e6) / n          },
+  { id: "erase",  lines: LINES_ERASE,  convert: (ms, n) => (ms * 1e6) / (n / 2)   },
+  { id: "mem",    lines: LINES_MEM,    convert: (b,  n) => b / n                   },
+];
+
+function buildData(pattern, metric) {
+  return RAW_DATA
+    .filter(r => r.pattern === pattern)
+    .map(r => {
+      const pt = { N: r.N };
+      for (const l of metric.lines) {
+        const raw = r[l.key + "_" + l.suffix];
+        if (raw != null) pt[l.key + "_" + l.suffix] = metric.convert(raw, r.N);
+      }
+      return pt;
+    });
 }
-mk("c_find",L.find,(ms,n)=>(ms*1e6)/n);
-mk("c_ins",L.ins,(ms,n)=>(ms*1e6)/n);
-mk("c_mem",L.mem,(b,n)=>b/n);
-</script></body></html>
+
+const charts = {};
+
+function makeChart(canvasId, metric) {
+  const ctx = document.getElementById(canvasId).getContext("2d");
+  const data = buildData("words", metric);
+  charts[canvasId] = new Chart(ctx, {
+    type: "line",
+    data: {
+      labels: data.map(d => d.N),
+      datasets: metric.lines.map(l => ({
+        label: l.label,
+        data: data.map(d => d[l.key + "_" + l.suffix] ?? null),
+        borderColor: l.color,
+        backgroundColor: l.color + "22",
+        borderWidth: l.width,
+        borderDash: l.dash,
+        pointRadius: 0,
+        pointHitRadius: 8,
+        tension: 0.2,
+        spanGaps: true,
+      })),
+    },
+    options: {
+      responsive: true,
+      interaction: { mode: "index", intersect: false },
+      plugins: {
+        legend: { display: true, labels: { color: "#bbb", font: { size: 11 }, boxWidth: 20, padding: 10 } },
+        tooltip: {
+          backgroundColor: "#1a1a2e",
+          borderColor: "#444",
+          borderWidth: 1,
+          titleColor: "#aaa",
+          bodyColor: "#ddd",
+          callbacks: {
+            title: (items) => {
+              const v = items[0].parsed.x;
+              if (v >= 1e6) return "N = " + (v/1e6).toFixed(1) + "M";
+              if (v >= 1e3) return "N = " + (v/1e3).toFixed(1) + "K";
+              return "N = " + v;
+            },
+            label: (item) => {
+              const v = item.parsed.y;
+              if (v == null) return null;
+              const s = v < 0.1 ? v.toFixed(3) : v < 10 ? v.toFixed(2) : v < 1000 ? v.toFixed(1) : v.toFixed(0);
+              return " " + item.dataset.label + ": " + s;
+            },
+          },
+        },
+      },
+      scales: {
+        x: {
+          type: "logarithmic",
+          ticks: { color: "#888", font: { size: 11 },
+            callback: v => v >= 1e6 ? (v/1e6)+"M" : v >= 1e3 ? (v/1e3)+"K" : v },
+          grid: { color: "#2a2a3e" },
+        },
+        y: {
+          type: "logarithmic",
+          ticks: { color: "#888", font: { size: 10 },
+            callback: v => v < 0.1 ? v.toFixed(2) : v < 10 ? v.toFixed(1) : v >= 1000 ? v.toFixed(0) : v.toFixed(1) },
+          grid: { color: "#2a2a3e" },
+        },
+      },
+    },
+  });
+  charts[canvasId]._metric = metric;
+}
+
+METRICS.forEach(m => makeChart("c_" + m.id, m));
+</script>
+</body>
+</html>

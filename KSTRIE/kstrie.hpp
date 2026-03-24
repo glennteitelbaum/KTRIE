@@ -103,8 +103,9 @@ public:
     // ------------------------------------------------------------------
     // const_iterator — live, bidirectional, parent-walk navigation.
     // Invalidated by any mutation (same as std::unordered_map).
-    // operator* returns references: key by const ref to cached key_v,
+    // operator* returns: key as string_view into iterator buffer,
     // value by const ref into the trie node.
+    // Move-only (fast_string is non-copyable).
     // ------------------------------------------------------------------
 
     class const_iterator {
@@ -112,37 +113,44 @@ public:
 
         uint64_t*   leaf_v       = nullptr;  // compact node (null = end)
         uint16_t    pos_v        = 0;        // slot index in L/F/O/values
-        std::string key_v;                   // cached reconstructed key
+        kstrie_detail::fast_string key_v;    // cached reconstructed key
         size_t      prefix_len_v = 0;        // key_v length before entry suffix
         impl_t*     impl_p       = nullptr;  // for --end() and root access
 
         // End sentinel
         explicit const_iterator(impl_t* impl) : impl_p(impl) {}
 
-        // Positioned
+        // Positioned: copies key into fast_string
         const_iterator(impl_t* impl, uint64_t* leaf, uint16_t pos,
-                       std::string key, size_t pfx_len)
-            : leaf_v(leaf), pos_v(pos), key_v(std::move(key)),
-              prefix_len_v(pfx_len), impl_p(impl) {}
+                       std::string_view key, size_t pfx_len)
+            : leaf_v(leaf), pos_v(pos), prefix_len_v(pfx_len), impl_p(impl) {
+            key_v.append(key.data(), key.size());
+        }
 
     public:
         using iterator_category = std::bidirectional_iterator_tag;
-        using value_type        = std::pair<const std::string, VALUE>;
+        using value_type        = std::pair<std::string_view, VALUE>;
         using difference_type   = std::ptrdiff_t;
-        using reference         = std::pair<const std::string&, const VALUE&>;
+        using reference         = std::pair<std::string_view, const VALUE&>;
 
         struct arrow_proxy {
-            std::pair<const std::string&, const VALUE&> p;
+            std::pair<std::string_view, const VALUE&> p;
             const auto* operator->() const noexcept { return &p; }
         };
         using pointer = arrow_proxy;
 
         const_iterator() = default;
 
+        // Move only — copy deleted
+        const_iterator(const_iterator&&) = default;
+        const_iterator& operator=(const_iterator&&) = default;
+        const_iterator(const const_iterator&) = delete;
+        const_iterator& operator=(const const_iterator&) = delete;
+
         reference operator*() const {
             hdr_type h = hdr_type::from_node(leaf_v);
             const auto* vb = h.get_compact_slots(leaf_v);
-            return {key_v, *slots_type::load_value(vb, pos_v)};
+            return {std::string_view(key_v), *slots_type::load_value(vb, pos_v)};
         }
 
         arrow_proxy operator->() const { return {**this}; }
@@ -150,43 +158,26 @@ public:
         const_iterator& operator++() {
             hdr_type h = hdr_type::from_node(leaf_v);
             if (pos_v + 1 < h.count) {
-                // Hot path: advance within leaf
                 ++pos_v;
                 rebuild_suffix(h);
                 return *this;
             }
-            // Cold path: walk to next leaf
             walk(kstrie_detail::dir_t::FWD);
             return *this;
         }
 
-        const_iterator operator++(int) {
-            const_iterator tmp = *this;
-            ++*this;
-            return tmp;
-        }
-
         const_iterator& operator--() {
             if (!leaf_v) {
-                // --end(): walk to last entry
                 walk_to_edge(kstrie_detail::dir_t::BWD);
                 return *this;
             }
             if (pos_v > 0) {
-                // Hot path: retreat within leaf
                 --pos_v;
                 rebuild_suffix(hdr_type::from_node(leaf_v));
                 return *this;
             }
-            // Cold path: walk to prev leaf
             walk(kstrie_detail::dir_t::BWD);
             return *this;
-        }
-
-        const_iterator operator--(int) {
-            const_iterator tmp = *this;
-            --*this;
-            return tmp;
         }
 
         bool operator==(const const_iterator& o) const noexcept {
@@ -199,8 +190,17 @@ public:
         }
 
     private:
-        // Rebuild suffix portion of key_v from current leaf_v/pos_v.
-        // Header h is passed from caller to avoid redundant from_node.
+        // Append unmapped bytes to key_v: identity → memcpy, else per-byte
+        void append_key_unmapped(const uint8_t* data, uint32_t len) {
+            if constexpr (CHARMAP::IS_IDENTITY) {
+                key_v.append(data, len);
+            } else {
+                for (uint32_t i = 0; i < len; ++i)
+                    key_v.push_back(static_cast<char>(
+                        CHARMAP::from_index(data[i])));
+            }
+        }
+
         void rebuild_suffix(const hdr_type& h) {
             const auto& pfx = compact_type::get_prefix(leaf_v, h);
             const uint8_t* base = reinterpret_cast<const uint8_t*>(leaf_v)
@@ -213,39 +213,32 @@ public:
                              + pfx.skip_data_off + h.skip_bytes();
 
             uint8_t klen = L[pos_v];
-            key_v.resize(prefix_len_v);
-            key_v.reserve(prefix_len_v + klen);
+            key_v.truncate(prefix_len_v);
             if (klen > 0) [[likely]] {
                 key_v.push_back(static_cast<char>(
                     CHARMAP::from_index(F[pos_v])));
                 if (klen > 1) [[likely]]
-                    append_unmapped(key_v, B + O[pos_v], klen - 1);
+                    append_key_unmapped(B + O[pos_v], klen - 1);
             }
         }
 
-        // Walk to edge (min/max) of entire trie. Used by --end().
         void walk_to_edge(kstrie_detail::dir_t dir) {
             uint64_t* root = impl_p->get_root_mut();
-            if (root == compact_type::sentinel()) return;  // stay at end
+            if (root == compact_type::sentinel()) return;
             key_v.clear();
             edge_entry(root, dir);
         }
 
-        // Descend from node to min (FWD) or max (BWD) entry.
-        // Appends skip bytes and dispatch bytes to key_v.
-        // Sets leaf_v, pos_v, prefix_len_v.
         void edge_entry(uint64_t* node, kstrie_detail::dir_t dir) {
             using dir_t = kstrie_detail::dir_t;
             while (true) {
                 hdr_type h = hdr_type::from_node(node);
 
-                // Append skip bytes
                 if (h.has_skip()) [[unlikely]]
-                    append_unmapped(key_v, hdr_type::get_skip(node, h),
-                                   h.skip_bytes());
+                    append_key_unmapped(hdr_type::get_skip(node, h),
+                                       h.skip_bytes());
 
                 if (h.is_compact()) {
-                    // Reached leaf
                     leaf_v = node;
                     if (dir == dir_t::FWD)
                         pos_v = 0;
@@ -256,25 +249,21 @@ public:
                     return;
                 }
 
-                // Bitmask: descend to min or max child
                 if (dir == dir_t::FWD) {
-                    // EOS first (sorts before all bytes)
                     uint64_t* eos = bitmask_type::eos_child(node, h);
                     if (eos != compact_type::sentinel()) {
                         node = eos;
                         continue;
                     }
-                    // First byte child
                     const auto* bm = bitmask_type::get_bitmap(node, h);
                     int idx = bm->find_next_set(0);
-                    if (idx < 0) [[unlikely]] return;  // empty bitmask
+                    if (idx < 0) [[unlikely]] return;
                     uint8_t byte = static_cast<uint8_t>(idx);
                     key_v.push_back(static_cast<char>(
                         CHARMAP::from_index(byte)));
                     int slot = bm->count_below(byte);
                     node = bitmask_type::child_by_slot(node, h, slot);
                 } else {
-                    // Last byte child first
                     const auto* bm = bitmask_type::get_bitmap(node, h);
                     constexpr int MAX_BIT =
                         static_cast<int>(CHARMAP::BITMAP_WORDS) * 64 - 1;
@@ -287,18 +276,16 @@ public:
                         node = bitmask_type::child_by_slot(node, h, slot);
                         continue;
                     }
-                    // No byte children — try EOS
                     uint64_t* eos = bitmask_type::eos_child(node, h);
                     if (eos != compact_type::sentinel()) {
                         node = eos;
                         continue;
                     }
-                    return;  // empty
+                    return;
                 }
             }
         }
 
-        // Walk from current leaf to next/prev entry via parent chain.
         void walk(kstrie_detail::dir_t dir) {
             using dir_t = kstrie_detail::dir_t;
             using namespace kstrie_detail;
@@ -307,7 +294,6 @@ public:
             uint64_t* parent = compact_type::get_parent(leaf_v);
             uint16_t byte = compact_type::get_parent_byte(leaf_v, lh);
 
-            // Depth in key_v at the dispatch byte level above current leaf
             size_t depth = prefix_len_v - lh.skip_bytes();
 
             while (byte != ROOT_PARENT_BYTE) {
@@ -315,19 +301,16 @@ public:
                 const auto* bm = bitmask_type::get_bitmap(parent, ph);
 
                 if (dir == dir_t::FWD) {
-                    // Forward: find next sibling after current byte
                     int sib = -1;
                     if (byte == EOS_PARENT_BYTE) {
-                        // Was at EOS → first byte child
                         sib = bm->find_next_set(0);
                     } else {
                         sib = bm->find_next_set(byte + 1);
                     }
                     if (sib >= 0) {
-                        // Found — truncate key, append new byte, descend
                         if (byte != EOS_PARENT_BYTE)
-                            depth -= 1;  // remove old dispatch byte
-                        key_v.resize(depth);
+                            depth -= 1;
+                        key_v.truncate(depth);
                         uint8_t sb = static_cast<uint8_t>(sib);
                         key_v.push_back(static_cast<char>(
                             CHARMAP::from_index(sb)));
@@ -337,12 +320,11 @@ public:
                         return;
                     }
                 } else {
-                    // Backward: find prev sibling before current byte
                     if (byte != EOS_PARENT_BYTE) {
                         int sib = bm->find_prev_set(byte - 1);
                         if (sib >= 0) {
-                            depth -= 1;  // remove old dispatch byte
-                            key_v.resize(depth);
+                            depth -= 1;
+                            key_v.truncate(depth);
                             uint8_t sb = static_cast<uint8_t>(sib);
                             key_v.push_back(static_cast<char>(
                                 CHARMAP::from_index(sb)));
@@ -351,27 +333,23 @@ public:
                                 parent, ph, slot), dir_t::BWD);
                             return;
                         }
-                        // No prev byte child — check EOS
                         uint64_t* eos = bitmask_type::eos_child(parent, ph);
                         if (eos != compact_type::sentinel()) {
-                            depth -= 1;  // remove old dispatch byte
-                            key_v.resize(depth);
+                            depth -= 1;
+                            key_v.truncate(depth);
                             edge_entry(eos, dir_t::BWD);
                             return;
                         }
                     }
-                    // Was at EOS or no EOS → go up
                 }
 
-                // Go up one level
                 if (byte != EOS_PARENT_BYTE)
-                    depth -= 1;  // remove dispatch byte
-                depth -= ph.skip_bytes();  // remove parent's skip
+                    depth -= 1;
+                depth -= ph.skip_bytes();
                 byte = bitmask_type::get_parent_byte(parent);
                 parent = bitmask_type::get_parent(parent);
             }
 
-            // Reached root — no more entries
             leaf_v = nullptr;
             pos_v  = 0;
         }

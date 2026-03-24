@@ -2083,7 +2083,7 @@ private:
                 // Recurse into existing EOS node
                 uint64_t old_et = node_tail_total(eos);
                 insert_result r = insert_node(eos, key_data, key_len, value, consumed, mode);
-                if (r.node != eos)
+                if (r.node != eos || r.outcome == insert_outcome::INSERTED)
                     bitmask_type::set_eos_child(node, h, r.node);
                 node[NODE_TOTAL_TAIL] += node_tail_total(r.node) - old_et;
                 if (r.outcome == insert_outcome::INSERTED)
@@ -2115,7 +2115,11 @@ private:
             uint64_t old_ct = node_tail_total(child);
             insert_result r = insert_node(child, key_data, key_len, value,
                                            consumed, mode);
-            if (r.node != child)
+            // Always re-store + re-link on INSERTED: the recursive call may
+            // free the old child and the allocator can reuse the same address
+            // for a completely different node, making r.node == child even
+            // though the node was rebuilt. Address comparison is unsound.
+            if (r.node != child || r.outcome == insert_outcome::INSERTED)
                 bitmask_type::replace_child(node, h, byte, r.node);
             node[NODE_TOTAL_TAIL] += node_tail_total(r.node) - old_ct;
             if (r.outcome == insert_outcome::INSERTED)

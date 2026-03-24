@@ -835,6 +835,91 @@ get_mapped(const uint8_t* raw, uint32_t len,
     }
 }
 
+// ============================================================================
+// fast_string — inline key buffer for iterator, one cache line
+// ============================================================================
+
+struct fast_string {
+    static constexpr size_t FAST_SSO_PAGE = 64;
+    static constexpr size_t FAST_SSO_MAX  = FAST_SSO_PAGE
+                                          - 2 * sizeof(size_t)
+                                          - sizeof(char*);
+
+    size_t len_v  = 0;
+    char*  buf_pv = buf_v;
+    size_t cap_v  = FAST_SSO_MAX;
+    char   buf_v[FAST_SSO_MAX];
+
+    fast_string() noexcept = default;
+    ~fast_string() { if (buf_pv != buf_v) delete[] buf_pv; }
+
+    fast_string(const fast_string&) = delete;
+    fast_string& operator=(const fast_string&) = delete;
+
+    fast_string(fast_string&& o) noexcept
+        : len_v(o.len_v), cap_v(o.cap_v) {
+        if (o.buf_pv == o.buf_v) {
+            std::memcpy(buf_v, o.buf_v, o.len_v);
+            buf_pv = buf_v;
+        } else {
+            buf_pv = o.buf_pv;
+            o.buf_pv = o.buf_v;
+        }
+        o.len_v = 0;
+    }
+
+    fast_string& operator=(fast_string&& o) noexcept {
+        if (this == &o) return *this;
+        if (buf_pv != buf_v) delete[] buf_pv;
+        len_v = o.len_v;
+        cap_v = o.cap_v;
+        if (o.buf_pv == o.buf_v) {
+            std::memcpy(buf_v, o.buf_v, o.len_v);
+            buf_pv = buf_v;
+        } else {
+            buf_pv = o.buf_pv;
+            o.buf_pv = o.buf_v;
+        }
+        o.len_v = 0;
+        return *this;
+    }
+
+    [[nodiscard]] size_t size() const noexcept { return len_v; }
+
+    [[nodiscard]] operator std::string_view() const noexcept {
+        return {buf_pv, len_v};
+    }
+
+    void clear() noexcept { len_v = 0; }
+    void truncate(size_t n) noexcept { len_v = n; }
+
+    void push_back(char c) {
+        if (len_v >= cap_v) [[unlikely]] grow(len_v + 1);
+        buf_pv[len_v++] = c;
+    }
+
+    void append(const char* d, size_t n) {
+        if (len_v + n > cap_v) [[unlikely]] grow(len_v + n);
+        std::memcpy(buf_pv + len_v, d, n);
+        len_v += n;
+    }
+
+    void append(const uint8_t* d, size_t n) {
+        append(reinterpret_cast<const char*>(d), n);
+    }
+
+private:
+    void grow(size_t needed) {
+        size_t new_cap = ((needed + FAST_SSO_PAGE - 1) / FAST_SSO_PAGE)
+                       * FAST_SSO_PAGE;
+        char* nb = new char[new_cap];
+        std::memcpy(nb, buf_pv, len_v);
+        if (buf_pv != buf_v) [[unlikely]] delete[] buf_pv;
+        buf_pv = nb;
+        cap_v = new_cap;
+    }
+};
+
 } // namespace gteitelbaum::kstrie_detail
 
 #endif // KSTRIE_SUPPORT_HPP
