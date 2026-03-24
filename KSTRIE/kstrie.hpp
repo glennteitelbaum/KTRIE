@@ -253,7 +253,7 @@ public:
 
         ~const_iterator() { delete[] key_buf; }
 
-        // Move only — steals buffer pointer
+        // Move — steals buffer pointer
         const_iterator(const_iterator&& o) noexcept
             : leaf_v(o.leaf_v), pos_v(o.pos_v),
               key_buf(o.key_buf), key_len(o.key_len), key_cap(o.key_cap),
@@ -277,8 +277,34 @@ public:
             return *this;
         }
 
-        const_iterator(const const_iterator&) = delete;
-        const_iterator& operator=(const const_iterator&) = delete;
+        // Copy — deep-copies buffer only if key was built
+        const_iterator(const const_iterator& o)
+            : leaf_v(o.leaf_v), pos_v(o.pos_v),
+              key_len(o.key_len), key_cap(o.key_cap),
+              impl_p(o.impl_p) {
+            if (o.key_buf) {
+                key_buf = new char[o.key_cap];
+                std::memcpy(key_buf, o.key_buf, o.key_len);
+            }
+        }
+
+        const_iterator& operator=(const const_iterator& o) {
+            if (this != &o) {
+                delete[] key_buf;
+                leaf_v  = o.leaf_v;
+                pos_v   = o.pos_v;
+                key_len = o.key_len;
+                key_cap = o.key_cap;
+                impl_p  = o.impl_p;
+                if (o.key_buf) {
+                    key_buf = new char[o.key_cap];
+                    std::memcpy(key_buf, o.key_buf, o.key_len);
+                } else {
+                    key_buf = nullptr;
+                }
+            }
+            return *this;
+        }
 
         reference operator*() const {
             hdr_type h = hdr_type::from_node(leaf_v);
