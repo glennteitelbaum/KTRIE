@@ -504,6 +504,7 @@ public:
         return s;
     }
 
+    // O(N): walks all nodes to sum allocations. Not for hot paths.
     size_t memory_usage() const noexcept { return debug_stats().total_bytes; }
 
     struct root_info_t {

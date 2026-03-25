@@ -696,22 +696,26 @@ struct kntrie_ops {
 
         size_t i = 0;
 
-        // Loop 1: byte ranges < new_top_byte — old slices directly
+        // Helper: build child from a contiguous byte group in the old array.
+        auto build_byte_group = [&](size_t start, size_t count, uint8_t ti) {
+            uint64_t child_ik = (ik & safe_prefix_mask<BITS>())
+                | leaf_ops_t<BITS>::template suffix_to_u64<BITS>(old_keys[start]);
+            indices[n_children] = ti;
+            CNK* cs = narrow(old_keys + start, count);
+            child_ptrs[n_children] = build_node_from_arrays_tagged<BITS - CHAR_BIT>(
+                cs, const_cast<VST*>(old_vals + start),
+                count, child_ik, bld, scratch);
+            n_children++;
+        };
+
+        // Loop 1: byte ranges < new_top_byte
         while (i < old_count) {
             uint8_t ti = static_cast<uint8_t>(old_keys[i] >> (NK_BITS - CHAR_BIT));
             if (ti >= new_top_byte) break;
             size_t start = i;
             while (i < old_count &&
                    static_cast<uint8_t>(old_keys[i] >> (NK_BITS - CHAR_BIT)) == ti) ++i;
-            size_t cc = i - start;
-            uint64_t child_ik = (ik & safe_prefix_mask<BITS>())
-                | leaf_ops_t<BITS>::template suffix_to_u64<BITS>(old_keys[start]);
-            indices[n_children] = ti;
-            CNK* cs = narrow(old_keys + start, cc);
-            child_ptrs[n_children] = build_node_from_arrays_tagged<BITS - CHAR_BIT>(
-                cs, const_cast<VST*>(old_vals + start),
-                cc, child_ik, bld, scratch);
-            n_children++;
+            build_byte_group(start, i - start, ti);
         }
 
         // Loop 2: byte == new_top_byte — merge old range + new entry
@@ -739,21 +743,13 @@ struct kntrie_ops {
             n_children++;
         }
 
-        // Loop 3: byte ranges > new_top_byte — old slices directly
+        // Loop 3: byte ranges > new_top_byte
         while (i < old_count) {
             uint8_t ti = static_cast<uint8_t>(old_keys[i] >> (NK_BITS - CHAR_BIT));
             size_t start = i;
             while (i < old_count &&
                    static_cast<uint8_t>(old_keys[i] >> (NK_BITS - CHAR_BIT)) == ti) ++i;
-            size_t cc = i - start;
-            uint64_t child_ik = (ik & safe_prefix_mask<BITS>())
-                | leaf_ops_t<BITS>::template suffix_to_u64<BITS>(old_keys[start]);
-            indices[n_children] = ti;
-            CNK* cs = narrow(old_keys + start, cc);
-            child_ptrs[n_children] = build_node_from_arrays_tagged<BITS - CHAR_BIT>(
-                cs, const_cast<VST*>(old_vals + start),
-                cc, child_ik, bld, scratch);
-            n_children++;
+            build_byte_group(start, i - start, ti);
         }
 
         size_t total = old_count + 1;
