@@ -762,22 +762,58 @@ struct kntrie_ops {
         uint8_t ps = hdr->skip();
 
         uint64_t child_tagged;
-        // Always create bitmask — even for n_children==1.
-        // Collapsing single-child bitmask into skip is unsafe when
-        // build_node_from_arrays_tagged applied internal skip compression:
-        // adding more skip bytes can push remaining bits below the leaf
-        // body's NK type, causing type confusion.
-        child_tagged = tag_bitmask(
-            BO::make_bitmask(indices, child_ptrs, n_children, bld, total));
+        bool collapsed = false;
 
-        // Propagate old skip to bitmask
-        if (ps > 0) {
-            constexpr int BS = byte_shift<BITS>();
-            uint8_t pfx_bytes[MAX_SKIP];
-            for (uint8_t pi = 0; pi < ps; ++pi)
-                pfx_bytes[pi] = static_cast<uint8_t>(ik >> (BS + CHAR_BIT * (ps - pi)));
-            uint64_t* bm_node = bm_to_node(child_tagged);
-            child_tagged = BO::wrap_in_chain(bm_node, pfx_bytes, ps, bld);
+        if (n_children == 1) {
+            // Try to collapse single-child bitmask into skip.
+            // The dispatch byte becomes a skip byte, plus propagate old skip.
+            constexpr uint8_t SKIP_BUDGET = static_cast<uint8_t>(MAX_SKIP);
+            uint8_t add_skip = ps + 1;  // old skip + dispatch byte
+
+            child_tagged = child_ptrs[0];
+
+            if (child_tagged & LEAF_BIT) {
+                uint64_t* leaf = untag_leaf_mut(child_tagged);
+                uint8_t child_skip = get_header(leaf)->skip();
+                uint8_t total_skip = child_skip + add_skip;
+
+                uint16_t child_shift = get_depth(leaf).shift;
+                uint16_t new_shift   = make_depth<BITS>(total_skip).shift;
+
+                if (total_skip <= SKIP_BUDGET && new_shift == child_shift) {
+                    leaf = prepend_skip<BITS>(leaf, add_skip, ik, bld);
+                    child_tagged = tag_leaf(leaf);
+                    collapsed = true;
+                }
+            } else {
+                if (add_skip <= SKIP_BUDGET) {
+                    constexpr int BS = byte_shift<BITS>();
+                    uint8_t pfx_bytes[MAX_SKIP + 1];
+                    for (uint8_t pi = 0; pi < ps; ++pi)
+                        pfx_bytes[pi] = static_cast<uint8_t>(
+                            ik >> (BS + CHAR_BIT * (ps - pi)));
+                    pfx_bytes[ps] = indices[0];
+                    uint64_t* bm_node = bm_to_node(child_tagged);
+                    child_tagged = BO::wrap_in_chain(
+                        bm_node, pfx_bytes, add_skip, bld);
+                    collapsed = true;
+                }
+            }
+        }
+
+        if (!collapsed) {
+            child_tagged = tag_bitmask(
+                BO::make_bitmask(indices, child_ptrs, n_children, bld, total));
+
+            if (ps > 0) {
+                constexpr int BS = byte_shift<BITS>();
+                uint8_t pfx_bytes[MAX_SKIP];
+                for (uint8_t pi = 0; pi < ps; ++pi)
+                    pfx_bytes[pi] = static_cast<uint8_t>(
+                        ik >> (BS + CHAR_BIT * (ps - pi)));
+                uint64_t* bm_node = bm_to_node(child_tagged);
+                child_tagged = BO::wrap_in_chain(bm_node, pfx_bytes, ps, bld);
+            }
         }
 
         bld.dealloc_node(const_cast<uint64_t*>(node), CO::alloc_total_u64(hdr->alloc_u64()));
