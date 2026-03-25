@@ -296,7 +296,7 @@ inline void set_bm_parent(uint64_t* node, uint64_t* parent) noexcept {
 }
 
 // Dynamic header size: only for bitmask nodes (always 1 u64).
-// Leaves always use LEAF_HEADER_U64 = 7.
+// Leaves always use LEAF_HEADER_U64 = 6.
 
 // ==========================================================================
 // Leaf result types

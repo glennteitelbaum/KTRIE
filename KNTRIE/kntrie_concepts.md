@@ -27,9 +27,7 @@ This document describes the KNTRIE, the integer-key instantiation of the KTRIE. 
   - [4.4 find next / find prev](#44-find-next--find-prev)
   - [4.5 insert](#45-insert)
   - [4.6 erase](#46-erase)
-  - [4.7 modify](#47-modify)
-  - [4.8 erase_when](#48-erase_when)
-  - [4.9 Iterators are Snapshots](#49-iterators-are-snapshots)
+  - [4.7 Iterators are Live](#47-iterators-are-live)
 - [5 Performance](#5-performance)
   - [5.1 std::map](#51-stdmap)
   - [5.2 std::unordered_map](#52-stdunordered_map)
@@ -75,29 +73,33 @@ The compile-time booleans that drive all internal dispatch:
 
 ```
 IS_TRIVIAL     = trivially_copyable && sizeof <= 8            // A: true    B: true   C: false
+IS_INLINE      = IS_TRIVIAL                                   // A: true    B: true   C: false
 HAS_DESTRUCTOR = !IS_TRIVIAL                                  // A: false   B: false  C: true
 IS_BOOL        = std::is_same_v<VALUE, bool>                  // A: false   B: true   C: false
+slot_type      = IS_INLINE ? VALUE : VALUE*                   // A: VALUE   B: bool   C: VALUE*
 ```
+
+`IS_INLINE` determines whether the slot stores the value directly or a heap pointer. All value-access code dispatches on `if constexpr (VT::IS_INLINE)` to handle the indirection correctly — including iterators, `operator[]`, `at()`, and `value_ref_at`.
 
 **Abstraction responsibilities:**
 
-**kntrie** (API boundary): Normalizes both key and value before forwarding to `kntrie_impl`. Calls `store(val, alloc)` to get a `slot_type` on insert. Calls `as_ptr(slot)` to get `const VALUE*` on find/iterator deref. Never destroys directly.
+**kntrie** (API boundary): Normalizes both key and value before forwarding to `kntrie_impl`. For iterator dereference, `deref_val(val_v)` handles the inline/pointer indirection: for trivial types, `val_v` points directly at the value; for non-trivial types (Category C), `val_v` points at a `VALUE*` slot, and `deref_val` dereferences through it. Never destroys directly.
 
-**_impl** (node ownership): Owns all destruction. On erase: the ops layer handles slot destruction within the node. On clear/destructor: walks all nodes via `remove_subtree`, calls `destroy` on every occupied slot if `HAS_DESTRUCTOR`, then frees node memory.
+**_impl** (node ownership): Owns all destruction. On erase: the ops layer handles slot destruction within the node. On clear/destructor: walks all nodes via `remove_subtree`, calls `destroy` on every occupied slot if `HAS_DESTRUCTOR`, then frees node memory. Maintains parent pointer linkage on all structural changes.
 
-**_ops** (node operations): Handles insert/erase logic, split/coalesce decisions, and skip prefix management. Uses `sizeof(slot_type)` for node size calculations.
+**_ops** (node operations): Handles insert/erase logic, split/coalesce decisions, skip prefix management, and parent pointer relinking. Uses `sizeof(slot_type)` for node size calculations. `convert_to_bitmask_tagged` narrows keys by one byte (`<BITS - CHAR_BIT>`) when creating children, since the dispatch byte is consumed by the bitmask.
 
-**_compact / _bitmask** (node internals): No-overlap operations (realloc, new node builds) use `std::copy`. In-place shifts (insert gap, erase compaction) use `std::move` / `std::move_backward`. Insert and destroy dispatch on `if constexpr (IS_TRIVIAL)` (A/B) vs `if constexpr (!IS_TRIVIAL)` (C).
+**_compact / _bitmask** (node internals): Use `std::memcpy` / `std::memmove` for slot movement (valid for both trivial types and pointer slots). Insert and destroy dispatch on `if constexpr (VT::IS_INLINE)` vs `if constexpr (VT::HAS_DESTRUCTOR)` for value indirection.
 
 ### 1.3 Memory Hysteresis
 
-Node allocations snap to size classes. For allocations up to 128 u64s, a fixed bin table provides 12 size classes: {4, 6, 8, 10, 14, 18, 26, 34, 48, 69, 98, 128} u64s, growing by approximately 1.25–1.5× per step. Beyond 128 u64s, sizes snap to power-of-two with midpoints. The worst-case overhead is about 50%.
+Node allocations snap to size classes. A fixed table provides 26 size classes from 4 to 16,384 u64s, growing by approximately 1.5× per step: {4, 6, 8, 10, 14, 18, 26, 34, 48, 69, 98, 128, 194, 256, 386, 512, ...16384}. Beyond the table, exact sizes are used. The worst-case overhead is about 50%.
 
 This padding creates room for in-place insert and erase operations. A node allocated at 48 u64s when it only needs 34 has extra slots that can absorb mutations without reallocation.
 
 **Shrink hysteresis.** A node only shrinks when its allocated size exceeds the size class for `2× the needed size`. This prevents oscillation: if a node sits near a boundary, alternating insert/erase won't trigger repeated realloc cycles.
 
-**Compact leaves** use power-of-two slot counts via `std::bit_ceil`, with a minimum of 2 slots. Compact leaves track the physical slot count and the entry count as separate values. The physical count may exceed the entry count due to dup padding (extra slots filled with copies of adjacent entries to enable in-place mutation).
+**Compact leaves** use size-class allocation. The entry count is exact — no padding slots. Size-class rounding provides headroom for in-place inserts when the allocation has spare capacity.
 
 ## 2 Node Concepts
 
@@ -126,21 +128,23 @@ All allocated nodes in the kntrie share a common 8-byte header (`node_header_t`)
 | `depth_v` | 16 | Key position encoding: bytes consumed, skip count, suffix width |
 | `entries_v` | 16 | Entry/child count |
 | `alloc_u64_v` | 16 | Allocation size in u64s |
-| `total_slots_v` | 16 | Physical slot count; power-of-two allocation means this may exceed entries_v. Unused by internal nodes |
+| `parent_byte_v` | 16 | Dispatch byte in parent bitmask node (ROOT_BYTE = 256 for root) |
 
 `entries_v` answers "how many items are directly stored here": for leaf nodes, it is the count of stored key/value pairs; for internal nodes, it is the count of child pointers.
 
 `alloc_u64_v` records how many u64s were allocated. This may exceed what the entry count requires due to size-class rounding.
 
-Internal nodes use only `node_header_t` (1 u64). Leaf nodes additionally carry 5 function pointers and a u64 prefix field beyond the common header, occupying 7 u64s total.
+`parent_byte_v` records which byte value this node was dispatched on in its parent bitmask. This enables upward traversal for live iterators: given any node, the parent byte tells the parent which child slot this node occupies, allowing sibling search without re-descending from the root. The root node uses the sentinel value `ROOT_BYTE = 256` (out of the 0–255 byte range) to terminate the upward walk.
+
+Internal nodes use a 2-u64 header: `node[0]` is `node_header_t`, `node[1]` is the parent bitmask node pointer. Leaf nodes carry 6 u64s total: header, 3 function pointers, a prefix field, and a parent pointer.
 
 ### 2.3 Tagged Pointers
 
 Every child pointer in the kntrie is a tagged `uint64_t` encoding both address and type:
 
 - **Leaf tag:** The sign bit (bit 63) is set. `LEAF_BIT` = `1ULL << 63`. The node pointer is recovered by XORing with `LEAF_BIT`. Tagged leaf pointers point to `node[0]` (the header).
-- **Internal tag:** No sign bit. The pointer targets `node[1]`, one u64 past the header, allowing the pointer to be used directly without adjustment, saving one addition on every descent.
-- **Not-found tag:** Bit 62 is set alongside `LEAF_BIT`. `NOT_FOUND_BIT` = `1ULL << 62`. The sentinel value `LEAF_BIT | NOT_FOUND_BIT` is a pure bit pattern with no backing allocation. User-space pointers never have bit 62 set (addresses are < 2^47 on x86-64), so the tag is unambiguous.
+- **Internal tag:** No sign bit. The pointer targets `node[HEADER_U64]` (= `node[2]`, two u64s past the start — past the header and parent pointer), pointing directly at the bitmap. This allows the bitmap to be used immediately on every descent without adjustment, saving one addition per level.
+- **Not-found tag:** Bit 62 is set alongside `LEAF_BIT`. `NOT_FOUND_BIT` = `1ULL << 62`. The sentinel value `LEAF_BIT | NOT_FOUND_BIT` is a pure bit pattern with no backing allocation. User-space pointers never have bits 62–63 set: on 4-level paging (48-bit VA), canonical addresses are < 2^47; on 5-level paging (57-bit VA, LA57), canonical addresses are < 2^56. In both cases bits 62–63 are zero for user-space, so the tags are unambiguous. The tag is cast through `std::uintptr_t` (not `reinterpret_cast`) to avoid pointer provenance UB, with a `static_assert` that the low tag bits don't collide with alignment.
 
 The `while (!(ptr & LEAF_BIT))` loop tests the sign bit with a single instruction to distinguish internal nodes from leaves. After the loop exits, `ptr & NOT_FOUND_BIT` distinguishes a miss (sentinel) from a hit (real leaf) with a single bit test — no pointer dereference, no indirect call.
 
@@ -150,17 +154,16 @@ Descendants are not stored in the node header. Internal nodes store a `uint64_t`
 
 ### 2.5 Leaf Contract
 
-**Leaf header (7 u64 = 56 bytes).** All leaf node types share an extended header layout:
+**Leaf header (6 u64 = 48 bytes).** All leaf node types share an extended header layout:
 
 | Position | Content |
 |----------|---------|
 | `node[0]` | `node_header_t` (8 bytes) |
 | `node[1]` | `find_fn` — exact match function pointer |
-| `node[2]` | `find_next_fn` — iterator next function pointer |
-| `node[3]` | `find_prev_fn` — iterator prev function pointer |
-| `node[4]` | `find_first_fn` — descend to minimum entry |
-| `node[5]` | `find_last_fn` — descend to maximum entry |
-| `node[6]` | `prefix` — left-aligned key prefix (u64) |
+| `node[2]` | `adv_fn` — directional advance function pointer (next/prev via `dir_t`) |
+| `node[3]` | `edge_fn` — edge entry function pointer (first/last via `dir_t`) |
+| `node[4]` | `prefix` — left-aligned key prefix (u64) |
+| `node[5]` | `parent_ptr` — pointer to parent bitmask node (for upward iteration) |
 
 **`depth_t`** is a 16-bit packed bitfield that encodes the leaf's position within the trie:
 
@@ -170,20 +173,22 @@ depth_t {
                     // redundant (is_skip ≡ skip ≠ 0) but deliberate —
                     // testing one bit avoids reading the skip count on the hot read path
     skip     : 3    // number of prefix bytes to compare (0-6)
-    consumed : 6    // total bits resolved above this leaf (0-56, always a multiple of 8)
+    consumed : 6    // total bits resolved above this leaf (0 to KEY_BITS − 8, always a multiple of 8)
     shift    : 6    // = 64 - suffix_width_bits, only {0, 32, 48, 56} for suffix types u64/u32/u16/u8
 }
 ```
 
-The `suffix()` function extracts the leaf's suffix from a root-level internal key in two instructions: `(ik << consumed) >> shift`. This compiles to `shlx` + `shrx`, two single-cycle operations with no data-dependent branches.
+The `suffix()` function extracts the leaf's suffix from a root-level internal key in two instructions: `(ik << consumed) >> shift`. On x86-64-v3 and above (BMI2), this compiles to `shlx` + `shrx`, two single-cycle operations with no data-dependent branches.
 
 For internal nodes, only `skip` from `depth_t` is meaningful: it records how many single-child dispatch levels were folded into this node's own allocation rather than given their own separate nodes.
 
-The 5 function pointers are set at leaf construction time based on the leaf's suffix type (u8/u16/u32/u64) and whether the leaf has a skip prefix. This enables type-erased dispatch: the find loop doesn't need to know the leaf type. It loads the function pointer and calls it. The cost is 40 bytes of per-leaf overhead for the function pointers, but the benefit is a single indirect call instead of template recursion on the hot path.
+The 3 function pointers are set at leaf construction time based on the leaf's suffix type (u8/u16/u32/u64) and whether the leaf has a skip prefix. This enables type-erased dispatch: the find loop doesn't need to know the leaf type. It loads the function pointer and calls it. The `adv_fn` combines next and prev into a single function with a `dir_t` parameter; similarly `edge_fn` combines first and last. The cost is 24 bytes of per-leaf overhead for the function pointers, but the benefit is a single indirect call instead of template recursion on the hot path.
+
+**Parent pointer** at `node[5]` stores a raw pointer to the parent bitmask node. Combined with `parent_byte_v` in the header, this enables upward traversal: the iterator walks from leaf to parent, finds the next sibling in the parent's bitmap, and descends to the sibling's edge entry. This replaces the previous snapshot-based iterator design that re-descended from the root on every advance.
 
 **Skip prefix** is how the kntrie implements PREFIX compression. When a subtree's keys all share common bytes at a given depth, those bytes are captured in the node rather than creating separate BRANCH levels.
 
-Leaves store skip information in two places: the `skip` count in `depth_t`, and the `prefix` u64 at `node[6]`. The prefix holds the left-aligned key prefix, the common bytes shared by all entries in this leaf. During lookup, the prefix is checked using `skip_eq(prefix, depth, ik)`, which XORs the key against the prefix within the skip mask region. If any byte differs, the key isn't in this subtree, an early exit. For iteration, `skip_cmp()` provides directional comparison (-1, 0, +1).
+Leaves store skip information in two places: the `skip` count in `depth_t`, and the `prefix` u64 at `node[4]`. The prefix holds the left-aligned key prefix, the common bytes shared by all entries in this leaf. During lookup, the prefix is checked using `skip_eq(prefix, depth, ik)`, which XORs the key against the prefix within the skip mask region. If any byte differs, the key isn't in this subtree, an early exit. For iteration, `skip_cmp()` provides directional comparison (-1, 0, +1).
 
 The skip mechanism described above applies to leaves. Internal node skip operates on the same `depth_t.skip` field but serves a different structural purpose.
 
@@ -199,7 +204,7 @@ The find loop's descent treats the sentinel like any leaf: `LEAF_BIT` is set, so
 while (!(ptr & LEAF_BIT))
     ptr = bm_child(ptr, byte);
 if (ptr & NOT_FOUND_BIT) [[unlikely]]
-    return nullptr;
+    return {};  // not-found entry
 // real leaf — untag and dispatch
 ```
 
@@ -212,10 +217,10 @@ Internal nodes implement the KTRIE's BRANCH concept: 256-way fan-out dispatching
 **Layout:**
 
 ```
-[Header: 1 u64] [Bitmap: 4 u64] [Miss ptr: 1 u64] [Children: N u64] [Descendants: 1 u64]
+[Header: 1 u64] [Parent ptr: 1 u64] [Bitmap: 4 u64] [Miss ptr: 1 u64] [Children: N u64] [Descendants: 1 u64]
 ```
 
-The header is a single u64 `node_header_t`. The bitmap records which of the 256 possible byte values have children. The miss pointer at position 0 of the children area holds `SENTINEL_TAGGED` (`LEAF_BIT | NOT_FOUND_BIT`) for BRANCHLESS miss fallback: when a bitmap lookup misses (the target byte isn't present), the popcount returns index 0, which loads the sentinel tag value. The find loop sees `LEAF_BIT`, exits the descent, tests `NOT_FOUND_BIT`, and returns nullptr. No pointer dereference, no indirect call at the bitmap level. The N children are tagged u64 pointers, packed densely in bitmap order. The descendants counter at the end holds the exact total entry count for the subtree.
+The header is a single u64 `node_header_t`. The parent pointer at `node[1]` stores a raw pointer to the parent bitmask node (or null for the root), enabling upward iteration. The bitmap records which of the 256 possible byte values have children. The miss pointer at position 0 of the children area holds `SENTINEL_TAGGED` (`LEAF_BIT | NOT_FOUND_BIT`) for BRANCHLESS miss fallback: when a bitmap lookup misses (the target byte isn't present), the popcount returns index 0, which loads the sentinel tag value. The find loop sees `LEAF_BIT`, exits the descent, tests `NOT_FOUND_BIT`, and returns a not-found entry. No pointer dereference, no indirect call at the bitmap level. The N children are tagged u64 pointers, packed densely in bitmap order. The descendants counter at the end holds the exact total entry count for the subtree.
 
 **Child lookup** uses the bitmap modes described in section 2.1. On the find path, BRANCHLESS mode returns a 1-based index (hitting the sentinel on miss). On insert/erase, FAST_EXIT mode returns -1 on miss.
 
@@ -232,8 +237,9 @@ The find loop is:
 ```cpp
 while (!(ptr & LEAF_BIT))
     ptr = bm_child(ptr, byte_at_depth(shifted, depth++));
-if (ptr & NOT_FOUND_BIT) return nullptr;
-return get_find_fn<VALUE>(untag_leaf(ptr))(node, ik);
+if (ptr & NOT_FOUND_BIT) return {};  // not-found entry
+auto* leaf = untag_leaf(ptr);
+return get_find_fn(leaf)(leaf, ik);
 ```
 
 Each iteration tests the sign bit (leaf vs internal), extracts the byte at the current depth, does a BRANCHLESS bitmap lookup, and follows the child pointer. When the sign bit indicates a leaf, the loop exits. A `NOT_FOUND_BIT` test catches misses without a pointer dereference. Hits dispatch through the leaf's function pointer. The entire descent is a tight loop with no type switches or template recursion.
@@ -249,7 +255,7 @@ The bitmap has exactly one bit set, encoding which byte value this level dispatc
 An internal node with skip=2 and N real children looks like:
 
 ```
-[Header: 1 u64]
+[Header: 1 u64] [Parent ptr: 1 u64]
 [Embed_0: bitmap(4) miss_ptr(1) child_ptr(1)]
 [Embed_1: bitmap(4) miss_ptr(1) child_ptr(1)]
 [Final bitmap: 4 u64] [Miss ptr: 1 u64] [Children: N u64] [Descendants: 1 u64]
@@ -266,26 +272,14 @@ The threshold is COMPACT_MAX = 4096. This value is intentionally large. The kntr
 **Layout:**
 
 ```
-[Header: 7 u64] [Sorted keys (aligned to 8)] [Values (aligned to 8)]
+[Header: 6 u64] [Sorted keys (aligned to 8)] [Values (aligned to 8)]
 ```
 
-The 7-u64 leaf header carries the `node_header_t`, 5 function pointers, and the prefix. The keys and values arrays have `total_slots` physical entries, where `total_slots` is a power of 2 ≥ `entries`. The extra slots are filled with duplicates of adjacent entries, padding that enables in-place mutation and guarantees power-of-2 array sizes for the branchless binary search (see [KTRIE Concepts](../ktrie_concepts.md), section 1.1).
+The 6-u64 leaf header carries the `node_header_t`, 3 function pointers, the prefix, and the parent pointer. The keys and values arrays have exactly `entries` elements — no padding slots. Allocation uses size-class rounding, so the physical allocation may exceed the logical size, providing room for in-place inserts when the next size class has spare capacity.
 
-**Search** uses the branchless binary search described in [KTRIE Concepts](../ktrie_concepts.md). The power-of-2 slot count guarantees the required input constraint. Every compact leaf has `total_slots = bit_ceil(entries)` physical slots, padded with dup entries to fill the boundary. The minimum of 2 slots ensures count enters the loop as ≥ 2, so at least one comparison always executes.
+**Search** uses branchless binary search via `adaptive_search`. Non-power-of-two entry counts are handled by an initial adjustment step that conditionally advances the base pointer, reducing to a power-of-two count for the main loop. The main loop compiles to a tight sequence of conditional moves with no data-dependent branches.
 
-**Dup-slot padding strategy.** The power-of-two allocation means a compact leaf almost always has more physical slots than entries. Rather than leaving the extra space unused, the leaf fills it with **dup slots**, copies of adjacent real entries. These dups serve two purposes:
-
-1. **In-place insert.** When a new key arrives and dups exist, one dup is consumed: the nearest dup to the insertion point is found, the intervening entries are shifted by one position to close the gap, and the new key is written into the freed slot. No reallocation.
-
-2. **In-place erase.** When a key is erased, its slot is overwritten with a copy of the neighboring key's value. This converts a real entry into a dup in O(1). No memmove of the remaining array.
-
-The seeding pass distributes dups evenly among real entries. When dups are available, the nearest dup to any insertion point is at most about `entries / dups` positions away, bounding the memmove cost. When no dups remain (`entries = total_slots`), the leaf must grow before inserting.
-
-The dup count is never stored; it's always derived: `total_slots - entries`. This keeps the header clean and avoids any possibility of the stored count drifting from reality.
-
-**Dup scan strategy.** Finding the nearest dup depends on the total slot count. For small leaves (≤ `DUP_SCAN_MAX` = 64 total slots), a simple linear scan from the insertion point finds the nearest dup. For larger leaves, a banded search expands outward from the insertion point in alternating right-then-left bands, sized to match the expected dup spacing.
-
-For heap-allocated values (`VALUE*`), all dup slots in a run share the same pointer as their neighbor. Destroy must be called exactly once per unique key, not once per physical slot. The `destroy_and_dealloc` operation skips adjacent duplicate keys to avoid double-free.
+For heap-allocated values (Category C), each slot stores a `VALUE*` pointer. The `value_traits` abstraction handles the indirection: `store()` allocates and constructs the value, `destroy()` destructs and deallocates, and all value-access code dereferences through the pointer via `if constexpr (VT::IS_INLINE)` dispatch.
 
 ### 3.4 Bitmap256 Leaves
 
@@ -294,18 +288,18 @@ When the remaining suffix at a given depth is exactly 8 bits (the suffix type is
 **Layout:**
 
 ```
-[Header: 7 u64] [Presence bitmap: 4 u64] [Values: N slots]
+[Header: 6 u64] [Presence bitmap: 4 u64] [Values: N slots]
 ```
 
-The header is the same 7-u64 leaf header as compact leaves. The presence bitmap records which of the 256 suffix values exist. Values are packed densely in bitmap order.
+The header is the same 6-u64 leaf header as compact leaves. The presence bitmap records which of the 256 suffix values exist. Values are packed densely in bitmap order.
 
 For `VALUE=bool` (category B), the values are stored as a second 256-bit bitmap rather than individual slots:
 
 ```
-[Header: 7 u64] [Presence bitmap: 4 u64] [Value bitmap: 4 u64]
+[Header: 6 u64] [Presence bitmap: 4 u64] [Value bitmap: 4 u64]
 ```
 
-This gives the tightest possible representation: 15 u64s total for up to 256 boolean key/value pairs.
+This gives the tightest possible representation: 14 u64s total for up to 256 boolean key/value pairs.
 
 Lookup is a single `find_slot<FAST_EXIT>`: check the bit in the presence bitmap, compute the popcount for the slot index, return the value. This compiles to roughly 10 instructions with no data-dependent branches.
 
@@ -341,11 +335,12 @@ The kntrie tracks position within the key using a **byte depth**, the number of 
 ```cpp
 while (!(ptr & LEAF_BIT))
     ptr = bm_child(ptr, byte_at_depth(shifted, depth++));
-if (ptr & NOT_FOUND_BIT) return nullptr;
-return get_find_fn<VALUE>(untag_leaf(ptr))(node, ik);
+if (ptr & NOT_FOUND_BIT) return {};  // not-found entry
+auto* leaf = untag_leaf(ptr);
+return get_find_fn(leaf)(leaf, ik);
 ```
 
-Misses resolve at the `NOT_FOUND_BIT` test — a single bit check, no pointer dereference. Hits dispatch through the leaf's function pointer. Because there are only a few possible function pointer targets (one per suffix type × skip), modern CPUs predict indirect calls well. The cost is 5 u64s of storage per leaf for the function pointers, but the benefit is a single indirect call instead of template recursion on the hot path.
+Misses resolve at the `NOT_FOUND_BIT` test — a single bit check, no pointer dereference. Hits dispatch through the leaf's function pointer. Because there are only a few possible function pointer targets (one per suffix type × skip), modern CPUs predict indirect calls well. The cost is 3 u64s of storage per leaf for the function pointers, but the benefit is a single indirect call instead of template recursion on the hot path.
 
 For write operations (insert, erase), `depth_switch` dispatches at the point where template-specialized code is needed: node splitting, coalescing, and suffix extraction. These operations are not on the hot read path, so the switch overhead is negligible compared to allocation and memmove costs.
 
@@ -355,7 +350,7 @@ Find is the hot path. It begins with a root prefix check: `(ik ^ root_prefix_v) 
 
 Otherwise, `find_loop` executes a tight iteration through internal nodes. Each iteration tests the sign bit (leaf vs internal), extracts the byte at the current depth from the shifted key, performs a BRANCHLESS bitmap lookup, and follows the child pointer. No type switches, no template recursion, no conditional branches at the bitmap level.
 
-When the loop exits (sign bit set), a `NOT_FOUND_BIT` test resolves misses immediately — a single bit check returning nullptr with no pointer dereference and no indirect call. For hits, the pointer is untagged, the leaf's `find_fn` is loaded, and called. The function pointer dispatches to the correct suffix type and skip variant. For compact leaves, this performs a branchless binary search over the sorted suffix array. For bitmap256 leaves, it checks a single bit in the presence bitmap and computes a popcount for the slot index.
+When the loop exits (sign bit set), a `NOT_FOUND_BIT` test resolves misses immediately — a single bit check returning a not-found entry with no pointer dereference and no indirect call. For hits, the pointer is untagged, the leaf's `find_fn` is loaded, and called. The function pointer dispatches to the correct suffix type and skip variant. For compact leaves, this performs a branchless binary search over the sorted suffix array. For bitmap256 leaves, it checks a single bit in the presence bitmap and computes a popcount for the slot index.
 
 The entire find path from root to result is typically 2-4 pointer dereferences plus one branchless search for collections below ~1M entries, with no heap allocation and no locking.
 
@@ -366,24 +361,35 @@ The entire find path from root to result is typically 2-4 pointer dereferences p
 ```cpp
 while (!(ptr & LEAF_BIT))
     ptr = bm_first_child(ptr);   // or bm_last_child
-return get_find_first<VALUE>(untag_leaf(ptr))(node);
+auto* leaf = untag_leaf(ptr);
+return get_find_edge(leaf)(leaf, dir_t::FWD);  // or BWD
 ```
 
-`bm_first_child` returns the child at the lowest set bit in the bitmap; `bm_last_child` returns the highest. At the leaf, the `find_first_fn` / `find_last_fn` function pointer returns the minimum or maximum entry within that leaf. These are used by `begin()`, `rbegin()`, and the walk-back phase of iteration.
+`bm_first_child` returns the child at the lowest set bit in the bitmap; `bm_last_child` returns the highest. At the leaf, the `edge_fn` function pointer returns the minimum or maximum entry within that leaf, selected by the `dir_t` parameter. These are used by `begin()`, `rbegin()`, and the walk-back phase of iteration.
 
 ### 4.4 find next / find prev
 
-Iterator advancement is the second-hottest path after find. `iter_next_loop` finds the smallest key strictly greater than the current key. It operates in three phases:
+Iterator advancement is the second-hottest path after find. The iterator stores a leaf pointer, position within the leaf, and cached key/value data. Advancement operates in two phases:
 
-**Hot path: descent with path recording.** The loop descends through internal nodes, saving each node pointer in a fixed-size stack (`path[8]`, matching the maximum K=8 byte depth for u64 keys). At each level it uses `bm_child_exact` (FAST_EXIT mode) to find the exact child for the current key byte. If the child doesn't exist, it jumps directly to walk-back.
+**Hot path: within-leaf advance.** The iterator calls `adv_fn` on the current leaf. For compact leaves, this increments (or decrements) the position index and reads the next key/value pair — O(1) with no search. For bitmap256 leaves, it scans the presence bitmap for the next set bit. In the common case (many entries in the same leaf), iteration resolves here without leaving the leaf. This is where the wide-node design pays off: most iterator increments are a single function call.
 
-**Leaf probe.** At the leaf, it calls `find_next_fn`. For compact leaves, this performs a branchless binary search for the next key after the current one. For bitmap256 leaves, it scans the presence bitmap for the next set bit. The function pointer handles both cases transparently. In the common case (many entries in the same leaf), iteration resolves here without any walk-back. This is where the wide-node design pays off: most iterator increments never leave the leaf.
+**Cold path: parent-pointer walk.** If the leaf is exhausted (the current position is at the leaf's boundary), the iterator walks upward via parent pointers. Each leaf stores a parent pointer (`node[5]`) and a parent byte (`parent_byte_v` in the header). The walk reads the parent's bitmap and searches for the next sibling after the current byte:
 
-**Cold path: walk-back.** If the leaf is exhausted (the current key is the leaf's maximum), the loop walks backward through the saved path. At each level it calls `bm_next_sibling` to find the next child after the current byte in the bitmap. When a sibling is found, `descend_first_loop` walks to its minimum entry.
+```cpp
+while (byte != ROOT_BYTE) {
+    auto [sib, found] = bm_next_sibling(parent_bm, byte);
+    if (found) return descend_edge_loop(sib, dir);
+    byte = parent->parent_byte();
+    parent = bm_parent(parent);
+}
+return end();
+```
 
-`iter_prev_loop` is the mirror image: it calls `find_prev_fn` at the leaf, and walks back using `bm_prev_sibling` followed by `descend_last_loop`.
+When a sibling is found, `descend_edge_loop` follows the first (or last) child at each level down to a leaf. The edge function pointer at the leaf returns the minimum (or maximum) entry.
 
-The root prefix is checked before entering the loop. If the iterator's key falls outside the root prefix, the prefix comparison determines whether to descend to the first entry (key is below the prefix) or return end (key is above).
+The cost of the cold path is one upward step per exhausted level, plus one downward descent to the sibling's edge. In practice, most walks go up one level — the average leaf has many entries, and exhaust events are rare relative to within-leaf advances.
+
+The previous design used a snapshot iterator that re-descended from the root on every advance. The parent-pointer design reduces iteration from O(K) per advance to O(1) amortized, at the cost of 8 bytes per node for the parent pointer. For kntrie's typical tree shapes (few internal nodes, many entries per leaf), the parent pointer is a negligible memory cost for a large iteration speedup.
 
 ### 4.5 insert
 
@@ -393,11 +399,13 @@ The core insertion is `insert_node`, a runtime-recursive function that descends 
 
 **Sentinel.** An empty child slot. Creates a new single-entry compact leaf via `make_single_leaf` and returns it as the new child pointer.
 
-**Leaf.** Walks any skip prefix bytes, comparing against the key. If a prefix byte diverges, `split_on_prefix` creates a new internal node at the divergence point with two children: the existing leaf and a new leaf for the inserted key. If the prefix matches, `leaf_insert` handles the body: for compact leaves, `compact_ops::insert` inserts into the sorted array (consuming a dup slot if available, or reallocating). For bitmap256 leaves, `bitmap_insert` sets the presence bit. If the compact leaf exceeds COMPACT_MAX, `convert_to_bitmask_tagged` splits it into an internal node with up to 256 children.
+**Leaf.** Walks any skip prefix bytes, comparing against the key. If a prefix byte diverges, `split_on_prefix` creates a new internal node at the divergence point with two children: the existing leaf and a new leaf for the inserted key. If the prefix matches, `leaf_insert` handles the body: for compact leaves, `compact_ops::insert` inserts into the sorted array (shifting entries via memmove, or reallocating if the allocation is full). For bitmap256 leaves, `bitmap_insert` sets the presence bit. If the compact leaf exceeds COMPACT_MAX, `convert_to_bitmask_tagged` splits it into an internal node with up to 256 children, narrowing the key suffix by one byte for the child depth.
 
 **Internal node.** Walks any embed chain skip bytes. If a skip byte diverges, `split_skip_at` creates a new internal node at the divergence point. Otherwise, performs a bitmap lookup for the key byte. If the child doesn't exist, creates a new leaf and adds it to the bitmap via `add_child`. If it exists, recurses into the child. On unwind, updates the child pointer if it changed (due to reallocation or splitting) and increments the descendant count.
 
 After insert returns to the root level, `normalize_root` checks whether the root can absorb additional prefix bytes (if the root is an internal node with uniform first-byte children).
+
+All child creation and child pointer updates maintain parent linkage: when a new leaf or bitmask node is created as a child of a bitmask node, the child's parent pointer and parent byte are set to reference the parent. When a child pointer changes (due to reallocation or splitting), the new child's parent linkage is updated. This invariant ensures that every node in the tree can walk upward to the root at any time, enabling live iterator advancement.
 
 ### 4.6 erase
 
@@ -411,41 +419,31 @@ The interesting logic is on the unwind path:
 
 **Root normalization.** After erase returns to the root level, `normalize_root` absorbs single-child internal roots and `coalesce_bm_to_leaf` handles the case where the total size has dropped below COMPACT_MAX.
 
-For compact leaves, erase converts the removed entry into a dup by overwriting it with a copy of its neighbor, an O(1) operation with no memmove. For bitmap256 leaves, erase clears the presence bit and shifts subsequent values down by one slot, an O(N) operation bounded by 256. If the leaf becomes empty, it is deallocated and the parent removes the child from its bitmap.
+For compact leaves, erase removes the entry and shifts subsequent entries down via memmove, an O(N) operation bounded by the leaf's entry count. For bitmap256 leaves, erase clears the presence bit and shifts subsequent values down by one slot, an O(N) operation bounded by 256. If the leaf becomes empty, it is deallocated and the parent removes the child from its bitmap.
 
-### 4.7 modify
+### 4.7 Iterators are Live
 
-`modify(key, fn)` applies a user function to the value at `key` in place, without find+erase+insert overhead. The function signature is `void fn(VALUE&)` — it receives a mutable reference to the stored value.
+The kntrie iterator is a live view: it stores a pointer to the current leaf node, a position within that leaf, a cached internal key, and a cached value pointer. Dereferencing returns a `pair<const KEY, VALUE&>` where the value reference points directly into the node's storage. Modifications to the value through the reference are immediately visible.
 
-The implementation walks the trie once to locate the key. At the compact leaf, it calls `fn` directly on the slot. For inline types (Category A), this modifies the u64 slot in place. For heap types (Category C), all dup slots share the same pointer, so the modification is visible through all of them. No reallocation, no value copy, no destroy/reconstruct cycle.
-
-A two-argument overload `modify(key, fn, default_val)` handles the miss case: if the key exists, apply `fn`; if not, insert `default_val` as-is (fn is not called on the default). This enables atomic accumulator patterns:
+**Iterator state:**
 
 ```cpp
-trie.modify(key, [](int64_t& v) { v++; }, 1);  // increment or insert 1
+uint64_t* leaf_v;   // current leaf node
+uint16_t  pos_v;    // slot index within leaf
+uint16_t  bit_v;    // byte value (bitmap leaves), unused for compact
+uint64_t  ik_v;     // full internal key (cached)
+void*     val_v;    // pointer into leaf's value array (cached)
 ```
 
-For inline types, the public API handles the VALUE/slot_type mismatch (e.g. `int64_t` stored as `uint64_t`) via `reinterpret_cast<VALUE&>(slot)` in a wrapper lambda. This is transparent to the caller.
+The cached `ik_v` and `val_v` are set by the leaf's function pointers (`find_fn`, `adv_fn`, `edge_fn`) and avoid re-reading the leaf on dereference. For non-trivial value types (Category C), the slot stores a `VALUE*` pointer; `operator*` dereferences through the pointer via `if constexpr (VT::IS_INLINE)` dispatch.
 
-### 4.8 erase_when
+**Advancement** is O(1) amortized. The hot path calls `adv_fn` to move within the same leaf — a position increment with no search. The cold path walks upward via parent pointers and descends to the sibling's edge entry (see section 4.4).
 
-`erase_when(key, fn)` is a single-walk conditional erase. The function signature is `bool fn(const VALUE&)`. The trie descends to the key, tests the predicate on the value, and erases only if the predicate returns true. Returns `true` if the entry was erased, `false` if not found or predicate failed.
+**End sentinel.** The `end()` method constructs a lightweight sentinel iterator with `leaf_v = nullptr`. The sentinel's `val_v` field stashes a pointer to the impl object, enabling `--end()` to find the last entry via `descend_last_loop`.
 
-The implementation reuses the full erase unwind path (descendant check, single-child collapse, root normalization) but gates entry into that path on the predicate result at the leaf level. If the predicate fails, the trie is untouched — no wasted unwind work.
+**Invalidation.** Like `std::unordered_map`, iterators are invalidated by any mutation (insert, erase, assign). The live design means that structural changes — node reallocation, splits, coalescing — can move or deallocate the node an iterator points to. Callers must not hold iterators across mutations to other keys.
 
-This avoids the find-then-erase two-walk pattern and the risk of the key being modified or erased between the two walks.
-
-### 4.9 Iterators are Snapshots
-
-The kntrie iterator is a snapshot: it stores a copy of the current key and value, not a pointer into the trie. Each `operator++` and `operator--` re-descends the trie from the root via `iter_next` or `iter_prev` to find the next or previous entry.
-
-This design has two consequences:
-
-**Stability.** Iterators are never invalidated by mutations to other keys. Inserting or erasing a different key does not affect an existing iterator's stored key/value pair. The iterator will find the correct next/previous entry on its next advance, even if the trie's internal structure has been reorganized by splits, coalesces, or reallocation.
-
-**No auto-update.** If the value at the iterator's current key is modified (via `insert_or_assign`, `assign`, or `modify`), the iterator still holds the old value. Dereferencing returns the snapshot, not the live data. To see the updated value, the caller must re-find the key or advance and return. This is a deliberate trade-off: `modify` changes the live data in place, but existing iterators see the value as it was when they were created or last advanced. The snapshot design means `modify` never invalidates iterators — it just doesn't update them.
-
-The cost of this approach is that each iterator increment performs a full root-to-leaf descent rather than following a stored pointer. In practice this cost is low: most increments resolve within a single compact leaf (the hot path in `find_next_fn`), and the descent through internal nodes is the same tight loop as find. The benefit is simplicity: no iterator bookkeeping, no invalidation tracking, and no dangling pointer risk.
+**API.** The iterator API matches `std::map`: `(*it).second` returns a mutable value reference; `it->first` / `it->second` work via arrow proxy. There is no `value()` method — the API uses `(*it).second` consistently.
 
 ## 5 Performance
 
@@ -453,17 +451,17 @@ Performance graphs and detailed benchmark results are maintained separately and 
 
 ### 5.1 std::map
 
-`std::map` is a red-black tree, a self-balancing binary search tree where each node contains one key-value pair, two child pointers, a parent pointer, and a color bit. On most implementations, each node is a separate heap allocation of about 72 bytes (key + value + 3 pointers + color + alignment padding).
+`std::map` is a red-black tree, a self-balancing binary search tree where each node contains one key-value pair, two child pointers, a parent pointer, and a color bit. On most implementations (libstdc++/gcc), each node is a separate heap allocation of 64 bytes (key + value + 3 pointers + color + alignment padding).
 
 Red-black trees guarantee O(log N) worst-case lookup, insert, and erase through rotation and recoloring rules that keep the tree approximately balanced. The maximum height is 2 × log₂(N), so a million-entry map requires at most ~40 comparisons per lookup.
 
 The fundamental costs are:
 
-**Memory.** Every entry costs ~72 bytes regardless of key or value size. A million uint64_t→uint64_t entries consume ~72 MB in `std::map` versus ~16 MB in kntrie, a ~4.5× difference.
+**Memory.** Every entry costs 64 bytes regardless of key or value size. A million uint64_t→uint64_t entries consume 64 MB in `std::map` versus 8–12 MB in kntrie (structural, depending on key distribution), a 5–8× difference.
 
 **Cache behavior.** Each comparison in a tree traversal follows a pointer to a separately-allocated node. These nodes are scattered across the heap in allocation order, not key order. At scale, nearly every level of the tree is a cache miss. A 20-level traversal in a million-entry map touches 20 random cache lines.
 
-**Sorted iteration.** The red-black tree provides naturally sorted in-order traversal, with O(1) amortized iterator increment and decrement. kntrie provides the same sorted iteration, but resolves most increments within a single compact leaf via branchless binary search rather than following parent/child pointers.
+**Sorted iteration.** The red-black tree provides naturally sorted in-order traversal, with O(1) amortized iterator increment and decrement. kntrie provides the same sorted iteration with O(1) amortized cost: most increments resolve within the current leaf via a position increment (no search), with parent-pointer walk-back only when a leaf is exhausted.
 
 ### 5.2 std::unordered_map
 
