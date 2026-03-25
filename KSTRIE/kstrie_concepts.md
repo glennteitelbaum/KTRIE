@@ -23,10 +23,8 @@ This document describes the KSTRIE, the variable-length string key instantiation
   - [4.3 erase](#43-erase)
   - [4.4 find first / find last](#44-find-first--find-last)
   - [4.5 find next / find prev](#45-find-next--find-prev)
-  - [4.6 modify](#46-modify)
-  - [4.7 erase_when](#47-erase_when)
-  - [4.8 Prefix Operations](#48-prefix-operations)
-  - [4.9 Iterators are Snapshots](#49-iterators-are-snapshots)
+  - [4.6 Prefix Operations](#46-prefix-operations)
+  - [4.7 Iterators are Live](#47-iterators-are-live)
 - [5 Performance](#5-performance)
   - [5.1 std::map](#51-stdmap)
   - [5.2 std::unordered_map](#52-stdunordered_map)
@@ -170,10 +168,16 @@ Compact nodes carry an additional prefix structure beyond the common header, sto
 |-------|---------|
 | `cap` | Capacity: maximum number of entries before reallocation |
 | `keysuffix_used` | Bytes currently used in the keysuffix region |
+| `skip_data_off` | Byte offset from node start to skip prefix bytes |
+| `parent_byte` | Dispatch byte in parent bitmask (ROOT_PARENT_BYTE = 256 for root, EOS_PARENT_BYTE = 257 for EOS children) |
 
 `cap` determines the size of the parallel arrays (L, F, O) and the value region. It is derived from the allocation size: given the total allocation in u64s, `cap` is the largest entry count that fits within the allocation.
 
 `keysuffix_used` tracks how many bytes of the keysuffix region are occupied. When `keysuffix_used` would exceed the available space (determined by the gap between the offset array and the value slots), the node must either shuffle slots forward, grow, or split.
+
+`parent_byte` enables upward traversal for live iterators. Combined with the parent pointer at `node[2]`, an iterator can walk from any compact leaf to the root by reading the parent byte at each level and searching the parent's bitmap for the next sibling.
+
+A third u64 at `node[2]` stores the **parent pointer** — a raw pointer to the parent bitmask node (null for the root). This enables O(1) amortized iterator advancement via upward walk when a leaf is exhausted.
 
 ## 3 Nodes
 
@@ -182,12 +186,12 @@ Compact nodes carry an additional prefix structure beyond the common header, sto
 The sentinel concept is described in [KTRIE Concepts](../ktrie_concepts.md). The KSTRIE sentinel is a static compact node with zero entries:
 
 ```cpp
-static inline constinit uint64_t sentinel_data_[3] = {};
+static inline constinit uint64_t sentinel_data_[4] = {};
 ```
 
-Three u64s of zeros. The header reads as a compact node with `count = 0`, `flags = 0`, `skip = 0`. Any operation that reaches the sentinel finds nothing: `find` returns nullptr, erase returns MISSING.
+Four u64s of zeros. The header reads as a compact node with `count = 0`, `flags = 0`, `skip = 0`. Any operation that reaches the sentinel finds nothing: `find` returns nullptr, erase returns MISSING.
 
-The sentinel is 3 u64s rather than 2 to ensure that any code reading the prefix region at `node[1]` accesses valid (zero) memory. Since it is static and never modified, it is shared across all kstrie instances of the same type.
+The sentinel is 4 u64s to ensure that code reading the prefix region at `node[1]` and the parent pointer at `node[2]` accesses valid (zero) memory. Since it is static and never modified, it is shared across all kstrie instances of the same type.
 
 The sentinel appears in two roles:
 
@@ -201,15 +205,17 @@ Compact nodes implement the KTRIE's SUFFIX concept: they store key-suffix/value 
 **Layout:**
 
 ```
-[Header: 2 u64]
-[L: cap bytes]          — suffix lengths
-[F: cap bytes]          — suffix first bytes
-[O: cap × offset_type]  — keysuffix offsets
-[keysuffix: variable]   — suffix tail bytes, contiguous
-[values: variable]      — value slots (inline, bitmap, or pointer)
+[Header: 1 u64]
+[ck_prefix: 1 u64]         — cap, keysuffix_used, skip_data_off, parent_byte
+[Parent ptr: 1 u64]        — pointer to parent bitmask node
+[L: cap bytes]              — suffix lengths
+[F: cap bytes]              — suffix first bytes
+[O: cap × offset_type]      — keysuffix offsets
+[keysuffix: variable]        — suffix tail bytes, contiguous
+[values: variable]           — value slots (inline, bitmap, or pointer)
 ```
 
-The header occupies 2 u64s: the common node header at `node[0]` and the compact prefix (cap, keysuffix_used) at `node[1]`. The remaining space is divided among five regions.
+The header occupies 3 u64s: the common node header at `node[0]`, the compact prefix (cap, keysuffix_used, skip_data_off, parent_byte) at `node[1]`, and the parent pointer at `node[2]`. The parallel arrays begin at `COMPACT_ARRAYS_OFF = 24` bytes from the node start.
 
 **L (lengths).** `L[i]` is the total suffix length for entry `i`: the first byte plus the tail. `L[i] = 0` means the entry has no suffix (it matched exactly at the dispatch point — an end-of-string entry). `L[i] = 1` means a single byte with no tail. `L[i] = k` means the suffix is `k` bytes: first byte `F[i]` followed by `k-1` tail bytes in the keysuffix region.
 
@@ -297,14 +303,16 @@ Bitmask nodes implement the KTRIE's BRANCH concept: 256-way fan-out dispatching 
 
 ```
 [Header: 1 u64]
-[Skip bytes: 0–254 bytes, padded to u64 alignment]
+[Parent ptr: 1 u64]          — pointer to parent bitmask node (null for root)
+[Total tail: 1 u64]          — byte-budget collapse estimate
 [Bitmap: 4 u64]
-[EOS child: 1 u64]
-[Child slots: N u64]
-[Total tail: 1 u64]
+[Sentinel: 1 u64]            — sentinel pointer for branchless miss
+[Child slots: N u64]         — dense child pointers in bitmap order
+[EOS child: 1 u64]           — end-of-string child (after children)
+[Skip bytes: 0–254, padded]  — prefix bytes shared by all entries
 ```
 
-The header is a single u64 `node_header_t` with `flags = FLAG_BITMASK`. Skip bytes (if any) follow the header, storing the prefix bytes shared by all entries in this subtree. The bitmap records which of the 256 possible byte values have children. The EOS (end-of-string) child is a pointer to a compact node holding entries whose keys end at this branch point — keys that have been fully consumed by the trie path and have no remaining bytes to dispatch on. The N child slots are u64 pointers packed densely in bitmap order. The total tail counter at the end holds a byte-budget estimate for collapse decisions.
+The header is a single u64 `node_header_t` with `flags = FLAG_BITMASK`. The parent pointer at `node[1]` enables upward iteration. For bitmask nodes, the parent byte is stored in the header's `slots_off` field (unused by bitmask nodes for its normal purpose). The total tail at `node[2]` holds a byte-budget estimate for collapse decisions. The bitmap records which of the 256 possible byte values have children. The sentinel at the start of the child area provides the branchless miss target. The N child slots are u64 pointers packed densely in bitmap order. The EOS (end-of-string) child follows the children — a pointer to a compact node holding entries whose keys end at this branch point. Skip bytes (if any) are stored at the end of the allocation, padded to u64 alignment.
 
 #### 3.3.1 EOS (End of String)
 
@@ -354,7 +362,7 @@ When the kstrie is empty, the root is the sentinel. The first insert creates a c
 
 The root has no special prefix mechanism beyond what the root node itself provides. If the root is a bitmask node with a skip prefix, that prefix covers all entries in the trie.
 
-The kstrie object itself stores: the root pointer, the entry count (`size_`), and the memory allocator. The entry count is maintained by increment on insert and decrement on erase; it is not derived from the tree structure.
+The kstrie object itself stores: the root pointer, the entry count (`size_`), and the memory allocator. The entry count is maintained by increment on insert and decrement on erase; it is not derived from the tree structure. The root node's parent pointer is null and its parent byte is `ROOT_PARENT_BYTE` (256), terminating the upward walk for live iterators.
 
 ## 4 Operations
 
@@ -390,7 +398,7 @@ Insert begins by descending through the trie, mirroring find. At each bitmask no
 
 At a compact node, the entry is inserted according to the four cases described in section 3.2.3. If the insert would overflow `COMPACT_KEYSUFFIX_LIMIT`, the compact node is split into a bitmask subtree: entries are grouped by first byte, each group becomes a compact child, and the bitmask node dispatches among them.
 
-On the unwind path, each bitmask node's `total_tail` is updated with the delta from the operation.
+On the unwind path, each bitmask node's `total_tail` is updated with the delta from the operation. All child creation and child pointer updates maintain parent linkage: when a new compact leaf or bitmask node is created as a child, its parent pointer and parent byte are set to reference the parent. This invariant ensures upward traversal for live iterators.
 
 ### 4.3 erase
 
@@ -408,41 +416,37 @@ On the unwind path after a successful erase:
 
 ### 4.4 find first / find last
 
-`iter_first` and `iter_last` find the minimum and maximum entries in the trie. They descend through bitmask nodes following the first or last child at each level. At a bitmask node, the first child is found by scanning the bitmap for the lowest set bit; the last child by scanning for the highest set bit. The EOS child, if present, precedes all byte-dispatched children in key order (a zero-length suffix sorts before any non-empty suffix). At a compact node, the first entry is at position 0 and the last at position `count - 1`.
+`begin()` and `--end()` find the minimum and maximum entries in the trie. They descend through bitmask nodes following the first or last child at each level via `edge_entry`. At a bitmask node, the first child is found by checking the EOS child (which precedes all byte-dispatched children in key order), then scanning the bitmap for the lowest set bit. The last child is found by scanning for the highest set bit, then falling back to EOS if no bitmap children exist. At a compact node, the first entry is at position 0 and the last at position `count - 1`.
 
-These operations build the full key as they descend: each skip prefix and dispatch byte is appended to a string that, upon reaching the leaf, represents the complete key of the minimum or maximum entry.
+The iterator stores only `leaf_v` and `pos_v` after the descent — the key is not built during traversal. It is reconstructed lazily on first dereference via `ensure_key()`.
 
 ### 4.5 find next / find prev
 
-Iterator advancement is the second-hottest path after find. `iter_next` finds the smallest key strictly greater than the current key.
+Iterator advancement is the second-hottest path after find. The iterator stores a leaf pointer and position. Advancement operates in two phases:
 
-**Leaf probe.** The descent reaches the compact leaf containing (or nearest to) the current key. Within the leaf, the next entry after the current key's position is checked. If it exists and its full key is greater, the iterator advances within the leaf. This is the common case: most iterator increments resolve within a single leaf.
+**Hot path: within-leaf advance.** If `pos + 1 < count` in the current compact leaf, the iterator increments `pos_v` and invalidates the cached key. O(1), no search, no descent.
 
-**Walk-back.** If the current key is the leaf's last entry, the descent unwinds through bitmask nodes. At each level, the next sibling in the bitmap (the next set bit after the current byte) is found. If a sibling exists, `iter_first` descends to its minimum entry. If no sibling exists, the walk-back continues to the parent. The EOS child is considered before byte-dispatched children in the ordering.
+**Cold path: parent-pointer walk.** If the leaf is exhausted, the iterator walks upward via parent pointers and parent bytes. At each bitmask ancestor, it searches the bitmap for the next sibling after the current dispatch byte. The EOS child is considered before byte-dispatched children in the ordering: when walking forward from an EOS child, the first bitmap child is tried; when walking backward into a bitmask node, the EOS child is tried after all bitmap children are exhausted. When a sibling is found, the iterator descends to the sibling's minimum (or maximum) entry via `edge_entry`.
 
-`iter_prev` is the mirror image: it checks the previous entry in the leaf, then walks back through the bitmap looking for the previous sibling, and descends to the maximum entry of that sibling's subtree.
-
-The key is reconstructed during descent. Each skip prefix and dispatch byte is tracked so that the full key is available when the target entry is reached. The reconstruction cost is proportional to the key's byte length, not the trie depth, because skip bytes at each level contribute their full length to the output.
-
-### 4.6 modify
-
-`modify(key, fn)` applies a user function to the value at `key` in place. The function signature is `void fn(VALUE&)`. Returns true if the key existed and was modified, false if not found.
-
-The implementation uses an iterative descent (like `find_inner` but mutable) through bitmask nodes, then calls `fn` directly on the value slot in the compact leaf. For inline types (Category A), this modifies the slot in place. For heap types (Category C), the heap-allocated object is modified through its pointer. No reallocation, no value copy, no destroy/reconstruct cycle.
-
-A two-argument overload `modify(key, fn, default_val)` handles the miss case: if the key exists, apply `fn`; if not, insert `default_val` as-is (fn is not called on the default). This uses two walks on miss (modify miss + insert) because the iterative descent path cannot insert. The miss path is cold — the common case for accumulator patterns is that most keys already exist after the first pass.
-
-```cpp
-trie.modify(key, [](int64_t& v) { v++; }, 1);  // increment or insert 1
+```
+if pos+1 < count:
+    pos++                         // O(1) hot path
+else:
+    parent = leaf.parent
+    byte   = leaf.parent_byte
+    while byte != ROOT_PARENT_BYTE:
+        sib = bitmap.find_next_set(byte + 1)
+        if sib found:
+            descend to first entry in child[sib]
+            return
+        byte = parent.parent_byte
+        parent = parent.parent
+    → end
 ```
 
-### 4.7 erase_when
+Key reconstruction is lazy. The iterator does not maintain the key during traversal. When `operator*()` is called, `ensure_key()` walks from leaf to root via parent pointers, prepending skip bytes and dispatch bytes at each level. The key is cached in a heap buffer (`key_buf`) and reused until the iterator advances, at which point it is invalidated. Value-only iteration (accessing only `.second`) has zero key overhead.
 
-`erase_when(key, fn)` is a single-walk conditional erase. The function signature is `bool fn(const VALUE&)`. The trie descends recursively to the key, tests the predicate on the value at the compact leaf, and only proceeds with the erase if the predicate returns true. Returns `true` if erased, `false` if not found or predicate failed.
-
-The implementation reuses the full erase unwind path (total_tail fixup, empty check, collapse check) but gates entry into that path on the predicate result at the leaf level. If the predicate fails, the trie is untouched — no wasted unwind work.
-
-### 4.8 Prefix Operations
+### 4.6 Prefix Operations
 
 The kstrie provides six prefix operations that exploit the trie structure for efficient subtree access. All share a recursive descent that matches prefix bytes through skip comparisons and bitmask dispatch, landing at one of three outcomes: SUBTREE (entire node matches), COMPACT_FILTERED (prefix lands mid-compact-leaf, partial entries match), or NO_MATCH.
 
@@ -464,17 +468,29 @@ The kstrie provides six prefix operations that exploit the trie structure for ef
 
 `prefix_split(pfx)` extracts matching entries into a new kstrie, removing them from the source. A fused single-walk operation: for SUBTREE, the subtree pointer is stolen from the source (detach, not clone) and the stolen root gets the prefix prepended via `reskip_with_prefix`. For COMPACT_FILTERED, a single pass separates entries — matching raw_slots transfer ownership to the new node (no value copy, no destroy), non-matching raw_slots go to the rebuilt source node. The old node memory is freed once. The source's unwind path is identical to `prefix_erase`. O(1) at bitmask boundaries for the steal itself, plus O(subtree_nodes) for `count_subtree`.
 
-### 4.9 Iterators are Snapshots
+### 4.7 Iterators are Live
 
-The kstrie iterator is a snapshot: it stores a copy of the current key (as `std::string`) and a copy of the current value, not a pointer into the trie. Each `operator++` and `operator--` re-descends the trie from the root via `iter_next` or `iter_prev` to find the next or previous entry.
+The kstrie iterator is a live view: it stores a pointer to the current compact leaf node and a position within that leaf. Dereferencing returns a `pair<lazy_key, const VALUE&>` where the value reference points directly into the node's value slot storage.
 
-This design has two consequences:
+**Iterator state:**
 
-**Stability.** Iterators are never invalidated by mutations to other keys. Inserting or erasing a different key does not affect an existing iterator's stored key/value pair. The iterator will find the correct next/previous entry on its next advance, even if the trie's internal structure has been reorganized by splits, collapses, or reallocation.
+```
+uint64_t*  leaf_v   // current compact leaf (null = end)
+uint16_t   pos_v    // slot index within leaf
+impl_t*    impl_p   // pointer to trie impl (for walk_to_edge on --end())
+char*      key_buf  // lazily-built key buffer (null until ensure_key)
+size_t     key_len  // cached key length
+```
 
-**No auto-update.** If the value at the iterator's current key is modified (via `insert_or_assign` or `modify`), the iterator still holds the old value. Dereferencing returns the snapshot, not the live data. To see the updated value, the caller must re-find the key or advance and return. This is a deliberate trade-off: `modify` changes the live data in place, but existing iterators see the value as it was when they were created or last advanced.
+**Lazy key reconstruction.** The iterator does not maintain the key during traversal. `operator*()` returns a `lazy_key` proxy that defers key construction until the key is actually accessed (comparison, conversion to `std::string`). On first access, `ensure_key()` walks from the leaf to the root via parent pointers, prepending skip bytes and dispatch bytes at each level into a `fast_string` buffer. The buffer is cached in `key_buf` and reused until the iterator advances, at which point it is invalidated. Value-only iteration (accessing only `.second`) has zero key overhead.
 
-The cost of this approach is that each iterator increment performs a full root-to-leaf descent rather than following a stored pointer. In practice this cost is low: most increments resolve within a single compact leaf, and the descent through bitmask nodes is the same tight loop as find. The benefit is simplicity: no iterator bookkeeping, no invalidation tracking, and no dangling pointer risk.
+**Advancement** is O(1) amortized. The hot path increments `pos_v` within the same leaf. The cold path walks upward via parent pointers and descends to the sibling's edge entry (see section 4.5).
+
+**End sentinel.** The `end()` iterator has `leaf_v = nullptr`. It is constructed on each `end()` call. `--end()` calls `walk_to_edge(BWD)` to find the last entry.
+
+**Invalidation.** Iterators are invalidated by any mutation to the trie (insert, erase, insert_or_assign). This is more restrictive than `std::map` (which preserves iterators on insert and erase of other keys) or `std::unordered_map` (which preserves iterators on erase of other elements and on non-rehashing inserts). The reason: kstrie mutations can structurally reorganize distant parts of the tree — compact node splits, bitmask collapses, node reallocation, and keysuffix region shuffling can move or deallocate the node an iterator points to, even when the mutated key is in a different subtree. Callers must not hold iterators across any mutation.
+
+**API.** `(*it).first` returns a `lazy_key` proxy that converts to `std::string` on demand and supports comparison operators against `std::string_view`. `(*it).second` returns a `const VALUE&` pointing directly into the compact leaf's value slot. There is no mutable value access through the iterator.
 
 ## 5 Performance
 
@@ -492,7 +508,7 @@ The fundamental costs are:
 
 **Cache behavior.** Each comparison in a tree traversal follows a pointer to a separately-allocated node. These nodes are scattered across the heap in allocation order, not key order. At scale, nearly every level of the tree is a cache miss. Each comparison also accesses the key string, which may be on a separate cache line from the node itself.
 
-**Sorted iteration.** The red-black tree provides naturally sorted in-order traversal, with O(1) amortized iterator increment and decrement. The kstrie provides the same sorted iteration, but resolves most increments within a single compact leaf rather than following parent/child pointers.
+**Sorted iteration.** The red-black tree provides naturally sorted in-order traversal, with O(1) amortized iterator increment and decrement. The kstrie provides the same sorted iteration with O(1) amortized cost: most increments resolve within the current compact leaf via a position increment (no search), with parent-pointer walk-back only when a leaf is exhausted.
 
 ### 5.2 std::unordered_map
 
