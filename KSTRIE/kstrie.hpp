@@ -28,10 +28,10 @@ namespace kstrie_traits {
 // Thread safety: kstrie is not thread-safe. Concurrent reads are safe.
 // Concurrent read+write or write+write requires external synchronization.
 //
-// IMPORTANT: Iterators are snapshots. operator*() returns a copy of the
-// key/value pair, not a reference into the trie. Modifications via
-// insert_or_assign do not update existing iterators. Each ++/--
-// re-descends from the root.
+// IMPORTANT: Iterators are live — leaf_v/pos_v point into the trie.
+// operator*() returns {lazy_key, const VALUE&}, not a copy.
+// Invalidated by any modification to the trie (more restrictive than
+// std::map — structural reorganization can affect distant subtrees).
 // ============================================================================
 
 template <typename VALUE,

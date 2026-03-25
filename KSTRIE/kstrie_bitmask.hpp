@@ -19,7 +19,7 @@ struct kstrie_bitmask {
 
     // ------------------------------------------------------------------
     // Layout:
-    //   [header 8B][desc 8B][bitmap BU*8B][SENTINEL ptr 8B]
+    //   [header 8B][parent_ptr 8B][total_tail 8B][bitmap BU*8B][SENTINEL ptr 8B]
     //   [child_ptrs Nc*8B][eos_ptr 8B][skip bytes padded to 8B]
     // ------------------------------------------------------------------
 
