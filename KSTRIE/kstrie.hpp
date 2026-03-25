@@ -203,55 +203,6 @@ public:
             fs.buf_pv = nullptr;  // prevent fast_string from interfering
         }
 
-        // Build mapped key (CHARMAP already applied) from parent walk.
-        // Same traversal as ensure_key but skips from_index — bytes stay
-        // in trie-internal mapped form. Caller owns the fast_string buffer.
-        void build_mapped_key(kstrie_detail::fast_string& fs) const {
-            fs.clear();
-
-            hdr_type lh = hdr_type::from_node(leaf_v);
-            const auto& pfx = compact_type::get_prefix(leaf_v, lh);
-            const uint8_t* base = reinterpret_cast<const uint8_t*>(leaf_v)
-                                + hdr_type::COMPACT_ARRAYS_OFF;
-            const uint8_t* L = base;
-            const uint8_t* F = base + pfx.cap;
-            const kstrie_detail::ks_offset_type* O =
-                reinterpret_cast<const kstrie_detail::ks_offset_type*>(F + pfx.cap);
-            const uint8_t* B = reinterpret_cast<const uint8_t*>(leaf_v)
-                             + pfx.skip_data_off + lh.skip_bytes();
-
-            const uint8_t* skip = hdr_type::get_skip(leaf_v, lh);
-            size_t skip_len = lh.skip_bytes();
-            uint8_t klen = L[pos_v];
-
-            // No from_index — bytes are already mapped
-            if (klen == 0) [[unlikely]]
-                fs.prepend(skip, skip_len);
-            else if (klen == 1)
-                fs.prepend(skip, skip_len, F[pos_v]);
-            else
-                fs.prepend(skip, skip_len, F[pos_v],
-                           B + O[pos_v], klen - 1);
-
-            uint64_t* node = compact_type::get_parent(leaf_v);
-            uint16_t nb = compact_type::get_parent_byte(leaf_v, lh);
-
-            while (node) {
-                hdr_type h = hdr_type::from_node(node);
-                const uint8_t* nsk = hdr_type::get_skip(node, h);
-                size_t nsk_len = h.skip_bytes();
-
-                // No from_index — dispatch byte is already mapped
-                if (nb == kstrie_detail::EOS_PARENT_BYTE) [[unlikely]]
-                    fs.prepend(nsk, nsk_len);
-                else
-                    fs.prepend(nsk, nsk_len, static_cast<uint8_t>(nb));
-
-                nb = bitmask_type::get_parent_byte(node);
-                node = bitmask_type::get_parent(node);
-            }
-        }
-
     public:
         // -----------------------------------------------------------
         // lazy_key proxy — defers key construction until use
@@ -572,17 +523,27 @@ public:
 
     const_iterator erase(const const_iterator& pos) {
         if (pos == end()) return end();
-        // Build mapped key from parent walk — no CHARMAP round-trip, no string alloc.
-        kstrie_detail::fast_string mk;
-        pos.build_mapped_key(mk);
-        const uint8_t* mapped = reinterpret_cast<const uint8_t*>(mk.buf_pv);
-        uint32_t len = static_cast<uint32_t>(mk.len_v);
-        impl_v.erase_mapped(mapped, len);
-        // Re-find next entry using the same mapped bytes (one descent).
+        // Reconstruct mapped key from iterator position.
+        pos.ensure_key();
+        const uint8_t* raw = reinterpret_cast<const uint8_t*>(pos.key_buf);
+        uint32_t len = static_cast<uint32_t>(pos.key_len);
+
+        uint8_t stack_buf[256];
+        auto [mapped, raw_buf] = kstrie_detail::get_mapped<CHARMAP>(raw, len,
+                                                  stack_buf, sizeof(stack_buf));
+        std::unique_ptr<uint8_t[]> heap_guard(raw_buf);
+
+        auto r = impl_v.erase_for_iter(mapped, len);
+        if (!r.erased) return end();
+        if (r.next_leaf) {
+            // Hot path: next entry known — construct iterator directly.
+            return const_iterator(const_cast<impl_t*>(&impl_v),
+                                  r.next_leaf, r.next_pos);
+        }
+        // Cold path: collapse or end — re-find from root.
+        if (impl_v.empty()) return end();
         const_iterator it(const_cast<impl_t*>(&impl_v));
         find_ge_iter(impl_v.get_root(), mapped, len, 0, it);
-        delete[] mk.buf_pv;
-        mk.buf_pv = nullptr;
         return it;
     }
 

@@ -673,6 +673,8 @@ struct erase_info {
     erase_status status;
     uint64_t*    leaf;   // PENDING: node containing the entry. DONE: replacement node.
     int          pos;    // PENDING: position in leaf (-1 = eos)
+    uint64_t*    next_leaf = nullptr;  // surviving leaf for next entry (null = caller resolves)
+    uint16_t     next_pos  = 0;       // position in next_leaf
 };
 
 struct prefix_erase_result {
@@ -865,13 +867,15 @@ struct fast_string {
 
     // ---------------------------------------------------------
     // prepend — one memmove per call, skip always first.
-    // Zero-length memcpy/memmove is well-defined — no guards.
+    // ---------------------------------------------------------
+    // prepend — one memmove per call, skip always first.
     // ---------------------------------------------------------
 
     // skip only (EOS edge)
     void prepend(const uint8_t* skip, size_t sn) {
+        if (sn == 0) return;
         if (len_v + sn > cap_v) [[unlikely]] grow(len_v + sn);
-        std::memmove(buf_pv + sn, buf_pv, len_v);
+        if (len_v > 0) std::memmove(buf_pv + sn, buf_pv, len_v);
         std::memcpy(buf_pv, skip, sn);
         len_v += sn;
     }
@@ -880,7 +884,7 @@ struct fast_string {
     void prepend(const uint8_t* skip, size_t sn, uint8_t byte) {
         size_t total = sn + 1;
         if (len_v + total > cap_v) [[unlikely]] grow(len_v + total);
-        std::memmove(buf_pv + total, buf_pv, len_v);
+        if (len_v > 0) std::memmove(buf_pv + total, buf_pv, len_v);
         std::memcpy(buf_pv, skip, sn);
         buf_pv[sn] = static_cast<char>(byte);
         len_v += total;
@@ -891,10 +895,10 @@ struct fast_string {
                  uint8_t byte, const uint8_t* tail, size_t tn) {
         size_t total = sn + 1 + tn;
         if (len_v + total > cap_v) [[unlikely]] grow(len_v + total);
-        std::memmove(buf_pv + total, buf_pv, len_v);
+        if (len_v > 0) std::memmove(buf_pv + total, buf_pv, len_v);
         std::memcpy(buf_pv, skip, sn);
         buf_pv[sn] = static_cast<char>(byte);
-        std::memcpy(buf_pv + sn + 1, tail, tn);
+        if (tn > 0) std::memcpy(buf_pv + sn + 1, tail, tn);
         len_v += total;
     }
 

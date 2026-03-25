@@ -886,6 +886,46 @@ public:
         return 1;
     }
 
+    // Erase for iterator: returns {erased, next_leaf, next_pos}.
+    // Hot path: next_leaf is the surviving leaf, next_pos is the next entry.
+    // Cold path (collapse/empty): next_leaf is null → caller uses walk(FWD).
+    struct erase_iter_result {
+        bool      erased;
+        uint64_t* next_leaf;
+        uint16_t  next_pos;
+    };
+
+    erase_iter_result erase_for_iter(const uint8_t* mapped, uint32_t len) {
+        if (root_v == compact_type::sentinel()) return {false, nullptr, 0};
+
+        erase_info r = erase_node(root_v, mapped, len, 0);
+
+        if (r.status == erase_status::MISSING)
+            return {false, nullptr, 0};
+
+        if (r.status == erase_status::DONE) {
+            set_root(r.leaf);
+            size_v--;
+            return {true, r.next_leaf, r.next_pos};
+        }
+
+        // PENDING: compact root.
+        do_leaf_erase(r.leaf, r.pos);
+        if (r.desc == 0) {
+            mem_v.free_node(r.leaf);
+            root_v = compact_type::sentinel();
+            size_v--;
+            return {true, nullptr, 0};
+        }
+        set_root(r.leaf);
+        size_v--;
+        hdr_type h = hdr_type::from_node(r.leaf);
+        if (r.pos < static_cast<int>(h.count))
+            return {true, r.leaf, static_cast<uint16_t>(r.pos)};
+        // Erased last entry in compact root → end
+        return {true, nullptr, 0};
+    }
+
 
     template<typename StringOut>
     static void append_unmapped(StringOut& out,
@@ -1543,6 +1583,42 @@ private:
         return nn;
     }
 
+    // Descend to first (minimum) compact leaf in subtree.
+    // Returns {leaf, 0} for the leftmost entry.
+    struct iter_pos_t { uint64_t* leaf; uint16_t pos; };
+
+    static iter_pos_t descend_first_compact(uint64_t* node) noexcept {
+        while (node && node != compact_type::sentinel()) {
+            hdr_type h = hdr_type::from_node(node);
+            if (h.is_compact()) return {node, 0};
+            uint64_t* eos = bitmask_type::eos_child(node, h);
+            if (eos != compact_type::sentinel()) { node = eos; continue; }
+            const auto* bm = bitmask_type::get_bitmap(node, h);
+            int idx = bm->find_next_set(0);
+            if (idx < 0) return {nullptr, 0};
+            int slot = bm->count_below(static_cast<uint8_t>(idx));
+            node = bitmask_type::child_by_slot(node, h, slot);
+        }
+        return {nullptr, 0};
+    }
+
+    // Find next sibling entry after `byte` in bitmask node's bitmap.
+    // byte == EOS_PARENT_BYTE → search from first bitmap child.
+    static iter_pos_t next_sibling_entry(uint64_t* bm_node,
+                                          uint16_t byte) noexcept {
+        hdr_type h = hdr_type::from_node(bm_node);
+        const auto* bm = bitmask_type::get_bitmap(bm_node, h);
+        int sib;
+        if (byte == kstrie_detail::EOS_PARENT_BYTE)
+            sib = bm->find_next_set(0);
+        else
+            sib = bm->find_next_set(static_cast<uint8_t>(byte) + 1);
+        if (sib < 0) return {nullptr, 0};
+        int slot = bm->count_below(static_cast<uint8_t>(sib));
+        return descend_first_compact(
+            bitmask_type::child_by_slot(bm_node, h, slot));
+    }
+
     erase_info erase_node(uint64_t* node, const uint8_t* key,
                           uint32_t key_len, uint32_t consumed) {
         hdr_type h = hdr_type::from_node(node);
@@ -1574,6 +1650,8 @@ private:
             if (r.status == erase_status::MISSING) return r;
             // Handle result
             uint64_t* new_eos = eos;
+            uint64_t* next_leaf = nullptr;
+            uint16_t  next_pos  = 0;
             if (r.status == erase_status::PENDING) {
                 do_leaf_erase(r.leaf, r.pos);
                 hdr_type eh = hdr_type::from_node(r.leaf);
@@ -1584,8 +1662,15 @@ private:
                 } else {
                     bitmask_type::set_eos_child(node, h, r.leaf);
                     new_eos = r.leaf;
+                    if (r.pos < static_cast<int>(eh.count)) {
+                        next_leaf = r.leaf;
+                        next_pos  = static_cast<uint16_t>(r.pos);
+                    }
                 }
             } else {
+                // DONE from recursive call — carry through next
+                next_leaf = r.next_leaf;
+                next_pos  = r.next_pos;
                 new_eos = r.leaf;
                 if (r.leaf != eos)
                     bitmask_type::set_eos_child(node, h, r.leaf);
@@ -1595,15 +1680,22 @@ private:
             // Check if bitmask is empty
             if (h.count == 0 && !bitmask_type::has_eos(node, h)) {
                 mem_v.free_node(node);
-                return {0, erase_status::DONE, compact_type::sentinel(), 0};
+                return {0, erase_status::DONE, compact_type::sentinel(), 0,
+                        next_leaf, next_pos};
+            }
+            // Resolve null next: EOS exhausted → first bitmap child
+            if (!next_leaf) {
+                auto np = next_sibling_entry(node, kstrie_detail::EOS_PARENT_BYTE);
+                next_leaf = np.leaf; next_pos = np.pos;
             }
             // Try collapse
             if (node[NODE_TOTAL_TAIL] <= COMPACT_KEYSUFFIX_LIMIT) {
                 uint64_t* collapsed = collapse_to_compact(node);
                 if (collapsed != node)
-                    return {0, erase_status::DONE, collapsed, 0};
+                    return {0, erase_status::DONE, collapsed, 0,
+                            nullptr, 0};  // collapse frees subtree
             }
-            return {0, erase_status::DONE, node, 0};
+            return {0, erase_status::DONE, node, 0, next_leaf, next_pos};
         }
 
         // Child lookup
@@ -1619,6 +1711,8 @@ private:
 
         if (r.status == erase_status::DONE) {
             uint64_t* new_child = r.leaf;
+            uint64_t* next_leaf = r.next_leaf;
+            uint16_t  next_pos  = r.next_pos;
             if (new_child != child) {
                 if (new_child != compact_type::sentinel())
                     bitmask_type::replace_child(node, h, byte, new_child);
@@ -1631,15 +1725,22 @@ private:
             h = hdr_type::from_node(node);
             if (h.count == 0 && !bitmask_type::has_eos(node, h)) {
                 mem_v.free_node(node);
-                return {0, erase_status::DONE, compact_type::sentinel(), 0};
+                return {0, erase_status::DONE, compact_type::sentinel(), 0,
+                        next_leaf, next_pos};
+            }
+            // Resolve null next: child subtree exhausted → next sibling
+            if (!next_leaf) {
+                auto np = next_sibling_entry(node, byte);
+                next_leaf = np.leaf; next_pos = np.pos;
             }
             // Try collapse
             if (node[NODE_TOTAL_TAIL] <= COMPACT_KEYSUFFIX_LIMIT) {
                 uint64_t* collapsed = collapse_to_compact(node);
                 if (collapsed != node)
-                    return {0, erase_status::DONE, collapsed, 0};
+                    return {0, erase_status::DONE, collapsed, 0,
+                            nullptr, 0};  // collapse frees subtree
             }
-            return {0, erase_status::DONE, node, 0};
+            return {0, erase_status::DONE, node, 0, next_leaf, next_pos};
         }
 
         // PENDING from child: r.leaf is the compact leaf to erase from.
@@ -1658,10 +1759,20 @@ private:
         do_leaf_erase(r.leaf, r.pos);
         uint64_t new_leaf_tail = node_tail_total(r.leaf);
 
+        // Compute next: if leaf survived and pos valid, next is right here.
+        uint64_t* next_leaf = nullptr;
+        uint16_t  next_pos  = 0;
         hdr_type ch = hdr_type::from_node(r.leaf);
+        if (ch.count > 0 && r.pos < static_cast<int>(ch.count)) {
+            next_leaf = r.leaf;
+            next_pos  = static_cast<uint16_t>(r.pos);
+        }
+        // else: leaf exhausted or emptied → null → caller walks via parent
+
         if (ch.count == 0) {
             mem_v.free_node(r.leaf);
             node = bitmask_type::remove_child(node, h, byte);
+            next_leaf = nullptr;  // freed
         } else if (r.leaf != child) {
             bitmask_type::replace_child(node, h, byte, r.leaf);
         }
@@ -1672,15 +1783,22 @@ private:
         h = hdr_type::from_node(node);
         if (h.count == 0 && !bitmask_type::has_eos(node, h)) {
             mem_v.free_node(node);
-            return {0, erase_status::DONE, compact_type::sentinel(), 0};
+            return {0, erase_status::DONE, compact_type::sentinel(), 0,
+                    next_leaf, next_pos};
+        }
+        // Resolve null next: child subtree exhausted → next sibling
+        if (!next_leaf) {
+            auto np = next_sibling_entry(node, byte);
+            next_leaf = np.leaf; next_pos = np.pos;
         }
         // Try collapse
         if (node[NODE_TOTAL_TAIL] <= COMPACT_KEYSUFFIX_LIMIT) {
             uint64_t* collapsed = collapse_to_compact(node);
             if (collapsed != node)
-                return {0, erase_status::DONE, collapsed, 0};
+                return {0, erase_status::DONE, collapsed, 0,
+                        nullptr, 0};  // collapse frees leaf
         }
-        return {0, erase_status::DONE, node, 0};
+        return {0, erase_status::DONE, node, 0, next_leaf, next_pos};
     }
 
 
