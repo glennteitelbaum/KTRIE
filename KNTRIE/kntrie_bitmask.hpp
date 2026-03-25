@@ -746,7 +746,7 @@ struct bitmask_ops {
         auto* h = get_header(node);
         size_t hs = LEAF_HEADER_U64;
         bitmap_256_t& bm = bm_mut(node, hs);
-        if (!bm.has_bit(suffix)) return {tag_leaf(node), false, 0};
+        if (!bm.has_bit(suffix)) return {tag_leaf(node), false, 0, {}};
 
         unsigned count = h->entries();
 
@@ -754,7 +754,7 @@ struct bitmask_ops {
             unsigned nc = count - 1;
             if (nc == 0) {
                 bld.dealloc_node(node, h->alloc_u64());
-                return {0, true, 0};
+                return {0, true, 0, {}};
             }
             bm.clear_bit(suffix);
             val_bm_mut(node, hs).clear_bit(suffix);
@@ -782,7 +782,7 @@ struct bitmask_ops {
             unsigned nc = count - 1;
             if (nc == 0) {
                 bld.dealloc_node(node, h->alloc_u64());
-                return {0, true, 0};
+                return {0, true, 0, {}};
             }
 
             size_t new_sz = bitmap_leaf_size_u64(nc, hs);

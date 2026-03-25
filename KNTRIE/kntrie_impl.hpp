@@ -456,7 +456,7 @@ private:
 
     erase_result_t erase_ik(uint64_t ik) {
         if ((ik ^ root_prefix_v) & root_prefix_mask()) [[unlikely]]
-            return {0, false, 0};
+            return {0, false, 0, {}};
 
         uint64_t old_root_ptr = root_ptr_v;
         auto r = OPS::erase_node(root_ptr_v, ik, ik << root_skip_bits_v, root_skip_bytes(), bld_v);

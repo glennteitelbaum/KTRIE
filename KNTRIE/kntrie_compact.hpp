@@ -311,7 +311,7 @@ struct compact_ops {
         K*   kd = keys(node, hs);
 
         const K* base = adaptive_search<K>::find_base(kd, entries, suffix);
-        if (*base != suffix) [[unlikely]] return {tag_leaf(node), false, 0};
+        if (*base != suffix) [[unlikely]] return {tag_leaf(node), false, 0, {}};
         unsigned idx = static_cast<unsigned>(base - kd);
 
         unsigned nc = entries - 1;
@@ -319,7 +319,7 @@ struct compact_ops {
         // Last entry
         if (nc == 0) [[unlikely]] {
             destroy_and_dealloc(node, bld);
-            return {0, true, 0};
+            return {0, true, 0, {}};
         }
 
         // Shrink check

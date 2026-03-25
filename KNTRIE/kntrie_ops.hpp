@@ -260,30 +260,28 @@ struct kntrie_ops {
                 auto r = bmp.next_set_after(suffix);
                 if (!r.found) return {};
                 uint64_t key = d.to_ik(pfx, static_cast<uint64_t>(r.idx));
-                void* val;
                 uint16_t ret_pos;
+                void* val;
                 if constexpr (VT::IS_BOOL) {
-                    val = &BO::val_bm_mut(node, hs).words[0];
                     ret_pos = static_cast<uint16_t>(r.idx);
                 } else {
-                    val = &BO::bl_vals_mut(node, hs)[r.slot];
                     ret_pos = static_cast<uint16_t>(r.slot);
                 }
+                val = BO::bm_val_ptr(node, hs, VT::IS_BOOL ? 0 : r.slot);
                 return {node, ret_pos,
                         static_cast<uint16_t>(r.idx), key, val, true};
             } else {
                 auto r = bmp.prev_set_before(suffix);
                 if (!r.found) return {};
                 uint64_t key = d.to_ik(pfx, static_cast<uint64_t>(r.idx));
-                void* val;
                 uint16_t ret_pos;
+                void* val;
                 if constexpr (VT::IS_BOOL) {
-                    val = &BO::val_bm_mut(node, hs).words[0];
                     ret_pos = static_cast<uint16_t>(r.idx);
                 } else {
-                    val = &BO::bl_vals_mut(node, hs)[r.slot];
                     ret_pos = static_cast<uint16_t>(r.slot);
                 }
+                val = BO::bm_val_ptr(node, hs, VT::IS_BOOL ? 0 : r.slot);
                 return {node, ret_pos,
                         static_cast<uint16_t>(r.idx), key, val, true};
             }
@@ -981,7 +979,7 @@ struct kntrie_ops {
                                       uint64_t shifted, uint8_t depth,
                                       BLD& bld) {
         if (ptr == BO::SENTINEL_TAGGED) [[unlikely]]
-            return {ptr, false, 0};
+            return {ptr, false, 0, {}};
 
         // LEAF
         if (ptr & LEAF_BIT) [[unlikely]] {
@@ -995,7 +993,7 @@ struct kntrie_ops {
                 uint8_t expected = static_cast<uint8_t>(shifted >> U64_TOP_BYTE_SHIFT);
                 uint8_t actual = static_cast<uint8_t>(pfx_shifted >> U64_TOP_BYTE_SHIFT);
                 if (expected != actual) [[unlikely]]
-                    return {tag_leaf(node), false, 0};
+                    return {tag_leaf(node), false, 0, {}};
                 shifted <<= CHAR_BIT;
                 pfx_shifted <<= CHAR_BIT;
                 depth++;
@@ -1017,7 +1015,7 @@ struct kntrie_ops {
             uint8_t expected = static_cast<uint8_t>(shifted >> U64_TOP_BYTE_SHIFT);
             uint8_t actual = BO::skip_byte(node, pos);
             if (expected != actual) [[unlikely]]
-                return {tag_bitmask(node), false, 0};
+                return {tag_bitmask(node), false, 0, {}};
             shifted <<= CHAR_BIT;
             depth++;
         }
@@ -1032,13 +1030,13 @@ struct kntrie_ops {
             cl = BO::lookup(node, ti);
 
         if (!cl.found) [[unlikely]]
-            return {tag_bitmask(node), false, 0};
+            return {tag_bitmask(node), false, 0, {}};
 
         // Recurse into child
         auto cr = erase_node(cl.child, ik, shifted << CHAR_BIT, depth + 1, bld);
 
         if (!cr.erased) [[unlikely]]
-            return {tag_bitmask(node), false, 0};
+            return {tag_bitmask(node), false, 0, {}};
 
         // Resolve next: if child provided it, use it. Otherwise this
         // child's subtree is exhausted forward — find next sibling.
