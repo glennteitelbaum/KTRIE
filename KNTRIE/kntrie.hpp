@@ -73,7 +73,9 @@ public:
     //
     // Caches key and value pointer from fn ptrs. operator*() returns
     // cached pair directly — no header reads, no type dispatch.
-    // Invalidated by any modification (same as std::unordered_map).
+    // Invalidated by any modification to the trie (more restrictive
+    // than std::map or std::unordered_map — structural reorganization
+    // can affect nodes in distant subtrees).
     // No impl pointer — parent walk uses node parent pointers.
     // ==================================================================
 

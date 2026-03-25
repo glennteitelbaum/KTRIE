@@ -441,7 +441,7 @@ The cached `ik_v` and `val_v` are set by the leaf's function pointers (`find_fn`
 
 **End sentinel.** The `end()` method constructs a lightweight sentinel iterator with `leaf_v = nullptr`. The sentinel's `val_v` field stashes a pointer to the impl object, enabling `--end()` to find the last entry via `descend_last_loop`.
 
-**Invalidation.** Like `std::unordered_map`, iterators are invalidated by any mutation (insert, erase, assign). The live design means that structural changes — node reallocation, splits, coalescing — can move or deallocate the node an iterator points to. Callers must not hold iterators across mutations to other keys.
+**Invalidation.** Iterators are invalidated by any mutation to the trie (insert, erase, insert_or_assign). This is more restrictive than `std::map` (which preserves iterators on insert and erase of other keys) or `std::unordered_map` (which preserves iterators on erase of other elements and on non-rehashing inserts). The reason: kntrie mutations can structurally reorganize distant parts of the tree — compact leaf splits, bitmask node coalescing, and node reallocation can move or deallocate the node an iterator points to, even when the mutated key is in a different subtree. Callers must not hold iterators across any mutation.
 
 **API.** The iterator API matches `std::map`: `(*it).second` returns a mutable value reference; `it->first` / `it->second` work via arrow proxy. There is no `value()` method — the API uses `(*it).second` consistently.
 
