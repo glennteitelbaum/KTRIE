@@ -494,7 +494,10 @@ struct bitmask_ops {
 
     // Mutable value reference at slot for live iterators (non-bool only).
     static VALUE& bl_val_ref_at(uint64_t* node, size_t hs, int slot) noexcept {
-        return *reinterpret_cast<VALUE*>(&bl_vals_mut(node, hs)[slot]);
+        if constexpr (VT::IS_INLINE)
+            return *reinterpret_cast<VALUE*>(&bl_vals_mut(node, hs)[slot]);
+        else
+            return *bl_vals_mut(node, hs)[slot];
     }
 
     // val pointer for iter_entry_t. Non-bool: &bl_vals[slot]. Bool: val_bm.words base.

@@ -695,7 +695,7 @@ struct huggingface_format {
             if (lit == str_to_rank.end() || rit == str_to_rank.end()) continue;
             auto mit = str_to_rank.find(ms.substr(0, sp) + ms.substr(sp + 1));
             if (mit == str_to_rank.end()) continue;
-            vd.pair_trie.insert(pack_pair(l(*it).second, r(*it).second), m(*it).second);
+            vd.pair_trie.insert(pack_pair((*lit).second, (*rit).second), (*mit).second);
         }
         vd.build_byte_pair_table();
         return vd;

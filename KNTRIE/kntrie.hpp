@@ -15,6 +15,22 @@ class kntrie {
 
     using UK     = std::make_unsigned_t<KEY>;
     using impl_t = kntrie_detail::kntrie_impl<UK, VALUE, ALLOC>;
+    using VT     = kntrie_detail::value_traits<VALUE, ALLOC>;
+
+    // val_v in iter_entry_t points at a slot: inline types store VALUE
+    // directly, non-inline store VALUE*. Dereference accordingly.
+    static VALUE& deref_val(void* vp) noexcept {
+        if constexpr (VT::IS_INLINE)
+            return *static_cast<VALUE*>(vp);
+        else
+            return **static_cast<VALUE**>(vp);
+    }
+    static const VALUE& deref_val_const(const void* vp) noexcept {
+        if constexpr (VT::IS_INLINE)
+            return *static_cast<const VALUE*>(vp);
+        else
+            return **static_cast<VALUE* const*>(vp);
+    }
     using KO     = kntrie_detail::key_ops<UK>;
     using IK     = typename KO::IK;
 
@@ -104,7 +120,7 @@ public:
                     base + pos_v / BITS_PER_WORD,
                     static_cast<uint8_t>(pos_v % BITS_PER_WORD)}};
             } else {
-                return {k, *static_cast<VALUE*>(val_v)};
+                return {k, deref_val(val_v)};
             }
         }
 
@@ -224,7 +240,7 @@ public:
             return kntrie_detail::bool_ref{base + r.pos / BPW,
                                             static_cast<uint8_t>(r.pos % BPW)};
         } else {
-            return *static_cast<VALUE*>(r.val);
+            return deref_val(r.val);
         }
     }
     const_mapped_ref at(const KEY& key) const {
@@ -235,14 +251,12 @@ public:
             auto* base = static_cast<uint64_t*>(r.val);
             return (base[r.pos / BPW] >> (r.pos % BPW)) & 1;
         } else {
-            return *static_cast<const VALUE*>(r.val);
+            return deref_val_const(r.val);
         }
     }
 
     mapped_ref operator[](const KEY& key) {
         auto r = impl_.insert_with_pos(to_unsigned(key), VALUE{});
-        // insert_with_pos returns insert_pos_result_t, not iter_entry_t.
-        // Re-find to get the val pointer. Cache-hot after insert.
         auto e = impl_.find_entry(to_unsigned(key));
         if constexpr (IS_BOOL) {
             constexpr unsigned BPW = 64;
@@ -250,7 +264,7 @@ public:
             return kntrie_detail::bool_ref{base + e.pos / BPW,
                                             static_cast<uint8_t>(e.pos % BPW)};
         } else {
-            return *static_cast<VALUE*>(e.val);
+            return deref_val(e.val);
         }
     }
 

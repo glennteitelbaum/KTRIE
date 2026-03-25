@@ -191,20 +191,23 @@ struct kntrie_ops {
         constexpr size_t hs = LEAF_HEADER_U64;
         uint8_t nk_bits = U64_BITS - d.shift;
         if (nk_bits <= U8_BITS) {
-            // bitmap leaf: pos is byte value, compute slot
             int slot = BO::bm(node, hs).template find_slot<slot_mode::FAST_EXIT>(
                 static_cast<uint8_t>(pos));
             return BO::bl_val_ref_at(node, hs, slot);
         }
+        using VT = value_traits<VALUE, ALLOC>;
         if (nk_bits <= U16_BITS) {
-            return *reinterpret_cast<VALUE*>(
-                &compact_ops<uint16_t, VALUE, ALLOC>::vals_mut(node)[pos]);
+            auto& slot = compact_ops<uint16_t, VALUE, ALLOC>::vals_mut(node)[pos];
+            if constexpr (VT::IS_INLINE) return *reinterpret_cast<VALUE*>(&slot);
+            else return *slot;
         } else if (nk_bits <= U32_BITS) {
-            return *reinterpret_cast<VALUE*>(
-                &compact_ops<uint32_t, VALUE, ALLOC>::vals_mut(node)[pos]);
+            auto& slot = compact_ops<uint32_t, VALUE, ALLOC>::vals_mut(node)[pos];
+            if constexpr (VT::IS_INLINE) return *reinterpret_cast<VALUE*>(&slot);
+            else return *slot;
         } else {
-            return *reinterpret_cast<VALUE*>(
-                &compact_ops<uint64_t, VALUE, ALLOC>::vals_mut(node)[pos]);
+            auto& slot = compact_ops<uint64_t, VALUE, ALLOC>::vals_mut(node)[pos];
+            if constexpr (VT::IS_INLINE) return *reinterpret_cast<VALUE*>(&slot);
+            else return *slot;
         }
     }
 
