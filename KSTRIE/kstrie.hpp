@@ -313,12 +313,6 @@ public:
 
         arrow_proxy operator->() const { return {**this}; }
 
-        // Direct value access — no key build, no allocation
-        const VALUE& value() const {
-            hdr_type h = hdr_type::from_node(leaf_v);
-            return *slots_type::load_value(h.get_compact_slots(leaf_v), pos_v);
-        }
-
         const_iterator& operator++() {
             invalidate_key();
             hdr_type h = hdr_type::from_node(leaf_v);

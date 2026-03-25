@@ -62,9 +62,9 @@ void bind_kstrie(py::module_& m, const char* name) {
             if (it == t.end())
                 throw py::key_error(std::string(key));
             if constexpr (std::is_same_v<V, py::object>)
-                return it.value();
+                return (*it).second;
             else
-                return static_cast<PyV>(it.value());
+                return static_cast<PyV>((*it).second);
         })
 
         // __setitem__
@@ -103,9 +103,9 @@ void bind_kstrie(py::module_& m, const char* name) {
             auto it = t.find(key);
             if (it == t.end()) return dflt;
             if constexpr (std::is_same_v<V, py::object>)
-                return it.value();
+                return (*it).second;
             else
-                return py::cast(static_cast<PyV>(it.value()));
+                return py::cast(static_cast<PyV>((*it).second));
         }, py::arg("key"), py::arg("default") = py::none())
 
         // insert(key, value) → bool (true if inserted, false if already exists)
@@ -140,9 +140,9 @@ void bind_kstrie(py::module_& m, const char* name) {
             py::list result;
             for (auto it = t.begin(); it != t.end(); ++it) {
                 if constexpr (std::is_same_v<V, py::object>)
-                    result.append(it.value());
+                    result.append((*it).second);
                 else
-                    result.append(py::cast(static_cast<PyV>(it.value())));
+                    result.append(py::cast(static_cast<PyV>((*it).second)));
             }
             return result;
         })
