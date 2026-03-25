@@ -40,6 +40,7 @@ inline constexpr int U32_BITS = sizeof(uint32_t) * CHAR_BIT;                    
 
 // --- Bitmap ---
 inline constexpr size_t BITMAP_WORDS   = 4;           // 256-bit bitmap = 4 × u64
+inline constexpr size_t BITMAP_WORD_MASK = BITMAP_WORDS - 1;  // for branchless word index
 inline constexpr size_t BYTE_VALUES    = 1u << CHAR_BIT;  // 256
 
 inline constexpr size_t COMPACT_MAX    = 4096;
@@ -161,7 +162,9 @@ struct depth_t {
         return (shift == 0) ? ~uint64_t(0) : (uint64_t(1) << (U64_BITS - shift)) - 1;
     }
 
-    // Cold (unlikely skip path): mask for skip-byte comparison
+    // Cold (unlikely skip path): mask for skip-byte comparison.
+    // Precondition: consumed > 0 (root prefix handled by root_skip_bits_v,
+    // so this function is never called with consumed==0).
     uint64_t skip_mask() const noexcept {
         uint8_t lo = U64_BITS - consumed;
         uint8_t hi = lo + skip * CHAR_BIT;
@@ -502,13 +505,6 @@ struct bitmap_256_t {
                std::popcount(words[2]) + std::popcount(words[3]);
     }
 
-    // Extract the index of the single set bit (for embed chain walking)
-    uint8_t single_bit_index() const noexcept {
-        uint64_t w0 = words[0], w1 = words[1], w2 = words[2];
-        int idx = !w0 + (!w0 & !w1) + (!w0 & !w1 & !w2);
-        return static_cast<uint8_t>((idx << U64_BIT_SHIFT) + std::countr_zero(words[idx]));
-    }
-
     // FAST_EXIT:   returns slot (>=0) if bit set, -1 if not set
     // BRANCHLESS:  returns slot if bit set, 0 (sentinel) if not set
     // UNFILTERED:  returns count of set bits below index (for insert position)
@@ -633,7 +629,7 @@ struct bitmap_256_t {
         m[0] &= -uint64_t(0 >= sw);
         m[1] &= -uint64_t(1 >= sw);
         m[2] &= -uint64_t(2 >= sw);
-        m[sw & 3] &= (~0ULL << sb);
+        m[sw & BITMAP_WORD_MASK] &= (~uint64_t{0} << sb);
 
         // First non-zero word
         int fw = !m[0] + (!m[0] & !m[1]) + (!m[0] & !m[1] & !m[2]);
@@ -663,11 +659,13 @@ struct bitmap_256_t {
         m[3] &= -uint64_t(3 <= sw);
         m[2] &= -uint64_t(2 <= sw);
         m[1] &= -uint64_t(1 <= sw);
-        m[sw & 3] &= (2ULL << sb) - 1;
+        m[sw & BITMAP_WORD_MASK] &= (2ULL << sb) - 1;
 
         // Last non-zero word (search from high to low)
         int lw = 3 - !m[3] - (!m[3] & !m[2]) - (!m[3] & !m[2] & !m[1]);
-        int biw = U64_BITS_MASK - std::countl_zero(m[lw] | 1);  // |1 prevents UB on zero
+        // countl_zero(0) == 64 is well-defined per C++20 [bit.count];
+        // biw/bit/slot are unused when found==false.
+        int biw = U64_BITS_MASK - std::countl_zero(m[lw]);
         int bit = (lw << U64_BIT_SHIFT) + biw;
         bool found = (m[0] | m[1] | m[2] | m[3]) != 0;
 

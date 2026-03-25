@@ -262,13 +262,6 @@ public:
         return BO::find_loop(root_ptr_v, ik, ik << root_skip_bits_v);
     }
 
-    // Legacy find — returns VALUE* for callers that just need the value.
-    const VALUE* find_value(const KEY& key) const noexcept {
-        auto r = find_entry(key);
-        if (!r.found) return nullptr;
-        return reinterpret_cast<const VALUE*>(r.val);
-    }
-
     bool contains(const KEY& key) const noexcept {
         return find_entry(key).found;
     }
@@ -386,19 +379,19 @@ public:
     // Insert / Insert-or-assign / Assign
     // ==================================================================
 
-    std::pair<bool, bool> insert(const KEY& key, const VALUE& value) {
+    bool insert(const KEY& key, const VALUE& value) {
         auto r = insert_dispatch<true, false>(key, value);
-        return {true, r.inserted};
+        return r.inserted;
     }
 
-    std::pair<bool, bool> insert_or_assign(const KEY& key, const VALUE& value) {
+    bool insert_or_assign(const KEY& key, const VALUE& value) {
         auto r = insert_dispatch<true, true>(key, value);
-        return {true, r.inserted};
+        return r.inserted;
     }
 
-    std::pair<bool, bool> assign(const KEY& key, const VALUE& value) {
+    bool assign(const KEY& key, const VALUE& value) {
         auto r = insert_dispatch<false, true>(key, value);
-        return {true, r.inserted};
+        return r.inserted;
     }
 
     // Insert returning {leaf, pos, inserted} for live iterators.
@@ -489,20 +482,11 @@ public:
     // Stats / Memory
     // ==================================================================
 
-    struct debug_stats_t {
-        size_t compact_leaves = 0;
-        size_t bitmap_leaves  = 0;
-        size_t bitmask_nodes  = 0;
-        size_t bm_children    = 0;
-        size_t total_entries  = 0;
-        size_t total_bytes    = 0;
-    };
-
-    debug_stats_t debug_stats() const noexcept {
-        debug_stats_t s{};
+    kntrie_stats_t debug_stats() const noexcept {
+        kntrie_stats_t s{};
         s.total_bytes = sizeof(*this);
         if (root_ptr_v != BO::SENTINEL_TAGGED) {
-            typename ITER_OPS::stats_t os{};
+            kntrie_stats_t os{};
             ITER_OPS::collect_stats(root_ptr_v, root_skip_bytes(), os);
             s.total_bytes    += os.total_bytes;
             s.total_entries  += os.total_entries;

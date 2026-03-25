@@ -74,15 +74,6 @@ struct compact_ops {
     using VST  = typename VT::slot_type;
     using BLD  = builder<VALUE, VT::IS_TRIVIAL, ALLOC>;
 
-    // Suffix type constants for key width dispatch
-    static constexpr uint8_t STYPE_U16 = 1;
-    static constexpr uint8_t STYPE_U32 = 2;
-    static constexpr uint8_t STYPE_U64 = 3;
-
-    static constexpr uint8_t STYPE =
-        (sizeof(K) == sizeof(uint16_t)) ? STYPE_U16 :
-        (sizeof(K) == sizeof(uint32_t)) ? STYPE_U32 : STYPE_U64;
-
     // --- exact u64 size for a given entry count ---
 
     static constexpr size_t size_u64(size_t count, size_t hu = LEAF_HEADER_U64) noexcept {
@@ -215,7 +206,7 @@ struct compact_ops {
                                   K suffix, VST value, BLD& bld) {
         unsigned entries = h->entries();
         
-        size_t hs = LEAF_HEADER_U64;
+        constexpr size_t hs = LEAF_HEADER_U64;
         K*   kd = keys(node, hs);
 
         const K* base = adaptive_search<K>::find_base(kd, entries, suffix);
@@ -307,7 +298,7 @@ struct compact_ops {
                                 K suffix, BLD& bld) {
         unsigned entries = h->entries();
         
-        size_t hs = LEAF_HEADER_U64;
+        constexpr size_t hs = LEAF_HEADER_U64;
         K*   kd = keys(node, hs);
 
         const K* base = adaptive_search<K>::find_base(kd, entries, suffix);

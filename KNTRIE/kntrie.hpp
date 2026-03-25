@@ -419,10 +419,11 @@ public:
         return iterator{&impl_};
     }
     const_iterator begin() const noexcept {
-        return const_iterator(const_cast<impl_t&>(impl_).edge_entry(
+        return const_iterator(impl_.edge_entry(
             kntrie_detail::dir_t::FWD));
     }
     const_iterator end() const noexcept {
+        // const_cast needed: end iterator stores impl_t* for --end() support
         return const_iterator{const_cast<impl_t*>(&impl_)};
     }
     const_iterator cbegin() const noexcept { return begin(); }

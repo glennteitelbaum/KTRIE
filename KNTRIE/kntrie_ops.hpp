@@ -765,7 +765,6 @@ struct kntrie_ops {
         if (n_children == 1) {
             // Try to collapse single-child bitmask into skip.
             // The dispatch byte becomes a skip byte, plus propagate old skip.
-            constexpr uint8_t SKIP_BUDGET = static_cast<uint8_t>(MAX_SKIP);
             uint8_t add_skip = ps + 1;  // old skip + dispatch byte
 
             child_tagged = child_ptrs[0];
@@ -778,13 +777,13 @@ struct kntrie_ops {
                 uint16_t child_shift = get_depth(leaf).shift;
                 uint16_t new_shift   = make_depth<BITS>(total_skip).shift;
 
-                if (total_skip <= SKIP_BUDGET && new_shift == child_shift) {
+                if (total_skip <= MAX_SKIP && new_shift == child_shift) {
                     leaf = prepend_skip<BITS>(leaf, add_skip, ik, bld);
                     child_tagged = tag_leaf(leaf);
                     collapsed = true;
                 }
             } else {
-                if (add_skip <= SKIP_BUDGET) {
+                if (add_skip <= MAX_SKIP) {
                     constexpr int BS = byte_shift<BITS>();
                     uint8_t pfx_bytes[MAX_SKIP + 1];
                     for (uint8_t pi = 0; pi < ps; ++pi)
