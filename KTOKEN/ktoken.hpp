@@ -28,6 +28,10 @@
 
 namespace ktoken {
 
+// SSO byte string: 15 bytes inline (covers 99% of tokens), no heap alloc.
+// Replaces vector<uint8_t> in decode table — eliminates ~100K heap allocations.
+using byte_string = std::basic_string<uint8_t>;
+
 // ===========================================================================
 // Constants
 // ===========================================================================
@@ -460,7 +464,7 @@ struct p50k {
 // ===========================================================================
 
 struct vocab_data {
-    std::vector<std::vector<uint8_t>> decode;
+    std::vector<byte_string> decode;
     uint32_t byte_rank[BASE_TOKENS];
     gteitelbaum::kntrie<uint64_t, uint32_t> pair_trie;
     // Flat lookup for byte-byte pairs: eliminates kntrie traversal on init.
@@ -556,7 +560,7 @@ inline void recover_merge_pairs(vocab_data& vd) {
         const auto& bytes = vd.decode[r];
         if (bytes.empty() || bytes.size() == 1 || bytes.size() > (size_t)MAX_PARTS) continue;
         uint32_t n = (uint32_t)bytes.size(); bool ok = true;
-        for (uint32_t i = 0; i < n; ++i) { parts[i] = vd.byte_rank[bytes[i]]; if (parts[i] == NO_RANK) { ok = false; break; } }
+        for (uint32_t i = 0; i < n; ++i) { parts[i] = vd.byte_rank[static_cast<uint8_t>(bytes[i])]; if (parts[i] == NO_RANK) { ok = false; break; } }
         if (!ok) continue;
         for (uint32_t i = 0; i+1 < n; ++i) {
             auto it = vd.pair_trie.find(pack_pair(parts[i], parts[i+1]));
@@ -590,11 +594,11 @@ namespace detail {
         for (int i=0;i<26;++i){t['A'+i]=i;t['a'+i]=i+26;}
         for (int i=0;i<10;++i) t['0'+i]=i+52; t['+']=62;t['/']=63; return t;
     }
-    inline std::vector<uint8_t> b64_decode(std::string_view s) {
+    inline byte_string b64_decode(std::string_view s) {
         static constexpr auto B64 = make_b64_table();
-        std::vector<uint8_t> o; o.reserve(s.size()*3/4);
+        byte_string o; o.reserve(s.size()*3/4);
         uint32_t a=0;int b=0;
-        for (char c:s){uint8_t v=B64[(uint8_t)c];if(v==255)continue;a=(a<<6)|v;b+=6;if(b>=8){b-=8;o.push_back((a>>b)&0xFF);}}
+        for (char c:s){uint8_t v=B64[(uint8_t)c];if(v==255)continue;a=(a<<6)|v;b+=6;if(b>=8){b-=8;o.push_back(static_cast<uint8_t>((a>>b)&0xFF));}}
         return o;
     }
 }
@@ -603,7 +607,7 @@ struct tiktoken_format {
     static vocab_data load(const char* path) {
         vocab_data vd;
         std::ifstream f(path); std::string line;
-        std::vector<std::pair<std::vector<uint8_t>,uint32_t>> entries;
+        std::vector<std::pair<byte_string,uint32_t>> entries;
         entries.reserve(200000);
         uint32_t max_rank = 0;
         while (std::getline(f, line)) {
@@ -614,10 +618,10 @@ struct tiktoken_format {
             entries.push_back({std::move(bytes), rank});
         }
         vd.decode.resize(max_rank + 1);
-        for (auto& [bytes, rank] : entries) vd.decode[rank] = bytes;
+        for (auto& [bytes, rank] : entries) vd.decode[rank] = std::move(bytes);
         std::memset(vd.byte_rank, 0xFF, sizeof(vd.byte_rank));
         for (uint32_t r = 0; r < BASE_TOKENS && r <= max_rank; ++r)
-            if (vd.decode[r].size() == 1) vd.byte_rank[vd.decode[r][0]] = r;
+            if (vd.decode[r].size() == 1) vd.byte_rank[static_cast<uint8_t>(vd.decode[r][0])] = r;
         recover_merge_pairs(vd);
         vd.build_byte_pair_table();
         return vd;
@@ -644,8 +648,8 @@ struct byte_unicode_map {
         for (int b=0;b<256;++b) { if (!direct[b]) { byte_to_unicode[b]=next; if(next<UNI_MAP_SIZE)unicode_to_byte[next]=(uint8_t)b; next++; } }
     }
 
-    std::vector<uint8_t> decode_str(const std::string& s) const {
-        std::vector<uint8_t> result;
+    byte_string decode_str(const std::string& s) const {
+        byte_string result;
         const uint8_t* p = reinterpret_cast<const uint8_t*>(s.data());
         size_t len = s.size(), i = 0;
         while (i < len) {
@@ -654,11 +658,11 @@ struct byte_unicode_map {
             else if(p[i]<0xF0){cp=((p[i]&0x0F)<<12)|((p[i+1]&0x3F)<<6)|(p[i+2]&0x3F);i+=3;}
             else{cp=((p[i]&0x07)<<18)|((p[i+1]&0x3F)<<12)|((p[i+2]&0x3F)<<6)|(p[i+3]&0x3F);i+=4;}
             if (cp < UNI_MAP_SIZE && unicode_to_byte[cp] != 0xFF) { result.push_back(unicode_to_byte[cp]); }
-            else { char buf[4]; int n;
-                if(cp<=0x7F){buf[0]=(char)cp;n=1;}else if(cp<=0x7FF){buf[0]=(char)(0xC0|(cp>>6));buf[1]=(char)(0x80|(cp&0x3F));n=2;}
-                else if(cp<=0xFFFF){buf[0]=(char)(0xE0|(cp>>12));buf[1]=(char)(0x80|((cp>>6)&0x3F));buf[2]=(char)(0x80|(cp&0x3F));n=3;}
-                else{buf[0]=(char)(0xF0|(cp>>18));buf[1]=(char)(0x80|((cp>>12)&0x3F));buf[2]=(char)(0x80|((cp>>6)&0x3F));buf[3]=(char)(0x80|(cp&0x3F));n=4;}
-                for (int j=0;j<n;++j) result.push_back((uint8_t)buf[j]);
+            else { uint8_t buf[4]; int n;
+                if(cp<=0x7F){buf[0]=(uint8_t)cp;n=1;}else if(cp<=0x7FF){buf[0]=(uint8_t)(0xC0|(cp>>6));buf[1]=(uint8_t)(0x80|(cp&0x3F));n=2;}
+                else if(cp<=0xFFFF){buf[0]=(uint8_t)(0xE0|(cp>>12));buf[1]=(uint8_t)(0x80|((cp>>6)&0x3F));buf[2]=(uint8_t)(0x80|(cp&0x3F));n=3;}
+                else{buf[0]=(uint8_t)(0xF0|(cp>>18));buf[1]=(uint8_t)(0x80|((cp>>12)&0x3F));buf[2]=(uint8_t)(0x80|((cp>>6)&0x3F));buf[3]=(uint8_t)(0x80|(cp&0x3F));n=4;}
+                for (int j=0;j<n;++j) result.push_back(buf[j]);
             }
         }
         return result;
@@ -682,7 +686,7 @@ struct huggingface_format {
             uint32_t rank = val.get<uint32_t>();
             if (rank >= vd.decode.size()) vd.decode.resize(rank + 1);
             vd.decode[rank] = bmap.decode_str(key);
-            if (vd.decode[rank].size() == 1) vd.byte_rank[vd.decode[rank][0]] = rank;
+            if (vd.decode[rank].size() == 1) vd.byte_rank[static_cast<uint8_t>(vd.decode[rank][0])] = rank;
             str_to_rank.insert_or_assign(key, rank);
         }
 
@@ -848,7 +852,7 @@ public:
         // Decode table + byte ranks
         vocab_data vd;
         vd.decode.resize(BASE_TOKENS);
-        for (uint32_t b = 0; b < BASE_TOKENS; ++b) vd.decode[b] = {(uint8_t)b};
+        for (uint32_t b = 0; b < BASE_TOKENS; ++b) vd.decode[b] = byte_string(1, static_cast<uint8_t>(b));
         std::memset(vd.byte_rank, 0xFF, sizeof(vd.byte_rank));
         for (uint32_t b = 0; b < BASE_TOKENS; ++b) vd.byte_rank[b] = b;
         uint32_t next_rank = BASE_TOKENS;
@@ -902,8 +906,7 @@ public:
             uint32_t left = pair_left(best_key), right = pair_right(best_key);
             uint32_t nr = next_rank++;
             vd.decode.resize(nr + 1);
-            vd.decode[nr] = vd.decode[left];
-            vd.decode[nr].insert(vd.decode[nr].end(), vd.decode[right].begin(), vd.decode[right].end());
+            vd.decode[nr] = vd.decode[left] + vd.decode[right];
             vd.pair_trie.insert(pack_pair(left, right), nr);
 
             // Zero out merged pair
