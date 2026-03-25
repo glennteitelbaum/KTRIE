@@ -669,6 +669,20 @@ struct kntrie_ops {
         constexpr size_t SCRATCH_BYTES = (COMPACT_MAX + 1) * sizeof(NK);
         char scratch[SCRATCH_BYTES];
 
+        // Child key type: one byte consumed by bitmask dispatch
+        using CNK = nk_for_bits_t<BITS - CHAR_BIT>;
+        constexpr int CNK_BITS = static_cast<int>(sizeof(CNK) * CHAR_BIT);
+
+        // Helper: narrow a range of NK keys to CNK by stripping the top byte
+        auto narrow = [&](const NK* src, size_t count) -> CNK* {
+            CNK* cs = reinterpret_cast<CNK*>(scratch);
+            for (size_t j = 0; j < count; ++j) {
+                NK shifted = static_cast<NK>(src[j] << CHAR_BIT);
+                cs[j] = static_cast<CNK>(shifted >> (NK_BITS - CNK_BITS));
+            }
+            return cs;
+        };
+
         // Partition by top byte into children
         uint8_t indices[BYTE_VALUES];
         uint64_t child_ptrs[BYTE_VALUES];
@@ -692,8 +706,9 @@ struct kntrie_ops {
             uint64_t child_ik = (ik & safe_prefix_mask<BITS>())
                 | leaf_ops_t<BITS>::template suffix_to_u64<BITS>(old_keys[start]);
             indices[n_children] = ti;
-            child_ptrs[n_children] = build_node_from_arrays_tagged<BITS>(
-                const_cast<NK*>(old_keys + start), const_cast<VST*>(old_vals + start),
+            CNK* cs = narrow(old_keys + start, cc);
+            child_ptrs[n_children] = build_node_from_arrays_tagged<BITS - CHAR_BIT>(
+                cs, const_cast<VST*>(old_vals + start),
                 cc, child_ik, bld, scratch);
             n_children++;
         }
@@ -717,8 +732,9 @@ struct kntrie_ops {
                          (range_old - local_ins) * sizeof(VST));
 
             indices[n_children] = new_top_byte;
-            child_ptrs[n_children] = build_node_from_arrays_tagged<BITS>(
-                merge_keys, merge_vals, range_new, ik, bld, scratch);
+            CNK* cs = narrow(merge_keys, range_new);
+            child_ptrs[n_children] = build_node_from_arrays_tagged<BITS - CHAR_BIT>(
+                cs, merge_vals, range_new, ik, bld, scratch);
             n_children++;
         }
 
@@ -732,41 +748,33 @@ struct kntrie_ops {
             uint64_t child_ik = (ik & safe_prefix_mask<BITS>())
                 | leaf_ops_t<BITS>::template suffix_to_u64<BITS>(old_keys[start]);
             indices[n_children] = ti;
-            child_ptrs[n_children] = build_node_from_arrays_tagged<BITS>(
-                const_cast<NK*>(old_keys + start), const_cast<VST*>(old_vals + start),
+            CNK* cs = narrow(old_keys + start, cc);
+            child_ptrs[n_children] = build_node_from_arrays_tagged<BITS - CHAR_BIT>(
+                cs, const_cast<VST*>(old_vals + start),
                 cc, child_ik, bld, scratch);
             n_children++;
         }
 
         size_t total = old_count + 1;
-        uint64_t child_tagged;
-        if (n_children == 1)
-            child_tagged = child_ptrs[0];
-        else
-            child_tagged = tag_bitmask(
-                BO::make_bitmask(indices, child_ptrs, n_children, bld, total));
-
-        // Propagate old skip to new child
         uint8_t ps = hdr->skip();
+
+        uint64_t child_tagged;
+        // Always create bitmask — even for n_children==1.
+        // Collapsing single-child bitmask into skip is unsafe when
+        // build_node_from_arrays_tagged applied internal skip compression:
+        // adding more skip bytes can push remaining bits below the leaf
+        // body's NK type, causing type confusion.
+        child_tagged = tag_bitmask(
+            BO::make_bitmask(indices, child_ptrs, n_children, bld, total));
+
+        // Propagate old skip to bitmask
         if (ps > 0) {
-            if (child_tagged & LEAF_BIT) {
-                uint64_t* leaf = untag_leaf_mut(child_tagged);
-                uint8_t old_leaf_skip = get_header(leaf)->skip();
-                uint8_t new_skip = old_leaf_skip + ps;
-                int mshift = static_cast<int>(U64_BITS) - KEY_BITS + BITS - CHAR_BIT * old_leaf_skip;
-                uint64_t mask = (mshift >= static_cast<int>(U64_BITS)) ? 0 : (~0ULL << mshift);
-                set_leaf_prefix(leaf, ik & mask);
-                set_depth(leaf, make_depth<BITS>(new_skip));
-                if (old_leaf_skip == 0) set_leaf_fns_for<BITS>(leaf);
-                child_tagged = tag_leaf(leaf);
-            } else {
-                constexpr int BS = byte_shift<BITS>();
-                uint8_t pfx_bytes[MAX_SKIP];
-                for (uint8_t pi = 0; pi < ps; ++pi)
-                    pfx_bytes[pi] = static_cast<uint8_t>(ik >> (BS + CHAR_BIT * (ps - pi)));
-                uint64_t* bm_node = bm_to_node(child_tagged);
-                child_tagged = BO::wrap_in_chain(bm_node, pfx_bytes, ps, bld);
-            }
+            constexpr int BS = byte_shift<BITS>();
+            uint8_t pfx_bytes[MAX_SKIP];
+            for (uint8_t pi = 0; pi < ps; ++pi)
+                pfx_bytes[pi] = static_cast<uint8_t>(ik >> (BS + CHAR_BIT * (ps - pi)));
+            uint64_t* bm_node = bm_to_node(child_tagged);
+            child_tagged = BO::wrap_in_chain(bm_node, pfx_bytes, ps, bld);
         }
 
         bld.dealloc_node(const_cast<uint64_t*>(node), CO::alloc_total_u64(hdr->alloc_u64()));

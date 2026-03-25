@@ -62,28 +62,6 @@ class TestInt64:
         m["a"] = 2
         assert m["a"] == 2
 
-    def test_modify(self):
-        m = kstrie.Int64()
-        m["k"] = 10
-        assert m.modify("k", lambda v: v + 5)
-        assert m["k"] == 15
-        assert not m.modify("miss", lambda v: v)
-
-    def test_modify_with_default(self):
-        m = kstrie.Int64()
-        assert not m.modify("k", lambda v: v * 2, 42)
-        assert m["k"] == 42
-        assert m.modify("k", lambda v: v * 2, 0)
-        assert m["k"] == 84
-
-    def test_erase_when(self):
-        m = kstrie.Int64()
-        m["a"] = 10
-        assert not m.erase_when("a", lambda v: v == 99)
-        assert "a" in m
-        assert m.erase_when("a", lambda v: v == 10)
-        assert "a" not in m
-
     def test_clear(self):
         m = kstrie.Int64()
         for i in range(50):
@@ -313,12 +291,6 @@ class TestObject:
         m = kstrie.Object()
         m["user/1"] = {"name": "alice"}
         assert m["user/1"] == {"name": "alice"}
-
-    def test_modify(self):
-        m = kstrie.Object()
-        m["k"] = [1, 2]
-        m.modify("k", lambda v: v + [3])
-        assert m["k"] == [1, 2, 3]
 
     def test_prefix_copy(self):
         m = kstrie.Object()

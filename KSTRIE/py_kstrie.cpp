@@ -24,6 +24,33 @@ void bind_kstrie(py::module_& m, const char* name) {
     using trie_t = kstrie<V>;
     using iter_t = typename trie_t::const_iterator;
 
+    // Helper iterator class for Python __iter__ protocol.
+    // lazy_key is not a Python type, so we can't use py::make_iterator
+    // directly — each __next__ materializes the key as std::string.
+    struct py_iter {
+        iter_t it;
+        iter_t end_it;
+        py_iter(iter_t&& i, iter_t&& e)
+            : it(std::move(i)), end_it(std::move(e)) {}
+    };
+
+    std::string iter_name = std::string("_Iter_") + name;
+    py::class_<py_iter>(m, iter_name.c_str())
+        .def("__iter__", [](py_iter& self) -> py_iter& { return self; })
+        .def("__next__", [](py_iter& self) -> py::tuple {
+            if (self.it == self.end_it)
+                throw py::stop_iteration();
+            std::string key = (*self.it).first;
+            const V& val = (*self.it).second;
+            py::tuple result;
+            if constexpr (std::is_same_v<V, py::object>)
+                result = py::make_tuple(key, val);
+            else
+                result = py::make_tuple(key, static_cast<PyV>(val));
+            ++self.it;
+            return result;
+        });
+
     auto cls = py::class_<trie_t>(m, name)
 
         // Construction
@@ -65,9 +92,9 @@ void bind_kstrie(py::module_& m, const char* name) {
         // __bool__
         .def("__bool__", [](const trie_t& t) { return !t.empty(); })
 
-        // __iter__ — yields (key, value) tuples
+        // __iter__ — yields (key, value) tuples in sorted order
         .def("__iter__", [](const trie_t& t) {
-            return py::make_iterator(t.begin(), t.end());
+            return py_iter(t.begin(), iter_t(t.end()));
         }, py::keep_alive<0, 1>())
 
         // get(key, default=None)
@@ -81,49 +108,12 @@ void bind_kstrie(py::module_& m, const char* name) {
                 return py::cast(static_cast<PyV>(it.value()));
         }, py::arg("key"), py::arg("default") = py::none())
 
-        // insert(key, value) → bool
+        // insert(key, value) → bool (true if inserted, false if already exists)
         .def("insert", [](trie_t& t, std::string_view key, PyV val) -> bool {
             if constexpr (std::is_same_v<V, py::object>)
-                return t.insert(key, val);
+                return t.insert(key, val).second;
             else
-                return t.insert(key, static_cast<V>(val));
-        })
-
-        // modify(key, fn) → bool
-        // modify(key, fn, default) → bool
-        .def("modify", [](trie_t& t, std::string_view key, py::function fn,
-                          py::object dflt) -> bool {
-            if (dflt.is_none()) {
-                return t.modify(key, [&fn](V& v) {
-                    if constexpr (std::is_same_v<V, py::object>)
-                        v = fn(v);
-                    else
-                        v = fn(py::cast(v)).template cast<V>();
-                });
-            } else {
-                V def_val;
-                if constexpr (std::is_same_v<V, py::object>)
-                    def_val = dflt;
-                else
-                    def_val = dflt.cast<V>();
-                return t.modify(key, [&fn](V& v) {
-                    if constexpr (std::is_same_v<V, py::object>)
-                        v = fn(v);
-                    else
-                        v = fn(py::cast(v)).template cast<V>();
-                }, def_val);
-            }
-        }, py::arg("key"), py::arg("fn"), py::arg("default") = py::none())
-
-        // erase_when(key, fn) → bool
-        .def("erase_when", [](trie_t& t, std::string_view key,
-                              py::function fn) -> bool {
-            return t.erase_when(key, [&fn](const V& v) -> bool {
-                if constexpr (std::is_same_v<V, py::object>)
-                    return fn(v).template cast<bool>();
-                else
-                    return fn(py::cast(v)).template cast<bool>();
-            });
+                return t.insert(key, static_cast<V>(val)).second;
         })
 
         // clear()
@@ -132,20 +122,20 @@ void bind_kstrie(py::module_& m, const char* name) {
         // memory_usage()
         .def("memory_usage", &trie_t::memory_usage)
 
-        // items() — yields (key, value) tuples
+        // items() — yields (key, value) tuples in sorted order
         .def("items", [](const trie_t& t) {
-            return py::make_iterator(t.begin(), t.end());
+            return py_iter(t.begin(), iter_t(t.end()));
         }, py::keep_alive<0, 1>())
 
-        // keys()
+        // keys() → list[str]
         .def("keys", [](const trie_t& t) {
             py::list result;
             for (auto it = t.begin(); it != t.end(); ++it)
-                result.append(py::cast(it.key()));
+                result.append(py::cast(std::string((*it).first)));
             return result;
         })
 
-        // values()
+        // values() → list[value]
         .def("values", [](const trie_t& t) {
             py::list result;
             for (auto it = t.begin(); it != t.end(); ++it) {

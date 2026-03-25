@@ -679,6 +679,7 @@ struct bitmask_ops {
             nbm.set_bit(suffix);
             VST* nvd = bl_vals_mut(nn, hs);
             int isl = nbm.find_slot<slot_mode::UNFILTERED>(suffix);
+
             std::memcpy(nvd, vd, isl * sizeof(VST));
             VT::write_slot(&nvd[isl], value);
             std::memcpy(nvd + isl + 1, vd + isl, (count - isl) * sizeof(VST));
@@ -832,8 +833,10 @@ struct bitmask_ops {
         auto* h = get_header(node);
         h->set_entries(1);
         h->set_alloc_u64(sz);
+        bm_mut(node, hs) = bitmap_256_t{};
         bm_mut(node, hs).set_bit(suffix);
         if constexpr (VT::IS_BOOL) {
+            val_bm_mut(node, hs) = bitmap_256_t{};
             if (value) val_bm_mut(node, hs).set_bit(suffix);
         } else {
             VT::init_slot(&bl_vals_mut(node, hs)[0], value);
