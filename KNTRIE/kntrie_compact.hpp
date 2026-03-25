@@ -357,7 +357,9 @@ struct compact_ops {
             }
 
             bld.dealloc_node(node, current_total);
-            return {tag_leaf(nn), true, nc};
+            iter_entry_t nx = (idx < nc) ? entry_at_pos(nn, static_cast<uint16_t>(idx))
+                                         : iter_entry_t{};
+            return {tag_leaf(nn), true, nc, nx};
         }
 
         unsigned tail = entries - idx - 1;
@@ -373,7 +375,9 @@ struct compact_ops {
             std::memmove(vd + idx, vd + idx + 1, tail * sizeof(VST));
         }
         h->set_entries(nc);
-        return {tag_leaf(node), true, nc};
+        iter_entry_t nx = (idx < nc) ? entry_at_pos(node, static_cast<uint16_t>(idx))
+                                     : iter_entry_t{};
+        return {tag_leaf(node), true, nc, nx};
     }
 
     // ==================================================================
@@ -423,6 +427,15 @@ public:
             return bool_vals_mut(node).data;
         else
             return &vals_mut(node)[pos];
+    }
+
+    // Build iter_entry_t at a given position in this leaf.
+    static iter_entry_t entry_at_pos(uint64_t* node, uint16_t pos) noexcept {
+        constexpr size_t hs = LEAF_HEADER_U64;
+        depth_t d = get_depth(node);
+        const K* kd = keys(node, hs);
+        uint64_t key = d.to_ik(leaf_prefix(node), static_cast<uint64_t>(kd[pos]));
+        return {node, pos, 0, key, val_ptr(node, pos), true};
     }
 
     // ==================================================================

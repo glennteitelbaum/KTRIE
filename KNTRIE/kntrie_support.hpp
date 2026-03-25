@@ -1167,6 +1167,7 @@ struct erase_result_t {
     uint64_t tagged_ptr;    // tagged pointer, or 0 if fully erased
     bool erased;
     uint64_t subtree_entries;  // remaining entries in subtree (exact)
+    iter_entry_t next;      // next entry after erased (found=false → parent resolves)
 };
 
 } // namespace gteitelbaum::kntrie_detail

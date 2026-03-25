@@ -356,12 +356,15 @@ public:
 
     iter_entry_t lower_bound_entry(const KEY& key) const noexcept {
         uint64_t ik = key_to_u64(key);
+        return find_ge_entry(ik);
+    }
+
+    // Lower-bound by raw ik — used by erase_with_next fallback.
+    iter_entry_t find_ge_entry(uint64_t ik) const noexcept {
         return tracked_descent_fwd(ik, [](uint64_t* leaf, uint64_t ik_) -> iter_entry_t {
-            // Exact match?
             auto fn = get_find_fn(leaf);
             auto r = fn(leaf, ik_);
             if (r.found) return r;
-            // First entry > ik in this leaf (key-based, cold path)
             auto r2 = OPS::leaf_first_after(leaf, ik_, dir_t::FWD);
             if (r2.found) return r2;
             return walk_from_leaf(leaf, dir_t::FWD);
@@ -416,7 +419,7 @@ public:
 
     bool erase(const KEY& key) {
         if (size_v == 0) [[unlikely]] return false;
-        return erase_ik(key_to_u64(key));
+        return erase_ik(key_to_u64(key)).erased;
     }
 
     // Erase by leaf position — reconstruct key from {leaf, pos},
@@ -425,23 +428,39 @@ public:
     bool erase_at(uint64_t* leaf, uint16_t pos) {
         if (size_v == 0) [[unlikely]] return false;
         uint64_t ik = OPS::reconstruct_ik(leaf, pos);
-        return erase_ik(ik);
+        return erase_ik(ik).erased;
     }
 
     // Erase by cached ik — used by iterator which already has the key.
     bool erase_by_ik(uint64_t ik) {
         if (size_v == 0) [[unlikely]] return false;
-        return erase_ik(ik);
+        return erase_ik(ik).erased;
+    }
+
+    // Erase by cached ik and return next entry — used by erase(iterator).
+    // Hot path: next is computed during the erase unwind at zero extra cost.
+    // Cold path (root coalesce or erased the max entry): re-find via lower_bound.
+    iter_entry_t erase_with_next(uint64_t ik) {
+        if (size_v == 0) [[unlikely]] return {};
+        auto r = erase_ik(ik);
+        if (!r.erased) return {};
+        if (r.next.found) [[likely]] return r.next;
+        if (size_v == 0) return {};
+        // Rare: root-level coalesce invalidated next, or erased the max entry.
+        // Re-find from root — still O(K) but only on structural change.
+        return find_ge_entry(ik);
     }
 
 private:
-    bool erase_ik(uint64_t ik) {
-        if ((ik ^ root_prefix_v) & root_prefix_mask()) [[unlikely]] return false;
+    using erase_result_t = kntrie_detail::erase_result_t;
+
+    erase_result_t erase_ik(uint64_t ik) {
+        if ((ik ^ root_prefix_v) & root_prefix_mask()) [[unlikely]]
+            return {0, false, 0};
 
         uint64_t old_root_ptr = root_ptr_v;
         auto r = OPS::erase_node(root_ptr_v, ik, ik << root_skip_bits_v, root_skip_bytes(), bld_v);
-        bool erased = r.erased;
-        if (erased) [[likely]] {
+        if (r.erased) [[likely]] {
             root_ptr_v = r.tagged_ptr ? r.tagged_ptr : BO::SENTINEL_TAGGED;
             mark_root();
             --size_v;
@@ -449,15 +468,20 @@ private:
                 root_ptr_v = BO::SENTINEL_TAGGED;
                 root_prefix_v = 0;
                 set_root(0);
+                r.next = {};  // empty trie
             } else {
-                if (root_ptr_v != old_root_ptr) [[unlikely]] normalize_root();
-                // Belt and suspenders: coalesce if BM root under COMPACT_MAX
+                bool root_changed = (root_ptr_v != old_root_ptr);
+                if (root_changed) [[unlikely]] normalize_root();
                 if (size_v <= COMPACT_MAX && !(root_ptr_v & LEAF_BIT)
-                    && root_ptr_v != BO::SENTINEL_TAGGED) [[unlikely]]
+                    && root_ptr_v != BO::SENTINEL_TAGGED) [[unlikely]] {
                     coalesce_bm_to_leaf();
+                    // Root-level coalesce deallocates all old nodes.
+                    // r.next is stale — caller re-finds via find_ge_entry.
+                    r.next = {};
+                }
             }
         }
-        return erased;
+        return r;
     }
 public:
 

@@ -726,6 +726,21 @@ struct bitmask_ops {
     // Bitmap256 leaf: erase
     // ==================================================================
 
+    // After erasing suffix, find the next entry in forward order.
+    // suffix is already cleared. slot is the erased slot position (non-bool).
+    static iter_entry_t bitmap_next_after(uint64_t* node, uint8_t suffix,
+                                           int slot) noexcept {
+        constexpr size_t hs = LEAF_HEADER_U64;
+        auto nxt = bm(node, hs).next_bit_after(suffix);
+        if (!nxt.found) return {};
+        depth_t d = get_depth(node);
+        uint64_t key = d.to_ik(leaf_prefix(node), static_cast<uint64_t>(nxt.idx));
+        uint16_t npos = VT::IS_BOOL ? static_cast<uint16_t>(nxt.idx)
+                                     : static_cast<uint16_t>(slot);
+        return {node, npos, static_cast<uint16_t>(nxt.idx),
+                key, bm_val_ptr(node, hs, VT::IS_BOOL ? 0 : slot), true};
+    }
+
     static erase_result_t bitmap_erase(uint64_t* node, uint8_t suffix,
                                         BLD& bld) {
         auto* h = get_header(node);
@@ -755,9 +770,11 @@ struct bitmask_ops {
                 bm_mut(nn, hs) = bm;
                 val_bm_mut(nn, hs) = val_bm(node, hs);
                 bld.dealloc_node(node, h->alloc_u64());
-                return {tag_leaf(nn), true, nc};
+                return {tag_leaf(nn), true, nc,
+                        bitmap_next_after(nn, suffix, 0)};
             }
-            return {tag_leaf(node), true, nc};
+            return {tag_leaf(node), true, nc,
+                    bitmap_next_after(node, suffix, 0)};
         } else {
             int slot = bm.find_slot<slot_mode::UNFILTERED>(suffix);
             bld.destroy_value(bl_vals_mut(node, hs)[slot]);
@@ -775,7 +792,8 @@ struct bitmask_ops {
                 bm.clear_bit(suffix);
                 std::memmove(vd + slot, vd + slot + 1, (nc - slot) * sizeof(VST));
                 h->set_entries(nc);
-                return {tag_leaf(node), true, nc};
+                return {tag_leaf(node), true, nc,
+                        bitmap_next_after(node, suffix, slot)};
             }
 
             size_t au64 = round_up_u64(new_sz);
@@ -792,7 +810,8 @@ struct bitmask_ops {
             std::memcpy(nv + slot, ov + slot + 1, (nc - slot) * sizeof(VST));
 
             bld.dealloc_node(node, h->alloc_u64());
-            return {tag_leaf(nn), true, nc};
+            return {tag_leaf(nn), true, nc,
+                    bitmap_next_after(nn, suffix, slot)};
         }
     }
 

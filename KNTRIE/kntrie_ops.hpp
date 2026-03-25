@@ -1040,6 +1040,21 @@ struct kntrie_ops {
         if (!cr.erased) [[unlikely]]
             return {tag_bitmask(node), false, 0};
 
+        // Resolve next: if child provided it, use it. Otherwise this
+        // child's subtree is exhausted forward — find next sibling.
+        iter_entry_t resolved_next = cr.next;
+        if (!resolved_next.found) {
+            // Find next sibling in this bitmask's bitmap
+            uint64_t bm_ptr = (sc > 0)
+                ? static_cast<uint64_t>(reinterpret_cast<std::uintptr_t>(
+                    &BO::chain_bitmap(node, sc)))
+                : BO::node_bm_ptr(node);
+            auto [sib, sib_found] = BO::bm_next_sibling(bm_ptr, ti);
+            if (sib_found)
+                resolved_next = BO::descend_edge_loop(sib, dir_t::FWD);
+            // else: this entire bitmask exhausted → parent resolves
+        }
+
         if (cr.tagged_ptr) [[likely]] {
             // Child still exists — update pointer if changed
             if (cr.tagged_ptr != cl.child) [[unlikely]] {
@@ -1052,10 +1067,10 @@ struct kntrie_ops {
             uint64_t exact = dec_descendants(node, hdr);
             if (exact <= COMPACT_MAX) [[unlikely]] {
                 return depth_switch(depth, [&]<int BITS>() {
-                    return do_coalesce<BITS>(node, hdr, bld);
+                    return do_coalesce<BITS>(node, hdr, ik, bld);
                 });
             }
-            return {tag_bitmask(node), true, exact};
+            return {tag_bitmask(node), true, exact, resolved_next};
         }
 
         // Child fully erased — remove from bitmap
@@ -1064,7 +1079,7 @@ struct kntrie_ops {
             nn = BO::chain_remove_child(node, hdr, sc, cl.slot, ti, bld);
         else
             nn = BO::remove_child(node, hdr, cl.slot, ti, bld);
-        if (!nn) [[unlikely]] return {0, true, 0};
+        if (!nn) [[unlikely]] return {0, true, 0, resolved_next};
 
         hdr = get_header(nn);
         unsigned nc = hdr->entries();
@@ -1086,20 +1101,20 @@ struct kntrie_ops {
                                leaf_prefix(leaf), bld);
                 });
                 bld.dealloc_node(nn, nn_au64);
-                return {tag_leaf(leaf), true, exact};
+                return {tag_leaf(leaf), true, exact, resolved_next};
             }
             uint64_t* child_node = bm_to_node(ci.sole_child);
             bld.dealloc_node(nn, nn_au64);
             return {BO::wrap_in_chain(child_node, ci.bytes, ci.total_skip, bld),
-                    true, exact};
+                    true, exact, resolved_next};
         }
 
         if (exact <= COMPACT_MAX) [[unlikely]] {
             return depth_switch(depth, [&]<int BITS>() {
-                return do_coalesce<BITS>(nn, get_header(nn), bld);
+                return do_coalesce<BITS>(nn, get_header(nn), ik, bld);
             });
         }
-        return {tag_bitmask(nn), true, exact};
+        return {tag_bitmask(nn), true, exact, resolved_next};
     }
 
     template<int BITS>
@@ -1185,7 +1200,7 @@ struct kntrie_ops {
 
     template<int BITS> requires (BITS >= U8_BITS)
     static erase_result_t do_coalesce(uint64_t* node, node_header_t* hdr,
-                                        BLD& bld) {
+                                        uint64_t ik, BLD& bld) {
         using NK = nk_for_bits_t<BITS>;
         uint8_t sc = hdr->skip();
         uint64_t total_entries = BO::chain_descendants(node, sc, hdr->entries());
@@ -1242,7 +1257,26 @@ struct kntrie_ops {
         }
 
         dealloc_coalesced_node<BITS>(node, sc, bld);
-        return {tag_leaf(leaf), true, static_cast<uint64_t>(total_entries)};
+
+        // Compute next entry in coalesced leaf (cold path).
+        // The erased key is gone; find first entry with suffix > erased suffix.
+        iter_entry_t nx{};
+        if constexpr (sizeof(NK) > sizeof(uint8_t)) {
+            using CO = compact_ops<NK, VALUE, ALLOC>;
+            NK suffix = leaf_ops_t<BITS>::template to_suffix<BITS>(ik);
+            NK* kd = CO::keys(leaf, LEAF_HEADER_U64);
+            unsigned entries = get_header(leaf)->entries();
+            const NK* base = adaptive_search<NK>::find_base_first(kd, entries, suffix);
+            uint16_t idx = static_cast<uint16_t>(base - kd);
+            if (idx < entries)
+                nx = CO::entry_at_pos(leaf, idx);
+        } else {
+            // Bitmap: next set bit after erased suffix
+            nx = BO::bitmap_next_after(leaf, 
+                static_cast<uint8_t>(leaf_ops_t<BITS>::template to_suffix<BITS>(ik)), 0);
+        }
+
+        return {tag_leaf(leaf), true, static_cast<uint64_t>(total_entries), nx};
     }
 
     // ==================================================================

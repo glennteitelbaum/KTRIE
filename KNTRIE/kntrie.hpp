@@ -340,9 +340,9 @@ public:
     }
 
     iterator erase(iterator pos) {
-        auto next = pos; ++next;
-        impl_.erase_by_ik(pos.ik_v);
-        return next;
+        auto e = impl_.erase_with_next(pos.ik_v);
+        if (!e.found) return end();
+        return iterator(e);
     }
 
     iterator erase(iterator first, iterator last) {
