@@ -203,6 +203,55 @@ public:
             fs.buf_pv = nullptr;  // prevent fast_string from interfering
         }
 
+        // Build mapped key (CHARMAP already applied) from parent walk.
+        // Same traversal as ensure_key but skips from_index — bytes stay
+        // in trie-internal mapped form. Caller owns the fast_string buffer.
+        void build_mapped_key(kstrie_detail::fast_string& fs) const {
+            fs.clear();
+
+            hdr_type lh = hdr_type::from_node(leaf_v);
+            const auto& pfx = compact_type::get_prefix(leaf_v, lh);
+            const uint8_t* base = reinterpret_cast<const uint8_t*>(leaf_v)
+                                + hdr_type::COMPACT_ARRAYS_OFF;
+            const uint8_t* L = base;
+            const uint8_t* F = base + pfx.cap;
+            const kstrie_detail::ks_offset_type* O =
+                reinterpret_cast<const kstrie_detail::ks_offset_type*>(F + pfx.cap);
+            const uint8_t* B = reinterpret_cast<const uint8_t*>(leaf_v)
+                             + pfx.skip_data_off + lh.skip_bytes();
+
+            const uint8_t* skip = hdr_type::get_skip(leaf_v, lh);
+            size_t skip_len = lh.skip_bytes();
+            uint8_t klen = L[pos_v];
+
+            // No from_index — bytes are already mapped
+            if (klen == 0) [[unlikely]]
+                fs.prepend(skip, skip_len);
+            else if (klen == 1)
+                fs.prepend(skip, skip_len, F[pos_v]);
+            else
+                fs.prepend(skip, skip_len, F[pos_v],
+                           B + O[pos_v], klen - 1);
+
+            uint64_t* node = compact_type::get_parent(leaf_v);
+            uint16_t nb = compact_type::get_parent_byte(leaf_v, lh);
+
+            while (node) {
+                hdr_type h = hdr_type::from_node(node);
+                const uint8_t* nsk = hdr_type::get_skip(node, h);
+                size_t nsk_len = h.skip_bytes();
+
+                // No from_index — dispatch byte is already mapped
+                if (nb == kstrie_detail::EOS_PARENT_BYTE) [[unlikely]]
+                    fs.prepend(nsk, nsk_len);
+                else
+                    fs.prepend(nsk, nsk_len, static_cast<uint8_t>(nb));
+
+                nb = bitmask_type::get_parent_byte(node);
+                node = bitmask_type::get_parent(node);
+            }
+        }
+
     public:
         // -----------------------------------------------------------
         // lazy_key proxy — defers key construction until use
@@ -523,33 +572,25 @@ public:
 
     const_iterator erase(const const_iterator& pos) {
         if (pos == end()) return end();
-        // Build key from iterator position, erase, find next
-        std::string key = (*pos).first;
-        impl_v.erase(key);
-        return lower_bound(key);
+        // Build mapped key from parent walk — no CHARMAP round-trip, no string alloc.
+        kstrie_detail::fast_string mk;
+        pos.build_mapped_key(mk);
+        const uint8_t* mapped = reinterpret_cast<const uint8_t*>(mk.buf_pv);
+        uint32_t len = static_cast<uint32_t>(mk.len_v);
+        impl_v.erase_mapped(mapped, len);
+        // Re-find next entry using the same mapped bytes (one descent).
+        const_iterator it(const_cast<impl_t*>(&impl_v));
+        find_ge_iter(impl_v.get_root(), mapped, len, 0, it);
+        delete[] mk.buf_pv;
+        mk.buf_pv = nullptr;
+        return it;
     }
 
     const_iterator erase(const const_iterator& first, const const_iterator& last) {
-        if (first == last) {
-            if (last == end()) return end();
-            std::string lk = (*last).first;
-            return lower_bound(lk);
-        }
-        std::string first_key = (*first).first;
-        std::string last_key;
-        bool have_last = (last != end());
-        if (have_last) last_key = (*last).first;
-
-        std::vector<std::string> keys;
-        for (auto it = lower_bound(first_key); it != end(); ++it) {
-            std::string k = (*it).first;
-            if (have_last && k >= last_key) break;
-            keys.push_back(std::move(k));
-        }
-        for (auto& k : keys)
-            impl_v.erase(k);
-        if (!have_last) return end();
-        return lower_bound(last_key);
+        auto it = first;
+        while (it != last && it != end())
+            it = erase(it);
+        return it;
     }
 
     void clear() noexcept { impl_v.clear(); }

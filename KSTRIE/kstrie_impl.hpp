@@ -852,6 +852,13 @@ public:
                                               stack_buf, sizeof(stack_buf));
         std::unique_ptr<uint8_t[]> heap_guard(raw_buf);
 
+        return erase_mapped(mapped, len);
+    }
+
+    // Erase using pre-mapped key bytes (CHARMAP already applied).
+    size_type erase_mapped(const uint8_t* mapped, uint32_t len) {
+        if (root_v == compact_type::sentinel()) return 0;
+
         erase_info r = erase_node(root_v, mapped, len, 0);
 
         if (r.status == erase_status::MISSING)
