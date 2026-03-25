@@ -1280,6 +1280,39 @@ struct kntrie_ops {
     // NK-independent helpers
     // ==================================================================
 
+    // Build iter_entry_t from insert_pos_result_t {leaf, pos} + known ik.
+    // For compact leaves, pos is the slot index.
+    // For bitmap leaves, pos is the suffix byte value.
+    // Cold path: called once per insert that returns an iterator.
+    static iter_entry_t entry_from_insert_pos(uint64_t* leaf, uint16_t pos,
+                                                uint64_t ik) noexcept {
+        if (!leaf) return {};
+        constexpr size_t hs = LEAF_HEADER_U64;
+        depth_t d = get_depth(leaf);
+        uint8_t nk_bits = U64_BITS - d.shift;
+
+        if (nk_bits <= U8_BITS) {
+            // Bitmap leaf: pos is the suffix byte
+            uint8_t suffix = static_cast<uint8_t>(pos);
+            int slot = BO::bm(leaf, hs).template find_slot<slot_mode::FAST_EXIT>(suffix);
+            uint16_t ret_pos = VT::IS_BOOL ? pos : static_cast<uint16_t>(slot);
+            return {leaf, ret_pos, pos, ik,
+                    BO::bm_val_ptr(leaf, hs, slot), true};
+        }
+
+        // Compact leaf: dispatch on key width for correct val_ptr offset
+        auto do_val = [&]<typename K2>() -> void* {
+            return compact_ops<K2, VALUE, ALLOC>::val_ptr(leaf, pos);
+        };
+
+        void* val;
+        if      (nk_bits <= U16_BITS) val = do_val.template operator()<uint16_t>();
+        else if (nk_bits <= U32_BITS) val = do_val.template operator()<uint32_t>();
+        else                          val = do_val.template operator()<uint64_t>();
+
+        return {leaf, pos, 0, ik, val, true};
+    }
+
     static void inc_descendants(uint64_t* node, node_header_t* hdr) noexcept {
         BO::chain_descendants_mut(node, hdr->skip(), hdr->entries())++;
     }

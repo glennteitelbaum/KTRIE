@@ -401,6 +401,12 @@ public:
         return insert_dispatch<true, false>(key, value);
     }
 
+    // Build iter_entry_t from {leaf, pos} returned by insert_dispatch.
+    // Single-walk: avoids the second find_entry descent.
+    iter_entry_t entry_from_pos(uint64_t* leaf, uint16_t pos, const KEY& key) const noexcept {
+        return OPS::entry_from_insert_pos(leaf, pos, key_to_u64(key));
+    }
+
     // Insert-or-assign returning {leaf, pos, was_new_insert}.
     insert_pos_result_t upsert_with_pos(const KEY& key, const VALUE& value) {
         return insert_dispatch<true, true>(key, value);

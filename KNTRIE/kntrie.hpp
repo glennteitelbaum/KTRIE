@@ -258,8 +258,9 @@ public:
     }
 
     mapped_ref operator[](const KEY& key) {
-        auto r = impl_.insert_with_pos(to_unsigned(key), VALUE{});
-        auto e = impl_.find_entry(to_unsigned(key));
+        UK uk = to_unsigned(key);
+        auto r = impl_.insert_with_pos(uk, VALUE{});
+        auto e = impl_.entry_from_pos(r.leaf, r.pos, uk);
         if constexpr (IS_BOOL) {
             constexpr unsigned BPW = 64;
             auto* base = static_cast<uint64_t*>(e.val);
@@ -277,22 +278,19 @@ public:
     std::pair<iterator, bool> insert(const value_type& kv) {
         UK uk = to_unsigned(kv.first);
         auto r = impl_.insert_with_pos(uk, kv.second);
-        auto e = impl_.find_entry(uk);
-        return {iterator(e), r.inserted};
+        return {iterator(impl_.entry_from_pos(r.leaf, r.pos, uk)), r.inserted};
     }
 
     std::pair<iterator, bool> insert(const KEY& key, const VALUE& value) {
         UK uk = to_unsigned(key);
         auto r = impl_.insert_with_pos(uk, value);
-        auto e = impl_.find_entry(uk);
-        return {iterator(e), r.inserted};
+        return {iterator(impl_.entry_from_pos(r.leaf, r.pos, uk)), r.inserted};
     }
 
     std::pair<iterator, bool> insert(value_type&& kv) {
         UK uk = to_unsigned(kv.first);
         auto r = impl_.insert_with_pos(uk, std::move(kv.second));
-        auto e = impl_.find_entry(uk);
-        return {iterator(e), r.inserted};
+        return {iterator(impl_.entry_from_pos(r.leaf, r.pos, uk)), r.inserted};
     }
 
     iterator insert(const_iterator, const value_type& kv) {
@@ -312,8 +310,7 @@ public:
     std::pair<iterator, bool> insert_or_assign(const KEY& key, const VALUE& value) {
         UK uk = to_unsigned(key);
         auto r = impl_.upsert_with_pos(uk, value);
-        auto e = impl_.find_entry(uk);
-        return {iterator(e), r.inserted};
+        return {iterator(impl_.entry_from_pos(r.leaf, r.pos, uk)), r.inserted};
     }
 
     template<typename... Args>
@@ -327,8 +324,7 @@ public:
         VALUE v(std::forward<Args>(args)...);
         UK uk = to_unsigned(key);
         auto r = impl_.insert_with_pos(uk, std::move(v));
-        auto e = impl_.find_entry(uk);
-        return {iterator(e), r.inserted};
+        return {iterator(impl_.entry_from_pos(r.leaf, r.pos, uk)), r.inserted};
     }
 
     // ==================================================================
