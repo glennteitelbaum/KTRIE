@@ -100,7 +100,7 @@ inline classify_result classify(const cat_trie_t& trie, const uint8_t* data, siz
     if ((size_t)clen > remaining) return {CL_OTHER, 1};
     uint32_t cp = decode_utf8(data, clen);
     auto it = trie.find(cp);
-    return {static_cast<uint8_t>(it != trie.end() ? it.value() : CL_OTHER), static_cast<uint8_t>(clen)};
+    return {static_cast<uint8_t>(it != trie.end() ? (*it).second : CL_OTHER), static_cast<uint8_t>(clen)};
 }
 
 inline cat_trie_t build_category_trie(const char* path) {
@@ -138,7 +138,7 @@ inline cat_trie_t build_category_trie(const char* path) {
     std::memset(g_ascii_class, CL_OTHER, sizeof(g_ascii_class));
     for (uint32_t cp = 0; cp < ASCII_COUNT; ++cp) {
         auto it = trie.find(cp);
-        if (it != trie.end()) g_ascii_class[cp] = it.value();
+        if (it != trie.end()) g_ascii_class[cp] = (*it).second;
     }
     return trie;
 }
@@ -471,7 +471,7 @@ struct vocab_data {
         for (uint32_t a = 0; a < BASE_TOKENS; ++a)
             for (uint32_t b = 0; b < BASE_TOKENS; ++b) {
                 auto it = pair_trie.find(pack_pair(byte_rank[a], byte_rank[b]));
-                byte_pair_rank[a][b] = it != pair_trie.end() ? it.value() : NO_RANK;
+                byte_pair_rank[a][b] = it != pair_trie.end() ? (*it).second : NO_RANK;
             }
     }
 };
@@ -532,13 +532,13 @@ inline void bpe_encode_chunk(const vocab_data& vd, const uint8_t* data, uint32_t
         // Left neighbor
         if (mi > 0) [[likely]] {
             auto it = vd.pair_trie.find(pack_pair(s.parts[mi-1], s.parts[mi]));
-            s.pair_ranks[mi-1] = it != vd.pair_trie.end() ? it.value() : NO_RANK;
+            s.pair_ranks[mi-1] = it != vd.pair_trie.end() ? (*it).second : NO_RANK;
         }
 
         // Right neighbor
         if (mi + 1 < n) [[likely]] {
             auto it = vd.pair_trie.find(pack_pair(s.parts[mi], s.parts[mi+1]));
-            s.pair_ranks[mi] = it != vd.pair_trie.end() ? it.value() : NO_RANK;
+            s.pair_ranks[mi] = it != vd.pair_trie.end() ? (*it).second : NO_RANK;
         }
     }
     std::memcpy(s.result, s.parts, n * sizeof(uint32_t));
@@ -560,7 +560,7 @@ inline void recover_merge_pairs(vocab_data& vd) {
         if (!ok) continue;
         for (uint32_t i = 0; i+1 < n; ++i) {
             auto it = vd.pair_trie.find(pack_pair(parts[i], parts[i+1]));
-            pr[i] = (it != vd.pair_trie.end() && it.value() < r) ? it.value() : NO_RANK;
+            pr[i] = (it != vd.pair_trie.end() && (*it).second < r) ? (*it).second : NO_RANK;
         }
         pr[n-1] = NO_RANK;
         while (n > 2) {
@@ -571,10 +571,10 @@ inline void recover_merge_pairs(vocab_data& vd) {
             if (tail > 0) { std::memmove(&parts[rm],&parts[rm+1],tail*4); std::memmove(&pr[rm],&pr[rm+1],tail*4); }
             n--;
             if (mi+1<n) { auto it = vd.pair_trie.find(pack_pair(parts[mi], parts[mi+1]));
-                           pr[mi] = (it != vd.pair_trie.end() && it.value() < r) ? it.value() : NO_RANK;
+                           pr[mi] = (it != vd.pair_trie.end() && (*it).second < r) ? (*it).second : NO_RANK;
             } else pr[mi] = NO_RANK;
             if (mi>0) { auto it = vd.pair_trie.find(pack_pair(parts[mi-1], parts[mi]));
-                         pr[mi-1] = (it != vd.pair_trie.end() && it.value() < r) ? it.value() : NO_RANK; }
+                         pr[mi-1] = (it != vd.pair_trie.end() && (*it).second < r) ? (*it).second : NO_RANK; }
         }
         if (n == 2) vd.pair_trie.insert(pack_pair(parts[0], parts[1]), r);
     }
@@ -695,7 +695,7 @@ struct huggingface_format {
             if (lit == str_to_rank.end() || rit == str_to_rank.end()) continue;
             auto mit = str_to_rank.find(ms.substr(0, sp) + ms.substr(sp + 1));
             if (mit == str_to_rank.end()) continue;
-            vd.pair_trie.insert(pack_pair(lit.value(), rit.value()), mit.value());
+            vd.pair_trie.insert(pack_pair(l(*it).second, r(*it).second), m(*it).second);
         }
         vd.build_byte_pair_table();
         return vd;
@@ -781,7 +781,7 @@ public:
           for (auto& r : ranges) {
               std::string_view key(reinterpret_cast<const char*>(corpus + r.off), r.len);
               auto it = seen.find(key);
-              if (it != seen.end()) { chunks[it.value()].freq++; }
+              if (it != seen.end()) { chunks[(*it).second].freq++; }
               else {
                   seen.insert(key, (uint32_t)chunks.size());
                   unique_chunk uc; uc.freq = 1; uc.tokens.resize(r.len);
@@ -825,21 +825,19 @@ public:
             int64_t w = (int64_t)c.freq;
             for (size_t i = 0; i + 1 < c.tokens.size(); ++i) {
                 uint32_t L = c.tokens[i], R = c.tokens[i + 1];
-                pair_counts.modify(pack_pair(L, R), [w](int64_t& v) { v += w; }, w);
+                pair_counts[pack_pair(L, R)] += w;
                 uint16_t hL = get_hot(L), hR = get_hot(R);
                 if (hL != NOT_HOT && hR != NOT_HOT) {
                     uint32_t hkey = pack_hot(hL, hR);
-                    hot_cache.modify(hkey, [w](int64_t& v) { v += w; }, w);
-                    hot_inv.modify(hkey, [ci](std::vector<uint32_t>& v) { v.push_back(ci); },
-                                   std::vector<uint32_t>{ci});
+                    hot_cache[hkey] += w;
+                    hot_inv[hkey].push_back(ci);
                 }
             }
         }
-        for (auto [key, cids] : hot_inv) {
-            hot_inv.modify(key, [](std::vector<uint32_t>& v) {
-                std::sort(v.begin(), v.end());
-                v.erase(std::unique(v.begin(), v.end()), v.end());
-            });
+        for (auto it = hot_inv.begin(); it != hot_inv.end(); ++it) {
+            auto& v = (*it).second;
+            std::sort(v.begin(), v.end());
+            v.erase(std::unique(v.begin(), v.end()), v.end());
         }
 
         using heap_entry = std::pair<int64_t, uint64_t>;
@@ -858,16 +856,15 @@ public:
         // Adjust pair count in both full and hot cache
         auto adjust_pair = [&](uint32_t L, uint32_t R, int64_t delta, uint32_t chunk_id) {
             uint64_t key64 = pack_pair(L, R);
-            int64_t nc = delta;
-            pair_counts.modify(key64, [&nc, delta](int64_t& v) { v += delta; nc = v; }, delta);
+            auto& pc = pair_counts[key64];
+            pc += delta;
+            int64_t nc = pc;
             if (delta > 0 && nc > 0) heap.push({nc, key64});
             uint16_t hL = get_hot(L), hR = get_hot(R);
             if (hL != NOT_HOT && hR != NOT_HOT) {
                 uint32_t hkey = pack_hot(hL, hR);
-                hot_cache.modify(hkey, [delta](int64_t& v) { v += delta; }, delta);
-                if (delta > 0) hot_inv.modify(hkey,
-                    [chunk_id](std::vector<uint32_t>& v) { v.push_back(chunk_id); },
-                    std::vector<uint32_t>{chunk_id});
+                hot_cache[hkey] += delta;
+                if (delta > 0) hot_inv[hkey].push_back(chunk_id);
             }
         };
 
@@ -898,7 +895,7 @@ public:
             while (!heap.empty()) {
                 auto [c, k] = heap.top(); heap.pop();
                 auto cur = pair_counts.find(k);
-                if (cur != pair_counts.end() && cur.value() == c && c > 0) { best_count = c; best_key = k; break; }
+                if (cur != pair_counts.end() && (*cur).second == c && c > 0) { best_count = c; best_key = k; break; }
             }
             if (best_count <= 0) break;
 
@@ -922,7 +919,7 @@ public:
                 uint32_t hkey = pack_hot(hL, hR);
                 auto inv_it = hot_inv.find(hkey);
                 if (inv_it != hot_inv.end()) {
-                    hot_chunk_ids = inv_it.value();
+                    hot_chunk_ids = (*inv_it).second;
                     hot_inv.erase(hkey);
                     std::sort(hot_chunk_ids.begin(), hot_chunk_ids.end());
                     hot_chunk_ids.erase(std::unique(hot_chunk_ids.begin(), hot_chunk_ids.end()),
