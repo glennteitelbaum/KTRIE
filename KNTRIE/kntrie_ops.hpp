@@ -241,6 +241,64 @@ struct kntrie_ops {
     }
 
     // ==================================================================
+    // leaf_find_ge — single-pass lower_bound: first entry >= ik in this leaf.
+    // One binary search instead of find + first_after.
+    // ==================================================================
+
+    static iter_entry_t leaf_find_ge(uint64_t* node, uint64_t ik) noexcept {
+        depth_t d = get_depth(node);
+        uint64_t pfx = leaf_prefix(node);
+        constexpr size_t hs = LEAF_HEADER_U64;
+        uint8_t nk_bits = U64_BITS - d.shift;
+
+        if (nk_bits <= U8_BITS) {
+            // Bitmap leaf: check exact, then next set bit
+            uint8_t suffix = static_cast<uint8_t>(d.suffix(ik));
+            const auto& bmp = BO::bm(node, hs);
+            if (bmp.has_bit(suffix)) {
+                int slot = bmp.template find_slot<slot_mode::UNFILTERED>(suffix);
+                uint16_t ret_pos = VT::IS_BOOL
+                    ? static_cast<uint16_t>(suffix)
+                    : static_cast<uint16_t>(slot);
+                uint64_t key = d.to_ik(pfx, static_cast<uint64_t>(suffix));
+                return {node, ret_pos, static_cast<uint16_t>(suffix),
+                        key, BO::bm_val_ptr(node, hs, VT::IS_BOOL ? 0 : slot), true};
+            }
+            auto r = bmp.next_set_after(suffix);
+            if (!r.found) return {};
+            uint64_t key = d.to_ik(pfx, static_cast<uint64_t>(r.idx));
+            uint16_t ret_pos = VT::IS_BOOL
+                ? static_cast<uint16_t>(r.idx)
+                : static_cast<uint16_t>(r.slot);
+            return {node, ret_pos, static_cast<uint16_t>(r.idx),
+                    key, BO::bm_val_ptr(node, hs, VT::IS_BOOL ? 0 : r.slot), true};
+        }
+
+        // Compact leaf — single adaptive_search pass (lower_bound)
+        auto do_compact = [&]<typename K>() -> iter_entry_t {
+            using CO = compact_ops<K, VALUE, ALLOC>;
+            K suffix = static_cast<K>(d.suffix(ik));
+            unsigned entries = get_header(node)->entries();
+            const K* kd = CO::keys(node, hs);
+
+            // find_base_first: last position where kd[pos] < suffix
+            const K* base = adaptive_search<K>::find_base_first(kd, entries, suffix);
+            uint16_t pos = static_cast<uint16_t>(base - kd);
+            if (kd[pos] < suffix) {
+                ++pos;
+                if (pos >= entries) return {};
+            }
+            // kd[pos] >= suffix
+            uint64_t key = d.to_ik(pfx, static_cast<uint64_t>(kd[pos]));
+            return {node, pos, 0, key, CO::val_ptr(node, pos), true};
+        };
+
+        if      (nk_bits <= U16_BITS) return do_compact.template operator()<uint16_t>();
+        else if (nk_bits <= U32_BITS) return do_compact.template operator()<uint32_t>();
+        else                          return do_compact.template operator()<uint64_t>();
+    }
+
+    // ==================================================================
     // leaf_first_after — key-based search for first entry > ik.
     // Cold path, used only by lower_bound / upper_bound.
     // Dispatches on leaf type via depth.

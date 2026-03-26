@@ -352,14 +352,11 @@ public:
         return find_ge_entry(ik);
     }
 
-    // Lower-bound by raw ik — used by erase_with_next fallback.
+    // Lower-bound by raw ik — single-pass leaf search.
     iter_entry_t find_ge_entry(uint64_t ik) const noexcept {
         return tracked_descent_fwd(ik, [](uint64_t* leaf, uint64_t ik_) -> iter_entry_t {
-            auto fn = get_find_fn(leaf);
-            auto r = fn(leaf, ik_);
+            auto r = OPS::leaf_find_ge(leaf, ik_);
             if (r.found) return r;
-            auto r2 = OPS::leaf_first_after(leaf, ik_, dir_t::FWD);
-            if (r2.found) return r2;
             return walk_from_leaf(leaf, dir_t::FWD);
         });
     }
