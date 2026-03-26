@@ -63,6 +63,10 @@ inline constexpr uint16_t padded_size(uint16_t needed) noexcept {
     return upper;
 }
 
+inline constexpr int LOG2_U64_BITS = 6;
+inline constexpr int U64_BIT_MASK  = 63;
+inline constexpr uint64_t U64_SIGN_BIT = uint64_t(1) << U64_BIT_MASK;
+
 template <size_t WORDS>
 struct bitmap_n {
     static_assert(WORDS == 1 || WORDS == 2 || WORDS == 4);
@@ -70,15 +74,15 @@ struct bitmap_n {
 
     [[nodiscard]] bool has_bit(uint8_t idx) const noexcept {
         if constexpr (WORDS == 1) return (words[0] >> idx) & 1;
-        else return (words[idx >> 6] >> (idx & 63)) & 1;
+        else return (words[idx >> LOG2_U64_BITS] >> (idx & U64_BIT_MASK)) & 1;
     }
     void set_bit(uint8_t idx) noexcept {
         if constexpr (WORDS == 1) words[0] |= uint64_t(1) << idx;
-        else words[idx >> 6] |= uint64_t(1) << (idx & 63);
+        else words[idx >> LOG2_U64_BITS] |= uint64_t(1) << (idx & U64_BIT_MASK);
     }
     void clear_bit(uint8_t idx) noexcept {
         if constexpr (WORDS == 1) words[0] &= ~(uint64_t(1) << idx);
-        else words[idx >> 6] &= ~(uint64_t(1) << (idx & 63));
+        else words[idx >> LOG2_U64_BITS] &= ~(uint64_t(1) << (idx & U64_BIT_MASK));
     }
     [[nodiscard]] int find_slot(uint8_t idx) const noexcept {
         if (!has_bit(idx)) return -1;
@@ -89,15 +93,15 @@ struct bitmap_n {
             uint64_t mask = (uint64_t(1) << idx) - 1;
             return std::popcount(words[0] & mask);
         } else if constexpr (WORDS == 2) {
-            int w = idx >> 6;
-            uint64_t mask = (uint64_t(1) << (idx & 63)) - 1;
+            int w = idx >> LOG2_U64_BITS;
+            uint64_t mask = (uint64_t(1) << (idx & U64_BIT_MASK)) - 1;
             int pc0 = std::popcount(words[0]);
             int cnt = std::popcount(words[w] & mask);
             cnt += pc0 & -int(w > 0);
             return cnt;
         } else {
-            int w = idx >> 6;
-            uint64_t mask = (uint64_t(1) << (idx & 63)) - 1;
+            int w = idx >> LOG2_U64_BITS;
+            uint64_t mask = (uint64_t(1) << (idx & U64_BIT_MASK)) - 1;
             int pc0 = std::popcount(words[0]);
             int pc1 = std::popcount(words[1]);
             int pc2 = std::popcount(words[2]);
@@ -118,8 +122,8 @@ struct bitmap_n {
         constexpr int MAX_BITS = WORDS * 64;
         if (start < 0) start = 0;
         if (start >= MAX_BITS) return -1;
-        int w = start >> 6;
-        uint64_t masked = words[w] & (~uint64_t(0) << (start & 63));
+        int w = start >> LOG2_U64_BITS;
+        uint64_t masked = words[w] & (~uint64_t(0) << (start & U64_BIT_MASK));
         while (true) {
             if (masked) return w * 64 + std::countr_zero(masked);
             if (++w >= static_cast<int>(WORDS)) return -1;
@@ -131,8 +135,8 @@ struct bitmap_n {
         constexpr int MAX_BITS = WORDS * 64;
         if (start < 0) return -1;
         if (start >= MAX_BITS) start = MAX_BITS - 1;
-        int w = start >> 6;
-        uint64_t masked = words[w] & (~uint64_t(0) >> (63 - (start & 63)));
+        int w = start >> LOG2_U64_BITS;
+        uint64_t masked = words[w] & (~uint64_t(0) >> (U64_BIT_MASK - (start & U64_BIT_MASK)));
         while (true) {
             if (masked) return w * 64 + 63 - std::countl_zero(masked);
             if (--w < 0) return -1;
@@ -246,7 +250,7 @@ struct kstrie_slots {
 
     static constexpr size_t BITS_PER_WORD = sizeof(uint64_t) * CHAR_BIT;
     static constexpr size_t WORD_BIT_MASK = BITS_PER_WORD - 1;
-    static constexpr size_t LOG2_BPW      = 6;
+    static constexpr size_t LOG2_BPW      = LOG2_U64_BITS;
 
     static constinit bool BOOL_VALUES[2];
 
@@ -557,7 +561,7 @@ struct node_header {
 
     static constexpr size_t BITMAP_WORDS = CHARMAP::BITMAP_WORDS;
 
-    // Bitmask bitmap at byte 16: after header(8B) + desc(8B)
+    // Bitmask bitmap at byte 24: after header(8B) + parent_ptr(8B) + total_tail(8B)
     static constexpr size_t BITMAP_NODE_OFF = 2;  // u64 offset
 
     [[nodiscard]] const uint64_t* get_bitmap_index(const uint64_t* node) const noexcept {
@@ -824,18 +828,26 @@ inline void map_bytes_into(const uint8_t* src, uint8_t* dst,
 }
 
 template <typename CHARMAP>
-inline std::pair<const uint8_t*, uint8_t*>
-get_mapped(const uint8_t* raw, uint32_t len,
-           uint8_t* stack_buf, size_t stack_size) noexcept {
-    if constexpr (CHARMAP::IS_IDENTITY) {
-        return {raw, nullptr};
-    } else {
-        uint8_t* hb = (len <= stack_size) ? nullptr : new uint8_t[len];
-        uint8_t* buf = hb ? hb : stack_buf;
-        map_bytes_into<CHARMAP>(raw, buf, len);
-        return {buf, hb};
+struct mapped_key {
+    static constexpr size_t STACK_SIZE = 256;
+    const uint8_t* data;
+    uint8_t  stack[STACK_SIZE];
+    uint8_t* heap = nullptr;
+
+    mapped_key(const uint8_t* raw, uint32_t len) noexcept {
+        if constexpr (CHARMAP::IS_IDENTITY) {
+            data = raw;
+        } else {
+            heap = (len <= STACK_SIZE) ? nullptr : new uint8_t[len];
+            uint8_t* buf = heap ? heap : stack;
+            map_bytes_into<CHARMAP>(raw, buf, len);
+            data = buf;
+        }
     }
-}
+    ~mapped_key() { delete[] heap; }
+    mapped_key(const mapped_key&) = delete;
+    mapped_key& operator=(const mapped_key&) = delete;
+};
 
 // ============================================================================
 // fast_string — heap-only key builder for lazy iterator reconstruction.
@@ -868,14 +880,12 @@ struct fast_string {
     // ---------------------------------------------------------
     // prepend — one memmove per call, skip always first.
     // ---------------------------------------------------------
-    // prepend — one memmove per call, skip always first.
-    // ---------------------------------------------------------
 
     // skip only (EOS edge)
+    // Precondition: sn > 0 (caller checks).
     void prepend(const uint8_t* skip, size_t sn) {
-        if (sn == 0) return;
         if (len_v + sn > cap_v) [[unlikely]] grow(len_v + sn);
-        if (len_v > 0) std::memmove(buf_pv + sn, buf_pv, len_v);
+        std::memmove(buf_pv + sn, buf_pv, len_v);
         std::memcpy(buf_pv, skip, sn);
         len_v += sn;
     }
@@ -884,7 +894,7 @@ struct fast_string {
     void prepend(const uint8_t* skip, size_t sn, uint8_t byte) {
         size_t total = sn + 1;
         if (len_v + total > cap_v) [[unlikely]] grow(len_v + total);
-        if (len_v > 0) std::memmove(buf_pv + total, buf_pv, len_v);
+        std::memmove(buf_pv + total, buf_pv, len_v);
         std::memcpy(buf_pv, skip, sn);
         buf_pv[sn] = static_cast<char>(byte);
         len_v += total;
@@ -895,10 +905,10 @@ struct fast_string {
                  uint8_t byte, const uint8_t* tail, size_t tn) {
         size_t total = sn + 1 + tn;
         if (len_v + total > cap_v) [[unlikely]] grow(len_v + total);
-        if (len_v > 0) std::memmove(buf_pv + total, buf_pv, len_v);
+        std::memmove(buf_pv + total, buf_pv, len_v);
         std::memcpy(buf_pv, skip, sn);
         buf_pv[sn] = static_cast<char>(byte);
-        if (tn > 0) std::memcpy(buf_pv + sn + 1, tail, tn);
+        std::memcpy(buf_pv + sn + 1, tail, tn);
         len_v += total;
     }
 

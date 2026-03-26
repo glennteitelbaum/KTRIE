@@ -923,7 +923,7 @@ struct kstrie_compact {
             parent[NODE_TOTAL_TAIL] = subtree_tail(existing)
                                     + subtree_tail(eos_node)
                                     + n_entries * match_len;
-            return {parent, insert_outcome::INSERTED};
+            return {parent, insert_outcome::INSERTED, eos_node, 0};
         }
 
         // MISMATCH: new entry has a dispatch byte at key_data[new_off].
@@ -957,7 +957,7 @@ struct kstrie_compact {
                                 + subtree_tail(new_child)
                                 + (static_cast<uint64_t>(eh.count) + 1)
                                   * match_len;
-        return {parent, insert_outcome::INSERTED};
+        return {parent, insert_outcome::INSERTED, new_child, 0};
     }
 
     // ------------------------------------------------------------------

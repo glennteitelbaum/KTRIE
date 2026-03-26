@@ -114,28 +114,34 @@ public:
     size_type count(std::string_view key) const { return impl_v.count(key); }
 
     // ------------------------------------------------------------------
-    // const_iterator — live, bidirectional, parent-walk navigation.
-    // Invalidated by any mutation (same as std::unordered_map).
+    // iterator_impl<Mutable> — live, bidirectional, parent-walk navigation.
+    // Invalidated by any mutation (more restrictive than std::map or std::unordered_map).
     // Key reconstruction is lazy — only built on dereference via
     // lazy_key proxy. Value-only iteration has zero key overhead.
     // ------------------------------------------------------------------
 
-    class const_iterator {
+    template<bool Mutable>
+    class iterator_impl {
         friend class kstrie;
+        friend class iterator_impl<!Mutable>;  // for cross-template ==
 
         uint64_t*  leaf_v   = nullptr;  // compact node (null = end)
         uint16_t   pos_v    = 0;        // slot index
         mutable char*   key_buf  = nullptr;  // owned buffer
         mutable size_t  key_len  = 0;
-        mutable size_t  key_cap  = 0;
-        impl_t*    impl_p  = nullptr;   // for --end() and root access
+        mutable size_t  key_cap  = 0;    // also stashes impl_t* for end sentinel via intptr_t
 
-        // End sentinel
-        explicit const_iterator(impl_t* impl) : impl_p(impl) {}
+        using value_ref = std::conditional_t<IS_BITMAP,
+            std::conditional_t<Mutable, bool_ref, bool>,
+            std::conditional_t<Mutable, VALUE&, const VALUE&>>;
+
+        // End sentinel — stash impl* in key_cap for --end()
+        explicit iterator_impl(impl_t* impl)
+            : key_cap(static_cast<size_t>(reinterpret_cast<std::intptr_t>(impl))) {}
 
         // Positioned (lazy — no key built)
-        const_iterator(impl_t* impl, uint64_t* leaf, uint16_t pos)
-            : leaf_v(leaf), pos_v(pos), impl_p(impl) {}
+        iterator_impl(impl_t* /*impl*/, uint64_t* leaf, uint16_t pos)
+            : leaf_v(leaf), pos_v(pos) {}
 
         // Free key buffer. len/cap are stale but never read —
         // ensure_key() overwrites all three when key_buf is set.
@@ -209,7 +215,7 @@ public:
         // -----------------------------------------------------------
 
         struct lazy_key {
-            const const_iterator* it_p;
+            const iterator_impl* it_p;
 
             operator std::string() const {
                 it_p->ensure_key();
@@ -240,28 +246,27 @@ public:
         using iterator_category = std::bidirectional_iterator_tag;
         using value_type        = std::pair<std::string, VALUE>;
         using difference_type   = std::ptrdiff_t;
-        using reference         = std::pair<lazy_key, const VALUE&>;
+        using reference         = std::pair<lazy_key, value_ref>;
 
         struct arrow_proxy {
-            std::pair<lazy_key, const VALUE&> p;
+            std::pair<lazy_key, value_ref> p;
             const auto* operator->() const noexcept { return &p; }
         };
         using pointer = arrow_proxy;
 
-        const_iterator() = default;
+        iterator_impl() = default;
 
-        ~const_iterator() { delete[] key_buf; }
+        ~iterator_impl() { delete[] key_buf; }
 
         // Move — steals buffer pointer
-        const_iterator(const_iterator&& o) noexcept
+        iterator_impl(iterator_impl&& o) noexcept
             : leaf_v(o.leaf_v), pos_v(o.pos_v),
-              key_buf(o.key_buf), key_len(o.key_len), key_cap(o.key_cap),
-              impl_p(o.impl_p) {
+              key_buf(o.key_buf), key_len(o.key_len), key_cap(o.key_cap) {
             o.key_buf = nullptr;
             o.leaf_v = nullptr;
         }
 
-        const_iterator& operator=(const_iterator&& o) noexcept {
+        iterator_impl& operator=(iterator_impl&& o) noexcept {
             if (this != &o) {
                 delete[] key_buf;
                 leaf_v  = o.leaf_v;
@@ -269,7 +274,6 @@ public:
                 key_buf = o.key_buf;
                 key_len = o.key_len;
                 key_cap = o.key_cap;
-                impl_p  = o.impl_p;
                 o.key_buf = nullptr;
                 o.leaf_v = nullptr;
             }
@@ -277,24 +281,22 @@ public:
         }
 
         // Copy — deep-copies buffer only if key was built
-        const_iterator(const const_iterator& o)
+        iterator_impl(const iterator_impl& o)
             : leaf_v(o.leaf_v), pos_v(o.pos_v),
-              key_len(o.key_len), key_cap(o.key_cap),
-              impl_p(o.impl_p) {
+              key_len(o.key_len), key_cap(o.key_cap) {
             if (o.key_buf) {
                 key_buf = new char[o.key_cap];
                 std::memcpy(key_buf, o.key_buf, o.key_len);
             }
         }
 
-        const_iterator& operator=(const const_iterator& o) {
+        iterator_impl& operator=(const iterator_impl& o) {
             if (this != &o) {
                 delete[] key_buf;
                 leaf_v  = o.leaf_v;
                 pos_v   = o.pos_v;
                 key_len = o.key_len;
                 key_cap = o.key_cap;
-                impl_p  = o.impl_p;
                 if (o.key_buf) {
                     key_buf = new char[o.key_cap];
                     std::memcpy(key_buf, o.key_buf, o.key_len);
@@ -305,15 +307,37 @@ public:
             return *this;
         }
 
+        // Implicit conversion: iterator → const_iterator
+        template<bool M2> requires (!Mutable && M2)
+        iterator_impl(const iterator_impl<M2>& o)
+            : leaf_v(o.leaf_v), pos_v(o.pos_v),
+              key_len(o.key_len), key_cap(o.key_cap) {
+            if (o.key_buf) {
+                key_buf = new char[o.key_cap];
+                std::memcpy(key_buf, o.key_buf, o.key_len);
+            }
+        }
+
         reference operator*() const {
             hdr_type h = hdr_type::from_node(leaf_v);
-            const auto* vb = h.get_compact_slots(leaf_v);
-            return {lazy_key{this}, *slots_type::load_value(vb, pos_v)};
+            if constexpr (Mutable) {
+                auto* vb = h.get_compact_slots(leaf_v);
+                if constexpr (IS_BITMAP) {
+                    return {lazy_key{this},
+                            bool_ref{vb + (pos_v >> slots_type::LOG2_BPW),
+                                     static_cast<uint8_t>(pos_v & slots_type::WORD_BIT_MASK)}};
+                } else {
+                    return {lazy_key{this}, *slots_type::load_value(vb, pos_v)};
+                }
+            } else {
+                const auto* vb = h.get_compact_slots(leaf_v);
+                return {lazy_key{this}, *slots_type::load_value(vb, pos_v)};
+            }
         }
 
         arrow_proxy operator->() const { return {**this}; }
 
-        const_iterator& operator++() {
+        iterator_impl& operator++() {
             invalidate_key();
             hdr_type h = hdr_type::from_node(leaf_v);
             if (pos_v + 1 < h.count) {
@@ -324,7 +348,7 @@ public:
             return *this;
         }
 
-        const_iterator& operator--() {
+        iterator_impl& operator--() {
             invalidate_key();
             if (!leaf_v) {
                 walk_to_edge(kstrie_detail::dir_t::BWD);
@@ -338,18 +362,21 @@ public:
             return *this;
         }
 
-        bool operator==(const const_iterator& o) const noexcept {
+        template<bool M2>
+        bool operator==(const iterator_impl<M2>& o) const noexcept {
             if (!leaf_v && !o.leaf_v) return true;
             if (!leaf_v || !o.leaf_v) return false;
             return leaf_v == o.leaf_v && pos_v == o.pos_v;
         }
-        bool operator!=(const const_iterator& o) const noexcept {
+        template<bool M2>
+        bool operator!=(const iterator_impl<M2>& o) const noexcept {
             return !(*this == o);
         }
 
     private:
         void walk_to_edge(kstrie_detail::dir_t dir) {
-            uint64_t* root = impl_p->get_root_mut();
+            auto* impl = reinterpret_cast<impl_t*>(static_cast<std::intptr_t>(key_cap));
+            uint64_t* root = impl->get_root_mut();
             if (root == compact_type::sentinel()) return;
             edge_entry(root, dir);
         }
@@ -357,33 +384,29 @@ public:
         // Pure descent — no key ops
         void edge_entry(uint64_t* node, kstrie_detail::dir_t dir) {
             using dir_t = kstrie_detail::dir_t;
-            while (true) {
-                hdr_type h = hdr_type::from_node(node);
-
-                if (h.is_compact()) {
-                    leaf_v = node;
-                    if (dir == dir_t::FWD)
-                        pos_v = 0;
-                    else
-                        pos_v = static_cast<uint16_t>(h.count - 1);
-                    return;
-                }
-
-                if (dir == dir_t::FWD) {
+            if (dir == dir_t::FWD) {
+                while (true) {
+                    hdr_type h = hdr_type::from_node(node);
+                    if (h.is_compact()) { leaf_v = node; pos_v = 0; return; }
                     uint64_t* eos = bitmask_type::eos_child(node, h);
-                    if (eos != compact_type::sentinel()) {
-                        node = eos;
-                        continue;
-                    }
+                    if (eos != compact_type::sentinel()) { node = eos; continue; }
                     const auto* bm = bitmask_type::get_bitmap(node, h);
                     int idx = bm->find_next_set(0);
                     if (idx < 0) [[unlikely]] return;
                     int slot = bm->count_below(static_cast<uint8_t>(idx));
                     node = bitmask_type::child_by_slot(node, h, slot);
-                } else {
+                }
+            } else {
+                while (true) {
+                    hdr_type h = hdr_type::from_node(node);
+                    if (h.is_compact()) {
+                        leaf_v = node;
+                        pos_v = static_cast<uint16_t>(h.count - 1);
+                        return;
+                    }
                     const auto* bm = bitmask_type::get_bitmap(node, h);
                     constexpr int MAX_BIT =
-                        static_cast<int>(CHARMAP::BITMAP_WORDS) * 64 - 1;
+                        static_cast<int>(CHARMAP::BITMAP_WORDS * sizeof(uint64_t) * CHAR_BIT) - 1;
                     int idx = bm->find_prev_set(MAX_BIT);
                     if (idx >= 0) {
                         int slot = bm->count_below(static_cast<uint8_t>(idx));
@@ -391,10 +414,7 @@ public:
                         continue;
                     }
                     uint64_t* eos = bitmask_type::eos_child(node, h);
-                    if (eos != compact_type::sentinel()) {
-                        node = eos;
-                        continue;
-                    }
+                    if (eos != compact_type::sentinel()) { node = eos; continue; }
                     return;
                 }
             }
@@ -451,20 +471,32 @@ public:
         }
     };
 
-    using iterator               = const_iterator;
-    using reverse_iterator       = std::reverse_iterator<const_iterator>;
+    using iterator               = iterator_impl<true>;
+    using const_iterator         = iterator_impl<false>;
+    using reverse_iterator       = std::reverse_iterator<iterator>;
     using const_reverse_iterator = std::reverse_iterator<const_iterator>;
 
 private:
-    mutable const_iterator end_v{const_cast<impl_t*>(&impl_v)};
+    mutable iterator end_v{const_cast<impl_t*>(&impl_v)};
 
-    void fix_end() noexcept { end_v.impl_p = const_cast<impl_t*>(&impl_v); }
+    void fix_end() noexcept {
+        end_v.key_cap = static_cast<size_t>(
+            reinterpret_cast<std::intptr_t>(const_cast<impl_t*>(&impl_v)));
+    }
 
 public:
 
     // ------------------------------------------------------------------
     // Iterator access
     // ------------------------------------------------------------------
+
+    iterator begin() {
+        uint64_t* root = impl_v.get_root_mut();
+        if (root == compact_type::sentinel()) return end();
+        iterator it(const_cast<impl_t*>(&impl_v));
+        it.edge_entry(root, kstrie_detail::dir_t::FWD);
+        return it;
+    }
 
     const_iterator begin() const {
         uint64_t* root = const_cast<impl_t&>(impl_v).get_root_mut();
@@ -474,15 +506,22 @@ public:
         return it;
     }
 
-    const const_iterator& end() const noexcept { return end_v; }
+    iterator&              end()       noexcept { return end_v; }
+    const const_iterator&  end() const noexcept {
+        return reinterpret_cast<const const_iterator&>(end_v);
+    }
 
     const_iterator cbegin() const { return begin(); }
-    const const_iterator& cend() const noexcept { return end_v; }
+    const const_iterator& cend() const noexcept {
+        return reinterpret_cast<const const_iterator&>(end_v);
+    }
 
-    reverse_iterator rbegin() const { return reverse_iterator(end()); }
-    reverse_iterator rend() const { return reverse_iterator(begin()); }
+    reverse_iterator       rbegin()       { return reverse_iterator(end()); }
+    reverse_iterator       rend()         { return reverse_iterator(begin()); }
+    const_reverse_iterator rbegin() const { return const_reverse_iterator(end()); }
+    const_reverse_iterator rend()   const { return const_reverse_iterator(begin()); }
     const_reverse_iterator crbegin() const { return rbegin(); }
-    const_reverse_iterator crend() const { return rend(); }
+    const_reverse_iterator crend()   const { return rend(); }
     // ------------------------------------------------------------------
     // Modifiers
     // ------------------------------------------------------------------
@@ -528,12 +567,8 @@ public:
         const uint8_t* raw = reinterpret_cast<const uint8_t*>(pos.key_buf);
         uint32_t len = static_cast<uint32_t>(pos.key_len);
 
-        uint8_t stack_buf[256];
-        auto [mapped, raw_buf] = kstrie_detail::get_mapped<CHARMAP>(raw, len,
-                                                  stack_buf, sizeof(stack_buf));
-        std::unique_ptr<uint8_t[]> heap_guard(raw_buf);
-
-        auto r = impl_v.erase_for_iter(mapped, len);
+        kstrie_detail::mapped_key<CHARMAP> mk(raw, len);
+        auto r = impl_v.erase_for_iter(mk.data, len);
         if (!r.erased) return end();
         if (r.next_leaf) {
             // Hot path: next entry known — construct iterator directly.
@@ -543,7 +578,7 @@ public:
         // Cold path: collapse or end — re-find from root.
         if (impl_v.empty()) return end();
         const_iterator it(const_cast<impl_t*>(&impl_v));
-        find_ge_iter(impl_v.get_root(), mapped, len, 0, it);
+        find_ge_iter(impl_v.get_root(), mk.data, len, 0, it);
         return it;
     }
 
@@ -602,13 +637,9 @@ public:
         const uint8_t* raw = reinterpret_cast<const uint8_t*>(key.data());
         uint32_t len = static_cast<uint32_t>(key.size());
 
-        uint8_t stack_buf[256];
-        auto [mapped, raw_buf] = kstrie_detail::get_mapped<CHARMAP>(raw, len,
-                                              stack_buf, sizeof(stack_buf));
-        std::unique_ptr<uint8_t[]> heap_guard(raw_buf);
-
+        kstrie_detail::mapped_key<CHARMAP> mk(raw, len);
         const_iterator it(const_cast<impl_t*>(&impl_v));
-        find_ge_iter(impl_v.get_root(), mapped, len, 0, it);
+        find_ge_iter(impl_v.get_root(), mk.data, len, 0, it);
         return it;
     }
 
@@ -630,10 +661,8 @@ public:
         const uint8_t* raw = reinterpret_cast<const uint8_t*>(pfx.data());
         uint32_t len = static_cast<uint32_t>(pfx.size());
 
-        uint8_t stack_buf[256];
-        auto [mapped, raw_buf] = kstrie_detail::get_mapped<CHARMAP>(raw, len,
-                                              stack_buf, sizeof(stack_buf));
-        std::unique_ptr<uint8_t[]> heap_guard(raw_buf);
+        kstrie_detail::mapped_key<CHARMAP> mk(raw, len);
+        const uint8_t* mapped = mk.data;
 
         struct right_turn {
             const uint64_t* bm_node;
@@ -743,23 +772,16 @@ public:
     size_t prefix_count(std::string_view pfx) const {
         const uint8_t* raw = reinterpret_cast<const uint8_t*>(pfx.data());
         uint32_t len = static_cast<uint32_t>(pfx.size());
-        uint8_t stack_buf[256];
-        auto [mapped, raw_buf] = kstrie_detail::get_mapped<CHARMAP>(
-            raw, len, stack_buf, sizeof(stack_buf));
-        std::unique_ptr<uint8_t[]> heap_guard(raw_buf);
-        size_t result = impl_v.prefix_count_impl(mapped, len);
-        return result;
+        kstrie_detail::mapped_key<CHARMAP> mk(raw, len);
+        return impl_v.prefix_count_impl(mk.data, len);
     }
 
     template<typename F>
     void prefix_walk(std::string_view pfx, F&& fn) const {
         const uint8_t* raw = reinterpret_cast<const uint8_t*>(pfx.data());
         uint32_t len = static_cast<uint32_t>(pfx.size());
-        uint8_t stack_buf[256];
-        auto [mapped, raw_buf] = kstrie_detail::get_mapped<CHARMAP>(
-            raw, len, stack_buf, sizeof(stack_buf));
-        std::unique_ptr<uint8_t[]> heap_guard(raw_buf);
-        impl_v.prefix_walk_impl(mapped, len, pfx, std::forward<F>(fn));
+        kstrie_detail::mapped_key<CHARMAP> mk(raw, len);
+        impl_v.prefix_walk_impl(mk.data, len, pfx, std::forward<F>(fn));
     }
 
     std::vector<std::pair<std::string, VALUE>>
@@ -774,10 +796,8 @@ public:
     kstrie prefix_copy(std::string_view pfx) const {
         const uint8_t* raw = reinterpret_cast<const uint8_t*>(pfx.data());
         uint32_t len = static_cast<uint32_t>(pfx.size());
-        uint8_t stack_buf[256];
-        auto [mapped, raw_buf] = kstrie_detail::get_mapped<CHARMAP>(
-            raw, len, stack_buf, sizeof(stack_buf));
-        std::unique_ptr<uint8_t[]> heap_guard(raw_buf);
+        kstrie_detail::mapped_key<CHARMAP> mk(raw, len);
+        const uint8_t* mapped = mk.data;
         kstrie result;
         auto r = impl_v.prefix_clone(mapped, len, result.impl_v.get_mem());
         if (r.cloned != impl_v.get_sentinel()) {
@@ -792,21 +812,15 @@ public:
     size_t prefix_erase(std::string_view pfx) {
         const uint8_t* raw = reinterpret_cast<const uint8_t*>(pfx.data());
         uint32_t len = static_cast<uint32_t>(pfx.size());
-        uint8_t stack_buf[256];
-        auto [mapped, raw_buf] = kstrie_detail::get_mapped<CHARMAP>(
-            raw, len, stack_buf, sizeof(stack_buf));
-        std::unique_ptr<uint8_t[]> heap_guard(raw_buf);
-        size_t result = impl_v.prefix_erase(mapped, len);
-        return result;
+        kstrie_detail::mapped_key<CHARMAP> mk(raw, len);
+        return impl_v.prefix_erase(mk.data, len);
     }
 
     kstrie prefix_split(std::string_view pfx) {
         const uint8_t* raw = reinterpret_cast<const uint8_t*>(pfx.data());
         uint32_t len = static_cast<uint32_t>(pfx.size());
-        uint8_t stack_buf[256];
-        auto [mapped, raw_buf] = kstrie_detail::get_mapped<CHARMAP>(
-            raw, len, stack_buf, sizeof(stack_buf));
-        std::unique_ptr<uint8_t[]> heap_guard(raw_buf);
+        kstrie_detail::mapped_key<CHARMAP> mk(raw, len);
+        const uint8_t* mapped = mk.data;
         auto r = impl_v.prefix_split_impl(mapped, len);
         kstrie result;
         if (r.stolen != impl_v.get_sentinel()) {
@@ -946,57 +960,50 @@ private:
     }
 
 
-    // find_prefix_first_pos: position of first entry matching prefix suffix.
+    // find_prefix_first_pos: binary search for first entry matching prefix suffix.
+    // Uses find_pos (O(log N)), then validates the candidate at insertion point.
     // Returns -1 if none found.
     static int find_prefix_first_pos(const uint64_t* node, const hdr_type& h,
                                       const uint8_t* suffix,
                                       uint32_t suffix_len) noexcept {
+        auto [found, pos] = compact_type::find_pos(node, h, suffix, suffix_len);
+        if (found) return pos;
+        if (pos >= h.count) return -1;
         const uint8_t* L = compact_type::lengths(node, h);
         const uint8_t* F = compact_type::firsts(node, h);
-        const kstrie_detail::ks_offset_type* O = compact_type::offsets(node, h);
-        const uint8_t* B = compact_type::keysuffix(node, h);
-        for (int i = 0; i < h.count; ++i) {
-            uint8_t klen = L[i];
-            if (klen < suffix_len) continue;
-            uint8_t tmp[256];
-            if (klen > 0) [[likely]] {
-                tmp[0] = F[i];
-                if (klen > 1) [[likely]] std::memcpy(tmp + 1, B + O[i], klen - 1);
-            }
-            if (std::memcmp(tmp, suffix, suffix_len) == 0)
-                return i;
-            if (std::memcmp(tmp, suffix, suffix_len) > 0)
-                return -1;  // past where it would be
+        if (L[pos] < suffix_len) return -1;
+        if (F[pos] != suffix[0]) return -1;
+        if (suffix_len > 1) {
+            const kstrie_detail::ks_offset_type* O = compact_type::offsets(node, h);
+            const uint8_t* B = compact_type::keysuffix(node, h);
+            if (std::memcmp(B + O[pos], suffix + 1, suffix_len - 1) != 0)
+                return -1;
         }
-        return -1;
+        return pos;
     }
 
     // find_prefix_past_pos: position of first entry AFTER all prefix-matching entries.
+    // Uses find_prefix_first_pos (O(log N)) then offset-aware forward scan:
+    // same O[] = same sharing chain = all match, skip memcmp. Check once per chain boundary.
     // Returns -1 if no such entry (all remaining entries match, or none match).
     static int find_prefix_past_pos(const uint64_t* node, const hdr_type& h,
                                      const uint8_t* suffix,
                                      uint32_t suffix_len) noexcept {
+        int first = find_prefix_first_pos(node, h, suffix, suffix_len);
+        if (first < 0) return -1;
         const uint8_t* L = compact_type::lengths(node, h);
         const uint8_t* F = compact_type::firsts(node, h);
-        const kstrie_detail::ks_offset_type* O = compact_type::offsets(node, h);
+        const auto*    O = compact_type::offsets(node, h);
         const uint8_t* B = compact_type::keysuffix(node, h);
-        bool in_prefix = false;
-        for (int i = 0; i < h.count; ++i) {
-            uint8_t klen = L[i];
-            bool matches = false;
-            if (klen >= suffix_len) {
-                uint8_t tmp[256];
-                if (klen > 0) [[likely]] {
-                    tmp[0] = F[i];
-                    if (klen > 1) [[likely]] std::memcpy(tmp + 1, B + O[i], klen - 1);
-                }
-                matches = (std::memcmp(tmp, suffix, suffix_len) == 0);
-            }
-            if (matches) {
-                in_prefix = true;
-            } else if (in_prefix) {
+        uint8_t match_f = F[first];
+        auto cur_off = O[first];
+        for (int i = first + 1; i < h.count; ++i) {
+            if (O[i] == cur_off) continue;        // same chain — all match
+            if (F[i] != match_f) return i;        // F changed — past prefix
+            if (L[i] < suffix_len) return i;
+            if (std::memcmp(B + O[i], suffix + 1, suffix_len - 1) != 0)
                 return i;
-            }
+            cur_off = O[i];                       // new chain matches
         }
         return -1;
     }

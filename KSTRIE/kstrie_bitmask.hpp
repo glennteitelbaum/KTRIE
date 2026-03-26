@@ -103,7 +103,7 @@ struct kstrie_bitmask {
         if constexpr (W > 1) count += pc0 & -int(word > 0);
         if constexpr (W > 2) count += pc1 & -int(word > 1);
         if constexpr (W > 3) count += pc2 & -int(word > 2);
-        bool found = before & (1ULL << 63);
+        bool found = before & U64_SIGN_BIT;
         count &= -uint64_t(found);
         return count;
     }

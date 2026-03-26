@@ -647,12 +647,8 @@ private:
         if constexpr (CHARMAP::IS_IDENTITY) {
             return find_inner(key_data, key_len);
         } else {
-            uint8_t stack_buf[256];
-            auto [mapped, raw_buf] = get_mapped<CHARMAP>(key_data, key_len,
-                                                  stack_buf, sizeof(stack_buf));
-            std::unique_ptr<uint8_t[]> heap_guard(raw_buf);
-            const VALUE* result = find_inner(mapped, key_len);
-            return result;
+            mapped_key<CHARMAP> mk(key_data, key_len);
+            return find_inner(mk.data, key_len);
         }
     }
 
@@ -768,12 +764,8 @@ public:
         const uint8_t* raw = reinterpret_cast<const uint8_t*>(key.data());
         uint32_t len = static_cast<uint32_t>(key.size());
 
-        uint8_t stack_buf[256];
-        auto [mapped, raw_buf] = get_mapped<CHARMAP>(raw, len,
-                                              stack_buf, sizeof(stack_buf));
-        std::unique_ptr<uint8_t[]> heap_guard(raw_buf);
-
-        return find_leaf_pos(const_cast<uint64_t*>(root_v), mapped, len, 0);
+        mapped_key<CHARMAP> mk(raw, len);
+        return find_leaf_pos(const_cast<uint64_t*>(root_v), mk.data, len, 0);
     }
 
     // find_leaf_pos: locate a key within a subtree, returning leaf + pos.
@@ -847,12 +839,8 @@ public:
         const uint8_t* raw = reinterpret_cast<const uint8_t*>(key.data());
         uint32_t len = static_cast<uint32_t>(key.size());
 
-        uint8_t stack_buf[256];
-        auto [mapped, raw_buf] = get_mapped<CHARMAP>(raw, len,
-                                              stack_buf, sizeof(stack_buf));
-        std::unique_ptr<uint8_t[]> heap_guard(raw_buf);
-
-        return erase_mapped(mapped, len);
+        mapped_key<CHARMAP> mk(raw, len);
+        return erase_mapped(mk.data, len);
     }
 
     // Erase using pre-mapped key bytes (CHARMAP already applied).
@@ -1534,21 +1522,11 @@ private:
             top_prefix_len = skip_len;
         }
 
-        // For top-level bitmask: walk without the skip (it stays as node skip)
-        // The skip belongs to the collapsed node, not to entries.
-        // So we pass no prefix and let the bitmask walk add dispatch bytes.
-        bool ok;
-        if (h.is_compact()) {
-            // Collapsing a single compact node — just shrink
-            ok = fill_layout(node, h, nullptr, 0,
-                             cL, cF, cO, cblob, cvals,
-                             ei, blob_cursor, chain_start);
-        } else {
-            // Bitmask: walk children. Skip stays on the collapsed node.
-            ok = fill_layout(node, h, nullptr, 0,
-                             cL, cF, cO, cblob, cvals,
-                             ei, blob_cursor, chain_start);
-        }
+        // fill_layout dispatches on is_compact()/is_bitmap() internally.
+        // Skip stays on the collapsed node, not on entries.
+        bool ok = fill_layout(node, h, nullptr, 0,
+                              cL, cF, cO, cblob, cvals,
+                              ei, blob_cursor, chain_start);
 
         if (!ok) {
             // Keysuffix > COMPACT_KEYSUFFIX_LIMIT: collapse would produce the same bitmask structure.
@@ -1811,12 +1789,8 @@ private:
         const uint8_t* raw = reinterpret_cast<const uint8_t*>(key.data());
         uint32_t len = static_cast<uint32_t>(key.size());
 
-        uint8_t stack_buf[256];
-        auto [mapped, raw_buf] = get_mapped<CHARMAP>(raw, len,
-                                              stack_buf, sizeof(stack_buf));
-        std::unique_ptr<uint8_t[]> heap_guard(raw_buf);
-
-        insert_result r = insert_node(root_v, mapped, len, value, 0, mode);
+        mapped_key<CHARMAP> mk(raw, len);
+        insert_result r = insert_node(root_v, mk.data, len, value, 0, mode);
         set_root(r.node);
 
         if (r.outcome == insert_outcome::INSERTED) {
@@ -1837,12 +1811,8 @@ public:
         const uint8_t* raw = reinterpret_cast<const uint8_t*>(key.data());
         uint32_t len = static_cast<uint32_t>(key.size());
 
-        uint8_t stack_buf[256];
-        auto [mapped, raw_buf] = get_mapped<CHARMAP>(raw, len,
-                                              stack_buf, sizeof(stack_buf));
-        std::unique_ptr<uint8_t[]> heap_guard(raw_buf);
-
-        insert_result r = insert_node(root_v, mapped, len, value, 0, mode);
+        mapped_key<CHARMAP> mk(raw, len);
+        insert_result r = insert_node(root_v, mk.data, len, value, 0, mode);
         set_root(r.node);
 
         if (r.outcome == insert_outcome::INSERTED)
@@ -1850,7 +1820,7 @@ public:
 
         // Re-find leaf+pos if not propagated (split/rebuild/promote)
         if (!r.leaf && r.outcome != insert_outcome::FOUND) {
-            auto f = find_leaf_pos(root_v, mapped, len, 0);
+            auto f = find_leaf_pos(root_v, mk.data, len, 0);
             r.leaf = f.leaf;
             r.pos  = f.pos;
         }
