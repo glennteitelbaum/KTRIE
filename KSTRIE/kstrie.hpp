@@ -526,15 +526,15 @@ public:
     // Modifiers
     // ------------------------------------------------------------------
 
-    std::pair<const_iterator, bool> insert(std::string_view key, const VALUE& value) {
+    std::pair<iterator, bool> insert(std::string_view key, const VALUE& value) {
         auto r = impl_v.insert_for_iter(key, value,
                      kstrie_detail::insert_mode::INSERT);
         bool inserted = (r.outcome == kstrie_detail::insert_outcome::INSERTED);
         return {make_iter_from_result(r), inserted};
     }
 
-    std::pair<const_iterator, bool> insert_or_assign(std::string_view key,
-                                                      const VALUE& value) {
+    std::pair<iterator, bool> insert_or_assign(std::string_view key,
+                                                const VALUE& value) {
         auto r = impl_v.insert_for_iter(key, value,
                      kstrie_detail::insert_mode::UPSERT);
         bool inserted = (r.outcome == kstrie_detail::insert_outcome::INSERTED);
@@ -542,25 +542,25 @@ public:
     }
 
     template <typename... Args>
-    std::pair<const_iterator, bool> emplace(std::string_view key, Args&&... args) {
+    std::pair<iterator, bool> emplace(std::string_view key, Args&&... args) {
         VALUE v(std::forward<Args>(args)...);
         return insert(key, v);
     }
 
     template <typename... Args>
-    std::pair<const_iterator, bool> try_emplace(std::string_view key,
-                                                 Args&&... args) {
+    std::pair<iterator, bool> try_emplace(std::string_view key,
+                                           Args&&... args) {
         auto r = impl_v.find_for_iter(key);
         if (r.leaf)
-            return {const_iterator(const_cast<impl_t*>(&impl_v),
-                                   r.leaf, r.pos), false};
+            return {iterator(const_cast<impl_t*>(&impl_v),
+                             r.leaf, r.pos), false};
         VALUE v(std::forward<Args>(args)...);
         return insert(key, v);
     }
 
     size_type erase(std::string_view key) { return impl_v.erase(key); }
 
-    const_iterator erase(const const_iterator& pos) {
+    iterator erase(const const_iterator& pos) {
         if (pos == end()) return end();
         // Reconstruct mapped key from iterator position.
         pos.ensure_key();
@@ -571,19 +571,18 @@ public:
         auto r = impl_v.erase_for_iter(mk.data, len);
         if (!r.erased) return end();
         if (r.next_leaf) {
-            // Hot path: next entry known — construct iterator directly.
-            return const_iterator(const_cast<impl_t*>(&impl_v),
-                                  r.next_leaf, r.next_pos);
+            return iterator(const_cast<impl_t*>(&impl_v),
+                            r.next_leaf, r.next_pos);
         }
         // Cold path: collapse or end — re-find from root.
         if (impl_v.empty()) return end();
-        const_iterator it(const_cast<impl_t*>(&impl_v));
+        iterator it(const_cast<impl_t*>(&impl_v));
         find_ge_iter(impl_v.get_root(), mk.data, len, 0, it);
         return it;
     }
 
-    const_iterator erase(const const_iterator& first, const const_iterator& last) {
-        auto it = first;
+    iterator erase(const const_iterator& first, const const_iterator& last) {
+        iterator it(const_cast<impl_t*>(&impl_v), first.leaf_v, first.pos_v);
         while (it != last && it != end())
             it = erase(it);
         return it;
@@ -622,6 +621,12 @@ public:
     // ------------------------------------------------------------------
     // Lookup
     // ------------------------------------------------------------------
+
+    iterator find(std::string_view key) {
+        auto r = impl_v.find_for_iter(key);
+        if (!r.leaf) return end();
+        return iterator(const_cast<impl_t*>(&impl_v), r.leaf, r.pos);
+    }
 
     const_iterator find(std::string_view key) const {
         auto r = impl_v.find_for_iter(key);
@@ -854,10 +859,10 @@ private:
 
 
     // Construct iterator from insert_result (lazy — no key built).
-    const_iterator make_iter_from_result(
-            const kstrie_detail::insert_result& r) const {
+    iterator make_iter_from_result(
+            const kstrie_detail::insert_result& r) {
         if (!r.leaf) return end();
-        return const_iterator(const_cast<impl_t*>(&impl_v), r.leaf, r.pos);
+        return iterator(const_cast<impl_t*>(&impl_v), r.leaf, r.pos);
     }
 
     // ------------------------------------------------------------------
@@ -875,10 +880,11 @@ private:
     // Returns true if positioned, false if no entry >= key.
     // ------------------------------------------------------------------
 
+    template<bool M>
     bool find_ge_iter(const uint64_t* node,
                       const uint8_t* mapped, uint32_t key_len,
                       uint32_t consumed,
-                      const_iterator& it) const {
+                      iterator_impl<M>& it) const {
         if (node == impl_v.get_sentinel()) [[unlikely]] return false;
         hdr_type h = hdr_type::from_node(node);
 

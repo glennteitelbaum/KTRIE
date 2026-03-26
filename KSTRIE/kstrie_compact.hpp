@@ -883,12 +883,12 @@ struct kstrie_compact {
         uint8_t exist_byte = skip_data[match_len];
 
         // Copy skip prefix for parent before reskip invalidates it
-        uint8_t skip_prefix[256];
+        uint8_t skip_prefix[hdr_type::SKIP_MAX];
         if (match_len > 0)
             std::memcpy(skip_prefix, skip_data, match_len);
 
         // Copy child suffix skip before reskip invalidates it
-        uint8_t child_skip_buf[256];
+        uint8_t child_skip_buf[hdr_type::SKIP_MAX];
         if (child_skip_len > 0)
             std::memcpy(child_skip_buf, skip_data + child_skip_off, child_skip_len);
 

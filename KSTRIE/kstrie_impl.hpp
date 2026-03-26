@@ -220,12 +220,12 @@ private:
 
         const auto* bm = bitmask_type::get_bitmap(node, h);
         int idx = bm->find_next_set(0);
+        int slot = 0;
         while (idx >= 0) {
             path.push_back(static_cast<char>(
                 CHARMAP::from_index(static_cast<uint8_t>(idx))));
-            int slot = bm->count_below(static_cast<uint8_t>(idx));
             prefix_walk_subtree(
-                bitmask_type::child_by_slot(node, h, slot),
+                bitmask_type::child_by_slot(node, h, slot++),
                 path, fn);
             path.pop_back();
             idx = bm->find_next_set(idx + 1);
@@ -1057,14 +1057,13 @@ public:
                             prefix_walk_subtree(eos, path, fn);
                         const auto* bm = bitmask_type::get_bitmap(node, h);
                         int idx = bm->find_next_set(0);
+                        int slot = 0;
                         while (idx >= 0) {
                             path.push_back(static_cast<char>(
                                 CHARMAP::from_index(
                                     static_cast<uint8_t>(idx))));
-                            int slot = bm->count_below(
-                                static_cast<uint8_t>(idx));
                             prefix_walk_subtree(
-                                bitmask_type::child_by_slot(node, h, slot),
+                                bitmask_type::child_by_slot(node, h, slot++),
                                 path, fn);
                             path.pop_back();
                             idx = bm->find_next_set(idx + 1);
@@ -1103,14 +1102,13 @@ public:
                         prefix_walk_subtree(eos, path, fn);
                     const auto* bm = bitmask_type::get_bitmap(node, h);
                     int idx = bm->find_next_set(0);
+                    int slot = 0;
                     while (idx >= 0) {
                         path.push_back(static_cast<char>(
                             CHARMAP::from_index(
                                 static_cast<uint8_t>(idx))));
-                        int slot = bm->count_below(
-                            static_cast<uint8_t>(idx));
                         prefix_walk_subtree(
-                            bitmask_type::child_by_slot(node, h, slot),
+                            bitmask_type::child_by_slot(node, h, slot++),
                             path, fn);
                         path.pop_back();
                         idx = bm->find_next_set(idx + 1);
@@ -1306,11 +1304,11 @@ private:
         }
         const auto* bm = bitmask_type::get_bitmap(node, h);
         int idx = bm->find_next_set(0);
+        int cs = 0;
         while (idx >= 0) {
             uint8_t byte = static_cast<uint8_t>(idx);
             prefix[prefix_len] = byte;
-            int cs = bm->count_below(byte);
-            uint64_t* child = bitmask_type::child_by_slot(node, h, cs);
+            uint64_t* child = bitmask_type::child_by_slot(node, h, cs++);
             collect_inner(child, prefix, prefix_len + 1,
                           out, key_buf, buf_off, ei, skip_leaf, skip_pos);
             idx = bm->find_next_set(idx + 1);
@@ -1468,11 +1466,11 @@ private:
         // Children in byte order
         const auto* bm = bitmask_type::get_bitmap(node, h);
         int idx = bm->find_next_set(0);
+        int cs = 0;
         while (idx >= 0) {
             uint8_t byte = static_cast<uint8_t>(idx);
-            int cs = bm->count_below(byte);
             uint64_t* child = slots_type::load_child(
-                bitmask_type::child_slots(node), cs);
+                bitmask_type::child_slots(node), cs++);
             hdr_type ch = hdr_type::from_node(child);
 
             uint8_t child_prefix[COMPACT_KEYSUFFIX_LIMIT];
@@ -1513,14 +1511,6 @@ private:
         const uint8_t* skip_data = nullptr;
         uint8_t skip_len = h.skip;
         if (h.has_skip()) skip_data = hdr_type::get_skip(node, h);
-
-        // Handle top-level skip: becomes prefix for all entries
-        uint8_t top_prefix[256];
-        uint32_t top_prefix_len = 0;
-        if (h.has_skip()) {
-            std::memcpy(top_prefix, skip_data, skip_len);
-            top_prefix_len = skip_len;
-        }
 
         // fill_layout dispatches on is_compact()/is_bitmap() internally.
         // Skip stays on the collapsed node, not on entries.
@@ -1849,7 +1839,7 @@ private:
             uint32_t old_skip = h.skip_bytes();
             uint32_t match_len = mr.match_len;
 
-            uint8_t skip_copy[256];
+            uint8_t skip_copy[hdr_type::SKIP_MAX];
             std::memcpy(skip_copy, skip_data, old_skip);
 
             uint8_t old_byte = skip_copy[match_len];
@@ -1890,7 +1880,7 @@ private:
             uint32_t old_skip = h.skip_bytes();
             uint32_t match_len = mr.match_len;
 
-            uint8_t skip_copy[256];
+            uint8_t skip_copy[hdr_type::SKIP_MAX];
             std::memcpy(skip_copy, skip_data, old_skip);
 
             uint8_t old_byte = skip_copy[match_len];

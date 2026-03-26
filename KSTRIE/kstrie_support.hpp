@@ -38,6 +38,7 @@ inline constexpr size_t U64_BYTES = sizeof(uint64_t);
 inline constexpr size_t NODE_HEADER      = 0;
 inline constexpr size_t NODE_PARENT_PTR  = 1;  // bitmask: parent pointer
 inline constexpr size_t NODE_TOTAL_TAIL  = 2;  // bitmask only: u64 sum of children's keysuffix bytes
+inline constexpr size_t BITMASK_FIXED_HDR_U64 = NODE_TOTAL_TAIL + 1;  // header + parent_ptr + total_tail
 
 template <typename ALLOC>
 struct kstrie_memory;
@@ -63,8 +64,9 @@ inline constexpr uint16_t padded_size(uint16_t needed) noexcept {
     return upper;
 }
 
-inline constexpr int LOG2_U64_BITS = 6;
-inline constexpr int U64_BIT_MASK  = 63;
+inline constexpr int U64_BITS      = sizeof(uint64_t) * CHAR_BIT;  // 64
+inline constexpr int U64_BIT_MASK  = U64_BITS - 1;                 // 63
+inline constexpr int LOG2_U64_BITS = 6;                             // log2(U64_BITS)
 inline constexpr uint64_t U64_SIGN_BIT = uint64_t(1) << U64_BIT_MASK;
 
 template <size_t WORDS>
@@ -119,26 +121,26 @@ struct bitmap_n {
         else return std::popcount(words[0]) + std::popcount(words[1]) + std::popcount(words[2]) + std::popcount(words[3]);
     }
     [[nodiscard]] int find_next_set(int start) const noexcept {
-        constexpr int MAX_BITS = WORDS * 64;
+        constexpr int MAX_BITS = WORDS * U64_BITS;
         if (start < 0) start = 0;
         if (start >= MAX_BITS) return -1;
         int w = start >> LOG2_U64_BITS;
         uint64_t masked = words[w] & (~uint64_t(0) << (start & U64_BIT_MASK));
         while (true) {
-            if (masked) return w * 64 + std::countr_zero(masked);
+            if (masked) return w * U64_BITS + std::countr_zero(masked);
             if (++w >= static_cast<int>(WORDS)) return -1;
             masked = words[w];
         }
     }
 
     [[nodiscard]] int find_prev_set(int start) const noexcept {
-        constexpr int MAX_BITS = WORDS * 64;
+        constexpr int MAX_BITS = WORDS * U64_BITS;
         if (start < 0) return -1;
         if (start >= MAX_BITS) start = MAX_BITS - 1;
         int w = start >> LOG2_U64_BITS;
         uint64_t masked = words[w] & (~uint64_t(0) >> (U64_BIT_MASK - (start & U64_BIT_MASK)));
         while (true) {
-            if (masked) return w * 64 + 63 - std::countl_zero(masked);
+            if (masked) return w * U64_BITS + U64_BIT_MASK - std::countl_zero(masked);
             if (--w < 0) return -1;
             masked = words[w];
         }
@@ -542,7 +544,7 @@ struct node_header {
             return (static_cast<size_t>(slots_off) + slots_t::value_u64s(count)) * U64_BYTES;
         }
         // bitmask: header + parent_ptr + total_tail + bitmap + sentinel + children + eos + skip
-        size_t u64s = 3 + BITMAP_WORDS + 1 + count + 1;
+        size_t u64s = BITMASK_FIXED_HDR_U64 + BITMAP_WORDS + 1 + count + 1;
         if (has_skip()) u64s += div_ceil(align_up(skip_bytes(), U64_BYTES), U64_BYTES);
         return u64s * U64_BYTES;
     }
@@ -561,16 +563,8 @@ struct node_header {
 
     static constexpr size_t BITMAP_WORDS = CHARMAP::BITMAP_WORDS;
 
-    // Bitmask bitmap at byte 24: after header(8B) + parent_ptr(8B) + total_tail(8B)
-    static constexpr size_t BITMAP_NODE_OFF = 2;  // u64 offset
-
-    [[nodiscard]] const uint64_t* get_bitmap_index(const uint64_t* node) const noexcept {
-        return node + BITMAP_NODE_OFF;
-    }
-    [[nodiscard]] uint64_t* get_bitmap_index(uint64_t* node) const noexcept {
-        return node + BITMAP_NODE_OFF;
-    }
-    // REMOVED get_bitmap_slots — bitmask uses child_slots/leaf_vals/eos_ptr accessors
+    // REMOVED BITMAP_NODE_OFF + get_bitmap_index — dead code with wrong value (2, should be 3).
+    // All bitmap access goes through bitmask_type::get_bitmap() using CHILD_BITMAP_OFF = 3.
 
     // --- Compact-typed accessors ---
 
@@ -879,13 +873,14 @@ struct fast_string {
 
     // ---------------------------------------------------------
     // prepend — one memmove per call, skip always first.
+    // Guards protect against null buf_pv/skip/tail when sizes are 0.
     // ---------------------------------------------------------
 
     // skip only (EOS edge)
-    // Precondition: sn > 0 (caller checks).
     void prepend(const uint8_t* skip, size_t sn) {
+        if (sn == 0) return;
         if (len_v + sn > cap_v) [[unlikely]] grow(len_v + sn);
-        std::memmove(buf_pv + sn, buf_pv, len_v);
+        if (len_v > 0) std::memmove(buf_pv + sn, buf_pv, len_v);
         std::memcpy(buf_pv, skip, sn);
         len_v += sn;
     }
@@ -894,8 +889,8 @@ struct fast_string {
     void prepend(const uint8_t* skip, size_t sn, uint8_t byte) {
         size_t total = sn + 1;
         if (len_v + total > cap_v) [[unlikely]] grow(len_v + total);
-        std::memmove(buf_pv + total, buf_pv, len_v);
-        std::memcpy(buf_pv, skip, sn);
+        if (len_v > 0) std::memmove(buf_pv + total, buf_pv, len_v);
+        if (sn > 0) std::memcpy(buf_pv, skip, sn);
         buf_pv[sn] = static_cast<char>(byte);
         len_v += total;
     }
@@ -905,10 +900,10 @@ struct fast_string {
                  uint8_t byte, const uint8_t* tail, size_t tn) {
         size_t total = sn + 1 + tn;
         if (len_v + total > cap_v) [[unlikely]] grow(len_v + total);
-        std::memmove(buf_pv + total, buf_pv, len_v);
-        std::memcpy(buf_pv, skip, sn);
+        if (len_v > 0) std::memmove(buf_pv + total, buf_pv, len_v);
+        if (sn > 0) std::memcpy(buf_pv, skip, sn);
         buf_pv[sn] = static_cast<char>(byte);
-        std::memcpy(buf_pv + sn + 1, tail, tn);
+        if (tn > 0) std::memcpy(buf_pv + sn + 1, tail, tn);
         len_v += total;
     }
 

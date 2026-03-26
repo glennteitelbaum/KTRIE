@@ -92,9 +92,9 @@ struct kstrie_bitmask {
 
     static int do_find_pop(const uint64_t* search, uint8_t v) noexcept {
         constexpr size_t W = BITMAP_WORDS;
-        const int word = v >> 6;
-        const int bit  = v & 63;
-        uint64_t before = search[word] << (63 - bit);
+        const int word = v >> LOG2_U64_BITS;
+        const int bit  = v & U64_BIT_MASK;
+        uint64_t before = search[word] << (U64_BIT_MASK - bit);
         int pc0 = 0, pc1 = 0, pc2 = 0;
         if constexpr (W > 1) pc0 = std::popcount(search[0]);
         if constexpr (W > 2) pc1 = std::popcount(search[1]);
@@ -144,7 +144,7 @@ struct kstrie_bitmask {
     static constexpr size_t needed_u64(uint8_t skip_len,
                                         uint16_t child_count) noexcept {
         // header(1) + parent_ptr(1) + total_tail(1) + bitmap(BU) + sentinel(1) + children(Nc) + eos(1) + skip
-        size_t u64s = 3 + BITMAP_WORDS + 1 + child_count + 1;
+        size_t u64s = BITMASK_FIXED_HDR_U64 + BITMAP_WORDS + 1 + child_count + 1;
         if (skip_len > 0)
             u64s += div_ceil(align_up(static_cast<size_t>(skip_len), U64_BYTES),
                              U64_BYTES);
@@ -233,8 +233,8 @@ struct kstrie_bitmask {
             if (shift > 0) slots::move_children(cs, pos + 1, cs, pos, shift);
             slots::store_child(cs, pos, child);
             bm->set_bit(idx);
-            h.count = new_cc;
-            hdr_type::from_node(node).count = new_cc;
+            h.count = new_cc;                       // caller's local copy
+            hdr_type::from_node(node).count = new_cc; // node's in-memory header
             // Restore eos + skip at new positions
             slots::store_child(eos_child_ptr(node, h), 0, old_eos);
             if (slen > 0) std::memcpy(get_bitmask_skip(node, h), skip_buf, slen);
@@ -288,8 +288,8 @@ struct kstrie_bitmask {
         int after = old_cc - pos - 1;
         if (after > 0) slots::move_children(cs, pos, cs, pos + 1, after);
         bm->clear_bit(idx);
-        h.count = old_cc - 1;
-        hdr_type::from_node(node).count = h.count;
+        h.count = old_cc - 1;                       // caller's local copy
+        hdr_type::from_node(node).count = h.count;   // node's in-memory header
         // Restore eos + skip at new positions
         slots::store_child(eos_child_ptr(node, h), 0, old_eos);
         if (slen > 0) std::memcpy(get_bitmask_skip(node, h), skip_buf, slen);
