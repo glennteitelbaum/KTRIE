@@ -180,19 +180,13 @@ private:
     // prefix_walk_subtree — recursive walk, reconstructs keys
     // ------------------------------------------------------------------
 
+    // walk_node_post_skip — walk all entries in a node whose skip has
+    // already been consumed/appended to path. Compact: emit entries directly.
+    // Bitmask: recurse EOS child then all byte children via prefix_walk_subtree.
     template<typename F>
-    void prefix_walk_subtree(const uint64_t* node,
+    void walk_node_post_skip(const uint64_t* node, const hdr_type& h,
                              std::string& path, F&& fn) const {
-        if (!node || node == compact_type::sentinel()) return;
-        hdr_type h = hdr_type::from_node(node);
-        size_t base = path.size();
-
-        if (h.has_skip()) [[unlikely]] {
-            uint32_t sb = h.skip_bytes();
-            append_unmapped(path, hdr_type::get_skip(node, h), sb);
-        }
-
-        if (h.is_compact()) [[unlikely]] {
+        if (h.is_compact()) {
             const uint8_t* L  = compact_type::lengths(node, h);
             const uint8_t* Fb = compact_type::firsts(node, h);
             const ks_offset_type* O = compact_type::offsets(node, h);
@@ -210,7 +204,6 @@ private:
                    *slots_type::load_value(sb, i));
                 path.resize(eb);
             }
-            path.resize(base);
             return;
         }
 
@@ -230,6 +223,21 @@ private:
             path.pop_back();
             idx = bm->find_next_set(idx + 1);
         }
+    }
+
+    template<typename F>
+    void prefix_walk_subtree(const uint64_t* node,
+                             std::string& path, F&& fn) const {
+        if (!node || node == compact_type::sentinel()) return;
+        hdr_type h = hdr_type::from_node(node);
+        size_t base = path.size();
+
+        if (h.has_skip()) [[unlikely]] {
+            uint32_t sb = h.skip_bytes();
+            append_unmapped(path, hdr_type::get_skip(node, h), sb);
+        }
+
+        walk_node_post_skip(node, h, path, std::forward<F>(fn));
         path.resize(base);
     }
 
@@ -1032,43 +1040,7 @@ public:
                             CHARMAP::from_index(skip[j])));
                     consumed += sb;
                     h = hdr_type::from_node(node);
-                    if (h.is_compact()) {
-                        const uint8_t* L  = compact_type::lengths(node, h);
-                        const uint8_t* Fb = compact_type::firsts(node, h);
-                        const ks_offset_type* O =
-                            compact_type::offsets(node, h);
-                        const uint8_t* B  = compact_type::keysuffix(node, h);
-                        const auto* s = h.get_compact_slots(node);
-                        for (uint16_t i = 0; i < h.count; ++i) {
-                            size_t eb = path.size();
-                            uint8_t klen = L[i];
-                            if (klen > 0) [[likely]] {
-                                append_unmapped(path, &Fb[i], 1);
-                                if (klen > 1) [[likely]]
-                                    append_unmapped(path, B + O[i], klen - 1);
-                            }
-                            fn(std::string_view(path),
-                               *slots_type::load_value(s, i));
-                            path.resize(eb);
-                        }
-                    } else {
-                        uint64_t* eos = bitmask_type::eos_child(node, h);
-                        if (eos != compact_type::sentinel())
-                            prefix_walk_subtree(eos, path, fn);
-                        const auto* bm = bitmask_type::get_bitmap(node, h);
-                        int idx = bm->find_next_set(0);
-                        int slot = 0;
-                        while (idx >= 0) {
-                            path.push_back(static_cast<char>(
-                                CHARMAP::from_index(
-                                    static_cast<uint8_t>(idx))));
-                            prefix_walk_subtree(
-                                bitmask_type::child_by_slot(node, h, slot++),
-                                path, fn);
-                            path.pop_back();
-                            idx = bm->find_next_set(idx + 1);
-                        }
-                    }
+                    walk_node_post_skip(node, h, path, fn);
                     return;
                 }
                 if (std::memcmp(skip, mapped + consumed, sb) != 0) return;
@@ -1077,43 +1049,7 @@ public:
             h = hdr_type::from_node(node);
             if (consumed >= len) {
                 // Skip already consumed — walk post-skip directly
-                if (h.is_compact()) {
-                    const uint8_t* L  = compact_type::lengths(node, h);
-                    const uint8_t* Fb = compact_type::firsts(node, h);
-                    const ks_offset_type* O =
-                        compact_type::offsets(node, h);
-                    const uint8_t* B  = compact_type::keysuffix(node, h);
-                    const auto* s = h.get_compact_slots(node);
-                    for (uint16_t i = 0; i < h.count; ++i) {
-                        size_t eb = path.size();
-                        uint8_t klen = L[i];
-                        if (klen > 0) [[likely]] {
-                            append_unmapped(path, &Fb[i], 1);
-                            if (klen > 1) [[likely]]
-                                append_unmapped(path, B + O[i], klen - 1);
-                        }
-                        fn(std::string_view(path),
-                           *slots_type::load_value(s, i));
-                        path.resize(eb);
-                    }
-                } else {
-                    uint64_t* eos = bitmask_type::eos_child(node, h);
-                    if (eos != compact_type::sentinel())
-                        prefix_walk_subtree(eos, path, fn);
-                    const auto* bm = bitmask_type::get_bitmap(node, h);
-                    int idx = bm->find_next_set(0);
-                    int slot = 0;
-                    while (idx >= 0) {
-                        path.push_back(static_cast<char>(
-                            CHARMAP::from_index(
-                                static_cast<uint8_t>(idx))));
-                        prefix_walk_subtree(
-                            bitmask_type::child_by_slot(node, h, slot++),
-                            path, fn);
-                        path.pop_back();
-                        idx = bm->find_next_set(idx + 1);
-                    }
-                }
+                walk_node_post_skip(node, h, path, fn);
                 return;
             }
             if (h.is_compact()) [[unlikely]] {
