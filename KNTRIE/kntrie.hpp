@@ -116,11 +116,10 @@ public:
         reference operator*() const noexcept {
             KEY k = ik_to_key(ik_v);
             if constexpr (IS_BOOL) {
-                constexpr unsigned BITS_PER_WORD = 64;
                 auto* base = static_cast<uint64_t*>(val_v);
                 return {k, kntrie_detail::bool_ref{
-                    base + pos_v / BITS_PER_WORD,
-                    static_cast<uint8_t>(pos_v % BITS_PER_WORD)}};
+                    base + pos_v / kntrie_detail::U64_BITS,
+                    static_cast<uint8_t>(pos_v % kntrie_detail::U64_BITS)}};
             } else {
                 return {k, deref_val(val_v)};
             }
@@ -237,10 +236,9 @@ public:
         auto r = impl_.find_entry(to_unsigned(key));
         if (!r.found) throw std::out_of_range("kntrie::at");
         if constexpr (IS_BOOL) {
-            constexpr unsigned BPW = 64;
             auto* base = static_cast<uint64_t*>(r.val);
-            return kntrie_detail::bool_ref{base + r.pos / BPW,
-                                            static_cast<uint8_t>(r.pos % BPW)};
+            return kntrie_detail::bool_ref{base + r.pos / kntrie_detail::U64_BITS,
+                                            static_cast<uint8_t>(r.pos % kntrie_detail::U64_BITS)};
         } else {
             return deref_val(r.val);
         }
@@ -249,9 +247,8 @@ public:
         auto r = impl_.find_entry(to_unsigned(key));
         if (!r.found) throw std::out_of_range("kntrie::at");
         if constexpr (IS_BOOL) {
-            constexpr unsigned BPW = 64;
             auto* base = static_cast<uint64_t*>(r.val);
-            return (base[r.pos / BPW] >> (r.pos % BPW)) & 1;
+            return (base[r.pos / kntrie_detail::U64_BITS] >> (r.pos % kntrie_detail::U64_BITS)) & 1;
         } else {
             return deref_val_const(r.val);
         }
@@ -262,10 +259,9 @@ public:
         auto r = impl_.insert_with_pos(uk, VALUE{});
         auto e = impl_.entry_from_pos(r.leaf, r.pos, uk);
         if constexpr (IS_BOOL) {
-            constexpr unsigned BPW = 64;
             auto* base = static_cast<uint64_t*>(e.val);
-            return kntrie_detail::bool_ref{base + e.pos / BPW,
-                                            static_cast<uint8_t>(e.pos % BPW)};
+            return kntrie_detail::bool_ref{base + e.pos / kntrie_detail::U64_BITS,
+                                            static_cast<uint8_t>(e.pos % kntrie_detail::U64_BITS)};
         } else {
             return deref_val(e.val);
         }

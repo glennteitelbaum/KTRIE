@@ -517,7 +517,7 @@ struct bitmask_ops {
         uint8_t suffix = static_cast<uint8_t>(d.suffix(ik));
         const bitmap_256_t& bmp = bm(node, hs);
         if (!bmp.has_bit(suffix)) [[unlikely]] return {};
-        int slot = bmp.find_slot<slot_mode::FAST_EXIT>(suffix);
+        int slot = bmp.find_slot<slot_mode::UNFILTERED>(suffix);  // bit confirmed set
         uint64_t key = d.to_ik(leaf_prefix(node), static_cast<uint64_t>(suffix));
         // IS_BOOL: pos = suffix (byte value) so operator* indexes val_bm correctly.
         // Non-bool: pos = slot (ordinal) for val pointer stride.
@@ -1187,8 +1187,13 @@ public:
 
     // descend_edge_loop: walk to min (FWD) or max (BWD) leaf → iter_entry_t
     static iter_entry_t descend_edge_loop(uint64_t ptr, dir_t dir) noexcept {
-        while (!(ptr & LEAF_BIT))
-            ptr = (dir == dir_t::FWD) ? bm_first_child(ptr) : bm_last_child(ptr);
+        if (dir == dir_t::FWD) {
+            while (!(ptr & LEAF_BIT))
+                ptr = bm_first_child(ptr);
+        } else {
+            while (!(ptr & LEAF_BIT))
+                ptr = bm_last_child(ptr);
+        }
         uint64_t* node = untag_leaf_mut(ptr);
         auto fn = get_find_edge(node);
         return fn(node, dir);

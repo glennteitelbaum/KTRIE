@@ -683,7 +683,7 @@ private:
                 leaf = BO::make_bitmap_leaf(byte_keys, vals_arr,
                     static_cast<uint32_t>(wi), bld_v);
             } else {
-                using CO = compact_ops<NK, VALUE, ALLOC>;
+                using CO = compact_ops<NK, NORM_V, ALLOC>;
                 constexpr size_t hu = LEAF_HEADER_U64;
                 size_t total_u64 = round_up_u64(CO::size_u64(size_v, hu));
                 leaf = bld_v.alloc_node(total_u64, false);
@@ -693,7 +693,7 @@ private:
 
                 NK* dk = CO::keys(leaf, hu);
                 size_t wi = 0;
-                if constexpr (VT::IS_BOOL) {
+                if constexpr (NVT::IS_BOOL) {
                     auto bv = CO::bool_vals_mut(leaf);
                     bv.clear_all(size_v);
                     OPS::template walk_entries_in_order<BITS>(root_ptr_v,
@@ -707,7 +707,7 @@ private:
                     OPS::template walk_entries_in_order<BITS>(root_ptr_v,
                         [&](NK s, VST v) {
                             dk[wi] = s;
-                            VT::init_slot(&dv[wi], v);
+                            NVT::init_slot(&dv[wi], v);
                             wi++;
                         });
                 }
@@ -747,7 +747,7 @@ private:
                     case 3: if constexpr (MAX_ROOT_SKIP >= 4) { leaf = do_prepend.template operator()<3>(); break; } [[fallthrough]];
                     case 4: if constexpr (MAX_ROOT_SKIP >= 5) { leaf = do_prepend.template operator()<4>(); break; } [[fallthrough]];
                     case 5: if constexpr (MAX_ROOT_SKIP >= 6) { leaf = do_prepend.template operator()<5>(); break; } [[fallthrough]];
-                    default: __builtin_unreachable();
+                    default: std::unreachable();
                     }
                 }
                 old_subtree = tag_leaf(leaf);

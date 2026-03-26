@@ -575,7 +575,7 @@ struct bitmap_256_t {
             }
             remaining -= pc;
         }
-        __builtin_unreachable();
+        std::unreachable();
     }
 
     struct adj_result { uint8_t idx; uint16_t slot; bool found; };
