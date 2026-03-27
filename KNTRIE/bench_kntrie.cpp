@@ -11,6 +11,7 @@
 #include <set>
 #include <string>
 #include <cstring>
+#include <cmath>
 #include <new>
 
 // ==========================================================================
@@ -140,22 +141,37 @@ static Workload make_workload(size_t n, const std::string& pattern,
 
     constexpr uint64_t KEY_MAX = (sizeof(K) >= 8) ? ~uint64_t(0)
         : (uint64_t(1) << (sizeof(K) * 8)) - 1;
+    constexpr bool SMALL_KEY = sizeof(K) <= 2;
+    constexpr uint64_t KEY_RANGE = SMALL_KEY ? (uint64_t(1) << (sizeof(K) * 8)) : 0;
 
-    // Cap n to key range
-    if (n > KEY_MAX / 2) n = static_cast<size_t>(KEY_MAX / 2);
+    std::vector<uint64_t> raw;
 
-    std::vector<uint64_t> raw(n);
     if (pattern == "sequential") {
+        // sequential uses i*2, cap at KEY_MAX/2
+        if (n > KEY_MAX / 2) n = static_cast<size_t>(KEY_MAX / 2);
+        raw.resize(n);
         for (size_t i = 0; i < n; ++i)
             raw[i] = (i * 2) & KEY_MAX;
+        std::shuffle(raw.begin(), raw.end(), rng);
+    } else if constexpr (SMALL_KEY) {
+        // Small key space: enumerate all values, shuffle, take first N
+        if (n > KEY_RANGE) n = static_cast<size_t>(KEY_RANGE);
+        std::vector<uint64_t> all(static_cast<size_t>(KEY_RANGE));
+        for (uint64_t i = 0; i < KEY_RANGE; ++i) all[static_cast<size_t>(i)] = i;
+        std::shuffle(all.begin(), all.end(), rng);
+        raw.assign(all.begin(), all.begin() + static_cast<ptrdiff_t>(n));
     } else {
+        // Large key space: random with dedup
+        if (n > KEY_MAX / 2) n = static_cast<size_t>(KEY_MAX / 2);
+        raw.resize(n);
         for (size_t i = 0; i < n; ++i)
             raw[i] = rng() & KEY_MAX;
+        std::sort(raw.begin(), raw.end());
+        raw.erase(std::unique(raw.begin(), raw.end()), raw.end());
+        n = raw.size();
+        std::shuffle(raw.begin(), raw.end(), rng);
     }
-    std::sort(raw.begin(), raw.end());
-    raw.erase(std::unique(raw.begin(), raw.end()), raw.end());
-    n = raw.size();
-    std::shuffle(raw.begin(), raw.end(), rng);
+
     w.keys = raw;
 
     for (size_t i = 0; i < n; i += 2)
@@ -168,6 +184,20 @@ static Workload make_workload(size_t n, const std::string& pattern,
         w.find_nf.reserve(n);
         for (size_t i = 0; i < n; ++i)
             w.find_nf.push_back((i * 2 + 1) & KEY_MAX);
+    } else if constexpr (SMALL_KEY) {
+        // find_nf: values not in raw, capped at half the key space
+        constexpr size_t NF_CAP = static_cast<size_t>(KEY_RANGE / 2);
+        std::vector<uint64_t> all(static_cast<size_t>(KEY_RANGE));
+        for (uint64_t i = 0; i < KEY_RANGE; ++i) all[static_cast<size_t>(i)] = i;
+        std::set<uint64_t> existing(raw.begin(), raw.end());
+        size_t nf_target = std::min(n, NF_CAP);
+        w.find_nf.reserve(nf_target);
+        for (uint64_t v : all) {
+            if (!existing.count(v)) {
+                w.find_nf.push_back(v);
+                if (w.find_nf.size() >= nf_target) break;
+            }
+        }
     } else {
         std::set<uint64_t> existing(raw.begin(), raw.end());
         w.find_nf.reserve(n);
@@ -302,6 +332,7 @@ static void emit_html(const std::vector<Row>& rows,
         for (int ci = 0; ci < 3; ++ci) {
             if (!p.has[ci]) continue;
             for (int mi = 0; mi < 6; ++mi) {
+                if (std::isnan(p.vals[ci][mi])) continue;
                 if (mi == 5)
                     std::printf(",%s_%s:%.0f", names[ci], suffixes[mi], p.vals[ci][mi]);
                 else
@@ -505,17 +536,23 @@ static void bench_all(size_t target_n, const std::string& pattern,
     }
 
     // Pre-generate find orders
+    constexpr bool SMALL_KEY = sizeof(K) <= 2;
+    constexpr uint64_t KEY_RANGE = SMALL_KEY ? (uint64_t(1) << (sizeof(K) * 8)) : 0;
+    bool has_nf = SMALL_KEY ? (n <= KEY_RANGE / 2) : !w.find_nf.empty();
     std::vector<std::vector<uint64_t>> fnd_orders(fi), nf_orders(fi);
     for (int r = 0; r < fi; ++r) {
         fnd_orders[r] = w.find_fnd;
         std::shuffle(fnd_orders[r].begin(), fnd_orders[r].end(), rng);
-        nf_orders[r] = w.find_nf;
-        std::shuffle(nf_orders[r].begin(), nf_orders[r].end(), rng);
+        if (has_nf) {
+            nf_orders[r] = w.find_nf;
+            std::shuffle(nf_orders[r].begin(), nf_orders[r].end(), rng);
+        }
     }
 
-    double k_fnd = 1e18, k_nf = 1e18, k_ins = 1e18, k_ers = 1e18, k_iter = 1e18;
-    double m_fnd = 1e18, m_nf = 1e18, m_ins = 1e18, m_ers = 1e18, m_iter = 1e18;
-    double u_fnd = 1e18, u_nf = 1e18, u_ins = 1e18, u_ers = 1e18, u_iter = 1e18;
+    double nf_init = has_nf ? 1e18 : NAN;
+    double k_fnd = 1e18, k_nf = nf_init, k_ins = 1e18, k_ers = 1e18, k_iter = 1e18;
+    double m_fnd = 1e18, m_nf = nf_init, m_ins = 1e18, m_ers = 1e18, m_iter = 1e18;
+    double u_fnd = 1e18, u_nf = nf_init, u_ins = 1e18, u_ers = 1e18, u_iter = 1e18;
 
     for (int t = 0; t < TRIALS; ++t) {
         // --- kntrie ---
@@ -537,12 +574,14 @@ static void bench_all(size_t target_n, const std::string& pattern,
             k_fnd = std::min(k_fnd, (now_ms() - t1) / fi);
             do_not_optimize(cs);
 
-            cs = 0;
-            double t1n = now_ms();
-            for (int r = 0; r < fi; ++r)
-                for (auto k : nf_orders[r]) { auto it = trie.find(static_cast<K>(k)); cs += (it != trie.end()) ? acc((*it).second) : 0; }
-            k_nf = std::min(k_nf, (now_ms() - t1n) / fi);
-            do_not_optimize(cs);
+            if (has_nf) {
+                cs = 0;
+                double t1n = now_ms();
+                for (int r = 0; r < fi; ++r)
+                    for (auto k : nf_orders[r]) { auto it = trie.find(static_cast<K>(k)); cs += (it != trie.end()) ? acc((*it).second) : 0; }
+                k_nf = std::min(k_nf, (now_ms() - t1n) / fi);
+                do_not_optimize(cs);
+            }
 
             std::shuffle(w.erase_keys.begin(), w.erase_keys.end(), rng);
             double t2 = now_ms();
@@ -569,12 +608,14 @@ static void bench_all(size_t target_n, const std::string& pattern,
             m_fnd = std::min(m_fnd, (now_ms() - t1) / fi);
             do_not_optimize(cs);
 
-            cs = 0;
-            double t1n = now_ms();
-            for (int r = 0; r < fi; ++r)
-                for (auto k : nf_orders[r]) { auto it = m.find(static_cast<K>(k)); cs += (it != m.end()) ? acc(it->second) : 0; }
-            m_nf = std::min(m_nf, (now_ms() - t1n) / fi);
-            do_not_optimize(cs);
+            if (has_nf) {
+                cs = 0;
+                double t1n = now_ms();
+                for (int r = 0; r < fi; ++r)
+                    for (auto k : nf_orders[r]) { auto it = m.find(static_cast<K>(k)); cs += (it != m.end()) ? acc(it->second) : 0; }
+                m_nf = std::min(m_nf, (now_ms() - t1n) / fi);
+                do_not_optimize(cs);
+            }
 
             std::shuffle(w.erase_keys.begin(), w.erase_keys.end(), rng);
             double t2 = now_ms();
