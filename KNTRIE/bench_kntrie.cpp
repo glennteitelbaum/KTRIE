@@ -143,23 +143,42 @@ static Workload make_workload(size_t n, const std::string& pattern,
         : (uint64_t(1) << (sizeof(K) * 8)) - 1;
     constexpr bool SMALL_KEY = sizeof(K) <= 2;
     constexpr uint64_t KEY_RANGE = SMALL_KEY ? (uint64_t(1) << (sizeof(K) * 8)) : 0;
+    constexpr size_t HALF_RANGE = SMALL_KEY ? static_cast<size_t>(KEY_RANGE / 2) : 0;
 
     std::vector<uint64_t> raw;
 
-    if (pattern == "sequential") {
-        // sequential uses i*2, cap at KEY_MAX/2
+    if constexpr (SMALL_KEY) {
+        if (n > KEY_RANGE) n = static_cast<size_t>(KEY_RANGE);
+        bool low_fill = (n <= HALF_RANGE);
+
+        if (pattern == "sequential") {
+            if (low_fill) {
+                // keys = {0,2,4,...,2(n-1)}, not-found = {1,3,5,...}
+                raw.resize(n);
+                for (size_t i = 0; i < n; ++i) raw[i] = i * 2;
+                w.find_nf.resize(n);
+                for (size_t i = 0; i < n; ++i) w.find_nf[i] = i * 2 + 1;
+            } else {
+                // keys = {0,1,2,...,n-1}, no not-found
+                raw.resize(n);
+                for (size_t i = 0; i < n; ++i) raw[i] = i;
+            }
+        } else {
+            // random: shuffle full range, keys = first n, not-found = next n (if low fill)
+            std::vector<uint64_t> all(static_cast<size_t>(KEY_RANGE));
+            for (uint64_t i = 0; i < KEY_RANGE; ++i) all[static_cast<size_t>(i)] = i;
+            std::shuffle(all.begin(), all.end(), rng);
+            raw.assign(all.begin(), all.begin() + static_cast<ptrdiff_t>(n));
+            if (low_fill)
+                w.find_nf.assign(all.begin() + static_cast<ptrdiff_t>(n),
+                                 all.begin() + static_cast<ptrdiff_t>(2 * n));
+        }
+    } else if (pattern == "sequential") {
         if (n > KEY_MAX / 2) n = static_cast<size_t>(KEY_MAX / 2);
         raw.resize(n);
         for (size_t i = 0; i < n; ++i)
             raw[i] = (i * 2) & KEY_MAX;
         std::shuffle(raw.begin(), raw.end(), rng);
-    } else if constexpr (SMALL_KEY) {
-        // Small key space: enumerate all values, shuffle, take first N
-        if (n > KEY_RANGE) n = static_cast<size_t>(KEY_RANGE);
-        std::vector<uint64_t> all(static_cast<size_t>(KEY_RANGE));
-        for (uint64_t i = 0; i < KEY_RANGE; ++i) all[static_cast<size_t>(i)] = i;
-        std::shuffle(all.begin(), all.end(), rng);
-        raw.assign(all.begin(), all.begin() + static_cast<ptrdiff_t>(n));
     } else {
         // Large key space: random with dedup
         if (n > KEY_MAX / 2) n = static_cast<size_t>(KEY_MAX / 2);
@@ -180,32 +199,21 @@ static Workload make_workload(size_t n, const std::string& pattern,
     w.find_fnd = raw;
     std::shuffle(w.find_fnd.begin(), w.find_fnd.end(), rng);
 
-    if (pattern == "sequential") {
-        w.find_nf.reserve(n);
-        for (size_t i = 0; i < n; ++i)
-            w.find_nf.push_back((i * 2 + 1) & KEY_MAX);
-    } else if constexpr (SMALL_KEY) {
-        // find_nf: values not in raw, capped at half the key space
-        constexpr size_t NF_CAP = static_cast<size_t>(KEY_RANGE / 2);
-        std::vector<uint64_t> all(static_cast<size_t>(KEY_RANGE));
-        for (uint64_t i = 0; i < KEY_RANGE; ++i) all[static_cast<size_t>(i)] = i;
-        std::set<uint64_t> existing(raw.begin(), raw.end());
-        size_t nf_target = std::min(n, NF_CAP);
-        w.find_nf.reserve(nf_target);
-        for (uint64_t v : all) {
-            if (!existing.count(v)) {
-                w.find_nf.push_back(v);
-                if (w.find_nf.size() >= nf_target) break;
-            }
-        }
-    } else {
-        std::set<uint64_t> existing(raw.begin(), raw.end());
-        w.find_nf.reserve(n);
-        while (w.find_nf.size() < n) {
-            uint64_t k = rng() & KEY_MAX;
-            if (!existing.count(k)) {
-                w.find_nf.push_back(k);
-                existing.insert(k);
+    // find_nf for large keys (small keys handled above)
+    if constexpr (!SMALL_KEY) {
+        if (pattern == "sequential") {
+            w.find_nf.reserve(n);
+            for (size_t i = 0; i < n; ++i)
+                w.find_nf.push_back((i * 2 + 1) & KEY_MAX);
+        } else {
+            std::set<uint64_t> existing(raw.begin(), raw.end());
+            w.find_nf.reserve(n);
+            while (w.find_nf.size() < n) {
+                uint64_t k = rng() & KEY_MAX;
+                if (!existing.count(k)) {
+                    w.find_nf.push_back(k);
+                    existing.insert(k);
+                }
             }
         }
     }
@@ -677,9 +685,19 @@ static void run_bench(size_t max_n, bool verbose,
     const char* patterns[] = {"random", "sequential"};
     std::vector<Row> rows;
 
-    for (auto* pat : patterns)
-        for (auto n : sizes)
+    for (auto* pat : patterns) {
+        size_t last_n = 0;
+        for (auto n : sizes) {
+            size_t before = rows.size();
             bench_all<K, V>(n, pat, rows, verbose);
+            // Dedup: if bench emitted same N as last (key-space cap), remove it
+            if (!rows.empty() && rows.size() > before && rows.back().n == last_n) {
+                rows.resize(before);
+            } else if (rows.size() > before) {
+                last_n = rows.back().n;
+            }
+        }
+    }
 
     emit_html(rows, key_name, val_name);
 }
