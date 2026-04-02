@@ -28,6 +28,148 @@ A TRIE (from "retrieval") is a tree structure where each node represents a porti
 
 This gives TRIEs a fundamental property that distinguishes them from comparison-based trees: lookup cost depends on the key's length, not the number of entries. A TRIE with 100 entries and a TRIE with 100 million entries traverse the same number of levels for the same key.
 
+A TRIE with just “HELLO”/WORLD, “HELP”/BEATLES, and “HELPER”/HAMBURGER:
+```mermaid
+block
+  columns 3
+
+  ROOT(("ROOT")):3
+
+%% 0
+  space:3
+
+  space
+  block:N0
+    columns 27
+    block:ll0("children of ROOT"):27
+       space
+    end
+    a0["A"] b0["B"] c0["C"] d0["D"] e0["E"] f0["F"] g0["G"] h0["H"] i0["I"] j0["J"] k0["K"] l0["L"] m0["M"] n0["N"] o0["O"] p0["P"] q0["Q"] r0["R"] s0["S"] t0["T"] u0["U"] v0["V"] w0["W"] x0["X"] y0["Y"] z0["Z"] eos0["∅"]
+  end
+  space
+
+%% 1
+  space:3
+  space
+  block:N1
+    columns 27
+    block:ll1["children of H"]:27
+       space
+    end
+    a1["A"] b1["B"] c1["C"] d1["D"] e1["E"] f1["F"] g1["G"] h1["H"] i1["I"] j1["J"] k1["K"] l1["L"] m1["M"] n1["N"] o1["O"] p1["P"] q1["Q"] r1["R"] s1["S"] t1["T"] u1["U"] v1["V"] w1["W"] x1["X"] y1["Y"] z1["Z"] eos1["∅"]
+  end
+  space
+
+%% 2
+  space:3
+  space
+  block:N2
+    columns 27
+    block:ll2["children of HE"]:27
+       space
+    end
+    a2["A"] b2["B"] c2["C"] d2["D"] e2["E"] f2["F"] g2["G"] h2["H"] i2["I"] j2["J"] k2["K"] l2["L"] m2["M"] n2["N"] o2["O"] p2["P"] q2["Q"] r2["R"] s2["S"] t2["T"] u2["U"] v2["V"] w2["W"] x2["X"] y2["Y"] z2["Z"] eos2["∅"]
+  end
+  space
+
+%% 3
+  space:3
+  space
+  block:N3
+    columns 27
+    block:ll3["children of HEL"]:27
+       space
+    end
+    a3["A"] b3["B"] c3["C"] d3["D"] e3["E"] f3["F"] g3["G"] h3["H"] i3["I"] j3["J"] k3["K"] l3["L"] m3["M"] n3["N"] o3["O"] p3["P"] q3["Q"] r3["R"] s3["S"] t3["T"] u3["U"] v3["V"] w3["W"] x3["X"] y3["Y"] z3["Z"] eos3["∅"]
+  end
+  space
+
+%% 4
+space:3 
+    block:N4
+      columns 27
+      block:ll4["children of HELL"]:27
+        space
+      end
+      a4["A"] b4["B"] c4["C"] d4["D"] e4["E"] f4["F"] g4["G"] h4["H"] i4["I"] j4["J"] k4["K"] l4["L"] m4["M"] n4["N"] o4["O"] p4["P"] q4["Q"] r4["R"] s4["S"] t4["T"] u4["U"] v4["V"] w4["W"] x4["X"] y4["Y"] z4["Z"] eos4["∅"]
+    end
+
+    block:N5
+      columns 27
+      block:ll5["children of HELP"]:27
+         space
+      end
+      a5["A"] b5["B"] c5["C"] d5["D"] e5["E"] f5["F"] g5["G"] h5["H"] i5["I"] j5["J"] k5["K"] l5["L"] m5["M"] n5["N"] o5["O"] p5["P"] q5["Q"] r5["R"] s5["S"] t5["T"] u5["U"] v5["V"] w5["W"] x5["X"] y5["Y"] z5["Z"] eos5["∅"] 
+    end
+    space
+
+%% 5
+space:3
+    block:N6
+      columns 27
+      block:ll6["children of HELLO"]:27
+         space
+      end
+      a6["A"] b6["B"] c6["C"] d6["D"] e6["E"] f6["F"] g6["G"] h6["H"] i6["I"] j6["J"] k6["K"] l6["L"] m6["M"] n6["N"] o6["O"] p6["P"] q6["Q"] r6["R"] s6["S"] t6["T"] u6["U"] v6["V"] w6["W"] x6["X"] y6["Y"] z6["Z"] eos6["∅"]
+    end
+
+    block:N7
+      columns 27
+      block:ll7["children of HELPE"]:27
+         space
+      end
+      a7["A"] b7["B"] c7["C"] d7["D"] e7["E"] f7["F"] g7["G"] h7["H"] i7["I"] j7["J"] k7["K"] l7["L"] m7["M"] n7["N"] o7["O"] p7["P"] q7["Q"] r7["R"] s7["S"] t7["T"] u7["U"] v7["V"] w7["W"] x7["X"] y7["Y"] z7["Z"] eos7["∅"]
+    end
+   V2[["🔑 BEATLES"]]
+
+%% 6
+    space:3
+    V1[["🔑 WORLD"]]
+    block:N8
+      columns 27
+      block:ll8["children of HELPER"]:27
+         space
+      end
+      a8["A"] b8["B"] c8["C"] d8["D"] e8["E"] f8["F"] g8["G"] h8["H"] i8["I"] j8["J"] k8["K"] l8["L"] m8["M"] n8["N"] o8["O"] p8["P"] q8["Q"] r8["R"] s8["S"] t8["T"] u8["U"] v8["V"] w8["W"] x8["X"] y8["Y"] z8["Z"] eos8["∅"]
+    end
+    space
+
+%% 7
+  space:3 
+  space:2
+  V3[["🔑 HAMBURGER"]]
+
+  ROOT --> ll0
+  h0 --> ll1
+  e1 --> ll2
+  l2 --> ll3
+  l3 --> ll4
+  p3 --> ll5
+  o4 --> ll6
+  e5 --> ll7
+  eos5 --> V2
+  eos6 --> V1
+  r7 --> ll8
+  eos8 --> V3
+
+  style ROOT fill:#555,color:#fff,stroke:#333
+  style h0 fill:#e67e22,color:#fff,stroke:#d35400
+  style e1 fill:#e67e22,color:#fff,stroke:#d35400
+  style l2 fill:#e67e22,color:#fff,stroke:#d35400
+  style l3 fill:#3498db,color:#fff,stroke:#2980b9
+  style p3 fill:#9b59b6,color:#fff,stroke:#8e44ad
+  style o4 fill:#3498db,color:#fff,stroke:#2980b9
+  style e5 fill:#9b59b6,color:#fff,stroke:#8e44ad
+  style eos5 fill:#2ecc71,color:#fff,stroke:#27ae60
+  style eos6 fill:#2ecc71,color:#fff,stroke:#27ae60
+  style r7 fill:#9b59b6,color:#fff,stroke:#8e44ad
+  style eos8 fill:#2ecc71,color:#fff,stroke:#27ae60
+  style V1 fill:#2ecc71,color:#fff,stroke:#27ae60
+  style V2 fill:#2ecc71,color:#fff,stroke:#27ae60
+  style V3 fill:#2ecc71,color:#fff,stroke:#27ae60
+
+```
+
 The classic problems with TRIEs are well known. A naïve implementation that allocates a 256-entry child array at every level wastes enormous memory. Most slots are empty, especially near the leaves. Sparsely-occupied levels are the norm. The structure also suffers from pointer chasing: each level requires following a pointer to the next node, and those nodes are scattered across the heap with no cache locality guarantees. For small key populations, the overhead of multiple levels can exceed the cost of a flat sorted search. And for variable-depth TRIEs, the bookkeeping to know what type of node you're looking at, how deep you are, and when you've reached a leaf adds complexity at every step.
 
 ### 1.2 Binary Search
