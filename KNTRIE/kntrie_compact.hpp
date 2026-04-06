@@ -23,11 +23,11 @@ namespace gteitelbaum::kntrie_detail {
 template<typename K>
 struct adaptive_search {
     static const K* find_base(const K* base, unsigned count, K key) noexcept {
-        int bw=std::bit_width(count);
-        unsigned count2=1 << (bw-1);
+        int bw=std::bit_width((count - 1) | 1u);
+        unsigned count2=1u << (bw-1);
         unsigned diff=count - count2;
         const K* diff_val=base+diff;
-        bool is_diff = key > *diff_val;
+        bool is_diff = *diff_val <= key;
         base = is_diff ? diff_val : base;
         count=count2;
         do {
@@ -40,11 +40,11 @@ struct adaptive_search {
     }
 
     static const K* find_base_first(const K* base, unsigned count, K key) noexcept {
-        int bw=std::bit_width(count);
-        unsigned count2=1 << (bw-1);
+        int bw=std::bit_width((count - 1) | 1u);
+        unsigned count2=1u << (bw-1);
         unsigned diff=count - count2;
         const K* diff_val=base+diff;
-        bool is_diff = key > *diff_val;
+        bool is_diff = *diff_val < key;
         base = is_diff ? diff_val : base;
         count=count2;
         do {
