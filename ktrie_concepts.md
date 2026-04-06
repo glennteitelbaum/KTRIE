@@ -440,10 +440,13 @@ static const K* find_base(const K* base, unsigned count, K key) noexcept {
         count >>= 1u;
         const K* hi_val=base+count;
         bool is_hi=(*hi_val <= key);
-        base = is_hi ? hi_val : base;            // This should be branchless
+        base = is_hi ? hi_val : base;            // This should be branchless - see note
     } while (count > 1u);
     return base;
 }
+
+** Note it might be necessary to use something like the following if the compiler decides to branch
+base = __builtin_unpredictable(is_hi) ? hi_val : base;
 ```
 
 A `find_base_first` variant uses strict `<` instead of `<=` to find the first occurrence of a key (lower bound), used by iterator operations and duplicate-aware insertion.
