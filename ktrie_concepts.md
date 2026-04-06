@@ -433,7 +433,7 @@ static const K* find_base(const K* base, unsigned count, K key) noexcept {
     unsigned count2=1u << (bw-1);          // the ' | 1u' above guards against count==1
     unsigned diff=count - count2;          // find the break point
     const K* diff_val=base+diff;
-    bool is_diff = key > *diff_val;
+    bool is_diff = (*diff_val <= key);     // Same as in loop below
     base = is_diff ? diff_val : base;      // This should be branchless
     count=count2;
     do {
