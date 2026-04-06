@@ -407,13 +407,15 @@ Binary search finds a target in a sorted array by repeatedly halving the search 
 
 The standard implementation uses conditional branches: `if (mid < target) low = mid + 1; else high = mid;`. On modern CPUs, these branches are data-dependent — the branch predictor cannot know which half will be chosen until the comparison completes. When the array is large enough that the access pattern is effectively random (the typical case for the middle levels of a search), mispredictions stall the pipeline for 10–15 cycles each.
 
-**Branchless binary search.** The KTRIE uses a branchless variant that replaces the conditional branch with a conditional move (cmov):
+**Branchless binary search.**
 
 ```cpp
 static const K* find_base(const K* base, unsigned count, K key) noexcept {
     do {
         count >>= 1;
-        base += (base[count] <= key) ? count : 0;
+        const K* hi_val=base+count;
+        bool is_hi=(*hi_val <= key);
+        base = is_hi ? hi_val : base;  // This should be branchless
     } while (count > 1);
     return base;
 }
@@ -421,7 +423,28 @@ static const K* find_base(const K* base, unsigned count, K key) noexcept {
 
 Each iteration halves `count` and conditionally advances `base`. The comparison `base[count] <= key` produces a boolean that the compiler emits as a cmov instruction: the CPU computes both possible values of `base` and selects one, with no branch prediction involved. This executes in ~2 cycles per iteration regardless of the data pattern.
 
-The requirement is that `count` must be a power of 2.
+The requirement is that `count` must be a power of 2. But this is very restrictive. To allow a search on any `count` an adaptive search can be done. It branchlessly finds the power of two **less than** `count` and then based on one branchless compare starts with an offset of 0 or the diff between `count` and the power of two. This allows searching that power of two in the normal branchless search. This approach allows searching any value of `count`, whether it is a power of two or not.
+
+**Adaptive binary search**
+
+```cpp
+static const K* find_base(const K* base, unsigned count, K key) noexcept {
+    int bw=std::bit_width((count-1) | 1u);
+    unsigned count2=1u << (bw-1);
+    unsigned diff=count - count2;
+    const K* diff_val=base+diff;
+    bool is_diff = key > *diff_val;
+    base = is_diff ? diff_val : base; // This should be branchless
+    count=count2;
+    do {
+        count >>= 1;
+        const K* hi_val=base+count;
+        bool is_hi=(*hi_val <= key);
+        base = is_hi ? hi_val : base;  // This should be branchless
+    } while (count > 1);
+    return base;
+}
+```
 
 A `find_base_first` variant uses strict `<` instead of `<=` to find the first occurrence of a key (lower bound), used by iterator operations and duplicate-aware insertion.
 
