@@ -429,19 +429,19 @@ The requirement is that `count` must be a power of 2. But this is very restricti
 
 ```cpp
 static const K* find_base(const K* base, unsigned count, K key) noexcept {
-    int bw=std::bit_width((count-1) | 1u); // use 'count-1' so a power of 2 does a meaningful compare
-    unsigned count2=1u << (bw-1);          // the ' | 1u' above guards against count==1
-    unsigned diff=count - count2;          // find the break point
+    unsigned bw=std::bit_width((count-1u) | 1u); // use 'count-1' so a power of 2 does a meaningful compare
+    unsigned count2=1u << (bw-1u);               // the ' | 1u' above guards against count==1
+    unsigned diff=count - count2;                // find the break point
     const K* diff_val=base+diff;
-    bool is_diff = (*diff_val <= key);     // Same as in loop below
-    base = is_diff ? diff_val : base;      // This should be branchless
+    bool is_diff = (*diff_val <= key);           // Same as in loop below
+    base = is_diff ? diff_val : base;            // This should be branchless
     count=count2;
     do {
-        count >>= 1;
+        count >>= 1u;
         const K* hi_val=base+count;
         bool is_hi=(*hi_val <= key);
-        base = is_hi ? hi_val : base;      // This should be branchless
-    } while (count > 1);
+        base = is_hi ? hi_val : base;            // This should be branchless
+    } while (count > 1u);
     return base;
 }
 ```
