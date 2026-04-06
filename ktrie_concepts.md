@@ -24,9 +24,7 @@ This document describes the data structures, algorithms, and shared design conce
 
 ### 1.1 TRIE
 
-A TRIE (from "retrieval") is a tree structure where each node represents a portion of a key rather than the whole key. In a string TRIE, each level might branch on one character. In a numeric TRIE, each level branches on some chunk of bits. The path from root to leaf spells out the complete key.
-
-This gives TRIEs a fundamental property that distinguishes them from comparison-based trees: lookup cost depends on the key's length, not the number of entries. A TRIE with 100 entries and a TRIE with 100 million entries traverse the same number of levels for the same key.
+A TRIE (from "retrieval") is a tree structure where each node represents a portion of a key rather than the whole key. In a traditional TRIE the keys are a string, each level branching on one character. The path from root to leaf spells out the complete key. Becuase strings are variable length there can be leaves at every level.
 
 A TRIE with elements **HELLO**/WORLD, **HELP**/BEATLES, and **HELPER**/HAMBURGER:
 
@@ -171,7 +169,7 @@ space:3
 
 ```
 
-A digital trie is a trie whose key is bitwise, for 8 bits each trie would have 256 nodes. Unlike a alpabet based trie, all have the same depth, with leaves at the bottom.
+A DIGITAL TRIE is a TRIE whose key is an integer, and it treats them bitwise. For a TRIE handling 8 bits per node, each trie would have 256 nodes. Unlike a alpabet based trie, all have the same depth, with leaves at the bottom.
 
 A digital trie with elements **0x00000000**/NULL, **0x00000004**/FOUR, **0x000401BC**/POTITUS, **0xFEEDFACE**/HAMBURGER:
 
@@ -399,6 +397,7 @@ block
   style ROOT fill:#555,color:#fff,stroke:#333
 
 ```
+This gives TRIEs a fundamental property that distinguishes them from comparison-based trees: lookup cost depends on the key's length, not the number of entries. A TRIE with 100 entries and a TRIE with 100 million entries traverse the same number of levels for the same key.
 
 The classic problems with TRIEs are well known. A naïve implementation that allocates a N-entry child array at every level wastes enormous memory. Most slots are empty, especially near the leaves. Sparsely-occupied levels are the norm. The structure also suffers from pointer chasing: each level requires following a pointer to the next node, and those nodes are scattered across the heap with no cache locality guarantees. For small key populations, the overhead of multiple levels can exceed the cost of a flat sorted search. And for variable-depth TRIEs, the bookkeeping to know what type of node you're looking at, how deep you are, and when you've reached a leaf adds complexity at every step.
 
