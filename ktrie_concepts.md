@@ -24,7 +24,7 @@ This document describes the data structures, algorithms, and shared design conce
 
 ### 1.1 TRIE
 
-A TRIE (from "retrieval") is a tree structure where each node represents a portion of a key rather than the whole key. In a traditional TRIE the keys are a string, each level branching on one character. The path from root to leaf spells out the complete key. Becuase strings are variable length there can be leaves at every level.
+A TRIE (from "retrieval") is a tree structure where each node represents a portion of a key rather than the whole key. In a traditional TRIE the keys are a string, each level branching on one character. The path from root to leaf spells out the complete key. Because strings are variable length there can be leaves at every level.
 
 A TRIE with elements **HELLO**/WORLD, **HELP**/BEATLES, and **HELPER**/HAMBURGER:
 
@@ -169,7 +169,7 @@ space:3
 
 ```
 
-A DIGITAL TRIE is a TRIE whose key is an integer, and it treats them bitwise. For a TRIE handling 8 bits per node, each trie would have 256 nodes. Unlike a alpabet based trie, all have the same depth, with leaves at the bottom.
+A DIGITAL TRIE is a TRIE whose key is an integer, and it treats them bitwise. For a TRIE handling 8 bits per node, each node would have 256 slots. Unlike a alpabet based trie, all have the same depth, with leaves at the bottom.
 
 A digital trie with elements **0x00000000**/NULL, **0x00000004**/FOUR, **0x000401BC**/POTITUS, **0xFEEDFACE**/HAMBURGER:
 
