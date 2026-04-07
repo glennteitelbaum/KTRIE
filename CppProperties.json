@@ -1,0 +1,19 @@
+{
+  "configurations": [
+    {
+      "inheritEnvironments": [
+        "msvc_x64_x64"
+      ],
+      "name": "x64-Release",
+      "includePath": [
+        "${projectRoot}\\kntrie",
+        "${projectRoot}\\kstrie",
+        "${projectRoot}\\ktoken"
+      ],
+      "defines": [
+        "_CRT_SECURE_NO_WARNINGS"
+      ],
+      "intelliSenseMode": "windows-msvc-x64"
+    }
+  ]
+}
