@@ -1,0 +1,16 @@
+﻿################################################################################
+# This .gitignore file was automatically created by Microsoft(R) Visual Studio.
+################################################################################
+
+/.vs/KTRIE_MS/CopilotIndices/17.14.1561.44479
+/.vs/KTRIE_MS/FileContentIndex
+/.vs/KTRIE_MS/v17/ipch/AutoPCH
+/.vs/KTRIE_MS/v17/Browse.VC.db
+/.vs/KTRIE_MS/v17/Browse.VC.db-shm
+/.vs/KTRIE_MS/v17/Browse.VC.db-wal
+/.vs/KTRIE_MS/v17/Browse.VC.opendb
+/.vs/KTRIE_MS/v17/DocumentLayout.backup.json
+/.vs/KTRIE_MS/v17/DocumentLayout.json
+/.vs/KTRIE_MS/v17/.wsuo
+/out/build/x64-Debug
+/.vs
