@@ -53,10 +53,19 @@ static double now_ms() {
     return std::chrono::duration<double, std::milli>(clk::now() - t0).count();
 }
 
+#ifdef _MSC_VER
+#include <intrin.h>
+template<typename T>
+static void do_not_optimize(T const& val) {
+    _ReadWriteBarrier();
+    (void)val;
+}
+#else
 template<typename T>
 static void do_not_optimize(T const& val) {
     asm volatile("" : : "r,m"(val) : "memory");
 }
+#endif
 
 // ==========================================================================
 // big256_t — 256 byte trivially copyable struct for testing C-type path
