@@ -813,7 +813,7 @@ struct kntrie_ops {
         size_t total = old_count + 1;
         uint8_t ps = hdr->skip();
 
-        uint64_t child_tagged;
+        uint64_t child_tagged=0;
         bool collapsed = false;
 
         if (n_children == 1) {
