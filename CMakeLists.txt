@@ -17,6 +17,7 @@ if(MSVC)
         /Zc:__cplusplus         # report correct __cplusplus value
         /W4                     # high warning level
         /bigobj                 # allow large object files (heavy template instantiation)
+        /guard:cf-              # DISABLE Control Flow Guard (C++20)
     )
 
     # AVX-512: closest MSVC equivalent to -march=x86-64-v4

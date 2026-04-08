@@ -54,11 +54,10 @@ static double now_ms() {
 }
 
 #ifdef _MSC_VER
-#include <intrin.h>
 template<typename T>
 static void do_not_optimize(T const& val) {
-    _ReadWriteBarrier();
-    (void)val;
+    static volatile char const* sink;
+    sink = reinterpret_cast<char const volatile*>(&val);
 }
 #else
 template<typename T>
