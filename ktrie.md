@@ -2598,6 +2598,14 @@ The primary contribution is the prefix/branch/suffix decomposition as a unified 
 
 ![Memory](images/chart64_mem.svg)
 
-#### KSTRIE — words.txt
+#### KSTRIE — words.txt, string → i32
 
-*(charts pending — awaiting benchmark run)*
+![Find](images/words_find.svg)
+
+![Iteration](images/words_iter.svg)
+
+![Insert](images/words_insert.svg)
+
+![Erase](images/words_erase.svg)
+
+![Memory](images/words_mem.svg)
