@@ -1633,7 +1633,116 @@ block
 
 The search handles arbitrary entry counts without requiring power-of-two padding. The algorithm computes `bit_width((count - 1) | 1u)` to find the largest power of two strictly less than `count`. The difference between `count` and that power of two determines a "diff" offset. A single branchless comparison at `base + diff` either advances the base pointer or leaves it unchanged, reducing the remaining search space to an exact power of two. The main loop then executes a standard branchless binary search, halving the count at each step via a conditional move. The diff step's comparison (`*diff_val <= key`) mirrors the loop body's comparison exactly, producing uniform codegen. The `| 1u` in the bit_width argument handles the count=1 edge case branchlessly — it folds into the `lzcnt` dependency chain with zero additional cost on x86. For exact powers of two (4, 8, 16, ...), the diff step performs one iteration's worth of meaningful work, saving one loop iteration.
 
-[Figure: adaptive search walkthrough with 20 entries. bit_width(19) = 5, count2 = 16, diff = 4. Case A: key < keys[4], search [0..15]. Case B: key ≥ keys[4], search [4..19]. Four loop iterations narrow to the final position.]
+**Figure 10: Adaptive search walkthrough** — 20 entries, searching for position 14. Green = decision point. Purple = chosen range. Grey = eliminated. Edges trace position 14 through the entire search.
+
+```mermaid
+block
+  columns 20
+    space
+    block:diff_title("keys[4] ≤ key → RIGHT, base=4"):18
+      space
+    end
+    space
+    d0["0"] d1["1"] d2["2"] d3["3"] d4[["4"]] d5[["5"]] d6[["6"]] d7[["7"]] d8[["8"]] d9[["9"]] d10[["10"]] d11[["11"]] d12[["12"]] d13[["13"]] d14[["14"]] d15[["15"]] d16[["16"]] d17[["17"]] d18[["18"]] d19[["19"]]
+
+    space
+    block:i1_title("step=8: keys[12] ≤ key → RIGHT, base=12"):18
+      space
+    end
+    space
+    i1_0[" "] i1_1[" "] i1_2[" "] i1_3[" "] i1_4["4"] i1_5["5"] i1_6["6"] i1_7["7"] i1_8["8"] i1_9["9"] i1_10["10"] i1_11["11"] i1_12[["12"]] i1_13[["13"]] i1_14[["14"]] i1_15[["15"]] i1_16[["16"]] i1_17[["17"]] i1_18[["18"]] i1_19[["19"]]
+
+    space
+    block:i2_title("step=4: keys[16] > key → LEFT, base=12"):18
+      space
+    end
+    space
+    i2_0[" "] i2_1[" "] i2_2[" "] i2_3[" "] i2_4[" "] i2_5[" "] i2_6[" "] i2_7[" "] i2_8[" "] i2_9[" "] i2_10[" "] i2_11[" "] i2_12[["12"]] i2_13[["13"]] i2_14[["14"]] i2_15[["15"]] i2_16["16"] i2_17["17"] i2_18["18"] i2_19["19"]
+
+    space
+    block:i3_title("step=2: keys[14] ≤ key → RIGHT, base=14"):18
+      space
+    end
+    space
+    i3_0[" "] i3_1[" "] i3_2[" "] i3_3[" "] i3_4[" "] i3_5[" "] i3_6[" "] i3_7[" "] i3_8[" "] i3_9[" "] i3_10[" "] i3_11[" "] i3_12["12"] i3_13["13"] i3_14[["14"]] i3_15[["15"]] i3_16[" "] i3_17[" "] i3_18[" "] i3_19[" "]
+
+    space
+    block:i4_title("step=1: keys[15] > key → LEFT, base=14"):18
+      space
+    end
+    space
+    i4_0[" "] i4_1[" "] i4_2[" "] i4_3[" "] i4_4[" "] i4_5[" "] i4_6[" "] i4_7[" "] i4_8[" "] i4_9[" "] i4_10[" "] i4_11[" "] i4_12[" "] i4_13[" "] i4_14[["14"]] i4_15["15"] i4_16[" "] i4_17[" "] i4_18[" "] i4_19[" "]
+
+    space
+    block:res_title("→ candidate at position 14, final equality check"):18
+      space
+    end
+    space
+    r0[" "] r1[" "] r2[" "] r3[" "] r4[" "] r5[" "] r6[" "] r7[" "] r8[" "] r9[" "] r10[" "] r11[" "] r12[" "] r13[" "] r14[["14"]] r15[" "] r16[" "] r17[" "] r18[" "] r19[" "]
+
+  d14 --> i1_14
+  i1_14 --> i2_14
+  i2_14 --> i3_14
+  i3_14 --> i4_14
+  i4_14 --> r14
+
+  style d0 fill:#ccc,color:#666,stroke:#aaa
+  style d1 fill:#ccc,color:#666,stroke:#aaa
+  style d2 fill:#ccc,color:#666,stroke:#aaa
+  style d3 fill:#ccc,color:#666,stroke:#aaa
+  style d4 fill:#2ecc71,color:#fff,stroke:#444444
+  style d5 fill:#9b59b6,color:#fff,stroke:#444444
+  style d6 fill:#9b59b6,color:#fff,stroke:#444444
+  style d7 fill:#9b59b6,color:#fff,stroke:#444444
+  style d8 fill:#9b59b6,color:#fff,stroke:#444444
+  style d9 fill:#9b59b6,color:#fff,stroke:#444444
+  style d10 fill:#9b59b6,color:#fff,stroke:#444444
+  style d11 fill:#9b59b6,color:#fff,stroke:#444444
+  style d12 fill:#9b59b6,color:#fff,stroke:#444444
+  style d13 fill:#9b59b6,color:#fff,stroke:#444444
+  style d14 fill:#9b59b6,color:#fff,stroke:#444444
+  style d15 fill:#9b59b6,color:#fff,stroke:#444444
+  style d16 fill:#9b59b6,color:#fff,stroke:#444444
+  style d17 fill:#9b59b6,color:#fff,stroke:#444444
+  style d18 fill:#9b59b6,color:#fff,stroke:#444444
+  style d19 fill:#9b59b6,color:#fff,stroke:#444444
+
+  style i1_4 fill:#ccc,color:#666,stroke:#aaa
+  style i1_5 fill:#ccc,color:#666,stroke:#aaa
+  style i1_6 fill:#ccc,color:#666,stroke:#aaa
+  style i1_7 fill:#ccc,color:#666,stroke:#aaa
+  style i1_8 fill:#ccc,color:#666,stroke:#aaa
+  style i1_9 fill:#ccc,color:#666,stroke:#aaa
+  style i1_10 fill:#ccc,color:#666,stroke:#aaa
+  style i1_11 fill:#ccc,color:#666,stroke:#aaa
+  style i1_12 fill:#2ecc71,color:#fff,stroke:#444444
+  style i1_13 fill:#9b59b6,color:#fff,stroke:#444444
+  style i1_14 fill:#9b59b6,color:#fff,stroke:#444444
+  style i1_15 fill:#9b59b6,color:#fff,stroke:#444444
+  style i1_16 fill:#9b59b6,color:#fff,stroke:#444444
+  style i1_17 fill:#9b59b6,color:#fff,stroke:#444444
+  style i1_18 fill:#9b59b6,color:#fff,stroke:#444444
+  style i1_19 fill:#9b59b6,color:#fff,stroke:#444444
+
+  style i2_12 fill:#9b59b6,color:#fff,stroke:#444444
+  style i2_13 fill:#9b59b6,color:#fff,stroke:#444444
+  style i2_14 fill:#9b59b6,color:#fff,stroke:#444444
+  style i2_15 fill:#9b59b6,color:#fff,stroke:#444444
+  style i2_16 fill:#2ecc71,color:#fff,stroke:#444444
+  style i2_17 fill:#ccc,color:#666,stroke:#aaa
+  style i2_18 fill:#ccc,color:#666,stroke:#aaa
+  style i2_19 fill:#ccc,color:#666,stroke:#aaa
+
+  style i3_12 fill:#ccc,color:#666,stroke:#aaa
+  style i3_13 fill:#ccc,color:#666,stroke:#aaa
+  style i3_14 fill:#2ecc71,color:#fff,stroke:#444444
+  style i3_15 fill:#9b59b6,color:#fff,stroke:#444444
+
+  style i4_14 fill:#9b59b6,color:#fff,stroke:#444444
+  style i4_15 fill:#2ecc71,color:#fff,stroke:#444444
+
+  style r14 fill:#2ecc71,color:#fff,stroke:#444444
+```
 
 A variant `find_base_first` uses strict `<` instead of `<=` to find the first occurrence of a key (lower bound), used by iterator operations.
 
