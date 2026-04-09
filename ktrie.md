@@ -586,13 +586,372 @@ The bitmap is the core mechanism that compresses 256 possible children down to o
 
 **Presence test (has_bit).** To test whether child byte `idx` exists, shift the appropriate word right by `idx mod 64` and test bit 0. This is a single instruction.
 
-**Rank (count_below).** To determine the position of child `idx` in the dense array, count how many set bits precede it. Build a mask of all bits below `idx` within its word: `(1ULL << (idx & 63)) - 1`. AND the mask with the bitmap word and popcount the result. For a multi-word bitmap, add the popcounts of all complete words below the target word. The cross-word accumulation is itself branchless: each prior word's popcount is masked by `& -int(w > N)`, which evaluates to all-ones (pass through) when the word index is below the target, and zero (mask out) otherwise. No conditional branch at any step. [Figure]
+**Core operation: shift left + popcount.** All dispatch modes share the same core. The target word is shifted left by `(63 - bit)`, putting the target bit at the sign position (bit 63). The popcount of the shifted word counts the target bit (if set) and all set bits below it in that word. For a multi-word bitmap, add the popcounts of all complete words below the target word. The cross-word accumulation is itself branchless: each prior word's popcount is masked by `& -int(w > N)`, which evaluates to all-ones (pass through) when the word index is below the target, and zero (mask out) otherwise. No conditional branch at any step.
 
-**Dispatch (find_slot).** The full dispatch operation combines presence testing and rank computation into a single branchless sequence. The target bit is shifted to the sign position via a left shift. The popcount of the shifted word gives a 1-based rank if the bit is set, or an arbitrary value if not. The result is masked to zero on miss: `slot &= -int(found)`, where `found` is the sign bit after the shift. A miss produces slot index 0, which holds the sentinel (§4.2). A hit produces a positive index into the dense child array. [Figure]
+The three dispatch modes differ only in the final adjustment after this shared core:
 
-**Unfiltered rank (slot_for_insert).** Returns the count of set bits strictly before position `idx`, without testing whether `idx` itself is set. This gives the correct insertion point when adding a new child. Used only on the insert path.
+- **BRANCHLESS** (find path): `slot &= -int(sign_bit)` — masks to 0 on miss (sentinel at slot 0), passes through the 1-based rank on hit.
+- **FAST_EXIT** (insert, erase, iteration): checks the sign bit first, returns -1 on miss. On hit, subtracts 1 for a 0-based slot index.
+- **UNFILTERED** (insert position): returns the raw popcount. If the target bit is set, the caller subtracts 1. If not set (inserting a new child), the popcount is already the correct insert position.
 
-**Scanning (find_next_set, find_prev_set).** To find the next occupied child after a given byte, mask off bits below the starting position and find the lowest set bit in the result via `countr_zero`. If the current word is exhausted, advance to the next word. The reverse operation masks off bits above the starting position and finds the highest set bit via `63 - countl_zero`. These scans drive iterator advancement: when a leaf is exhausted, the iterator walks to the parent branch node and scans the bitmap for the next (or previous) sibling. [Figure]
+**Figure 9a: Dispatch — HIT (idx=5).** Bitmap {1, 3, 5, 7}, shift left by 2. Sign bit = 1 (green) → target bit found.
+
+```mermaid
+block
+  columns 1
+
+  block:BMP
+    columns 8
+    space
+    block:bmp_lbl["bitmap: 0b10101010"]:6
+      space
+    end
+    space
+    bi7["7"] bi6["6"] bi5["5"] bi4["4"] bi3["3"] bi2["2"] bi1["1"] bi0["0"]
+    b7["1"] b6["0"] b5["1"] b4["0"] b3["1"] b2["0"] b1["1"] b0["0"]
+  end
+
+  block:SHIFT
+    columns 8
+    space
+    block:shift_lbl["<< 2: 0b10101000"]:6
+      space
+    end
+    space
+    si7["7"] si6["6"] si5["5"] si4["4"] si3["3"] si2["2"] si1["1"] si0["0"]
+    sv7["1"] sv6["0"] sv5["1"] sv4["0"] sv3["1"] sv2["0"] sv1["0"] sv0["0"]
+  end
+
+  block:STEPS
+    columns 3
+    block:SB
+      columns 1
+      block:sb_lbl["sign bit (bit 7)"]:1
+        space
+      end
+      sb["1 → bit IS set"]
+    end
+    block:PC
+      columns 1
+      block:pc_lbl["popcount(shifted)"]:1
+        space
+      end
+      pc["3"]
+    end
+    block:ADJ
+      columns 1
+      block:adj_lbl["+ prior words"]:1
+        space
+      end
+      adj["(single word: +0)"]
+    end
+  end
+
+  block:MODES
+    columns 3
+    block:MBR
+      columns 1
+      block:mbr_lbl["BRANCHLESS"]:1
+        space
+      end
+      mbr["3 & -int(1) = 3"]
+      mbr2["slot 3 (1-based)"]
+    end
+    block:MFE
+      columns 1
+      block:mfe_lbl["FAST_EXIT"]:1
+        space
+      end
+      mfe["3 − 1 = 2"]
+      mfe2["slot 2 (0-based)"]
+    end
+    block:MUF
+      columns 1
+      block:muf_lbl["UNFILTERED"]:1
+        space
+      end
+      muf["3 − int(1) = 2"]
+      muf2["insert pos: 2"]
+    end
+  end
+
+  style b7 fill:#e67e22,color:#fff,stroke:#d35400
+  style b5 fill:#e67e22,color:#fff,stroke:#d35400
+  style b3 fill:#e67e22,color:#fff,stroke:#d35400
+  style b1 fill:#e67e22,color:#fff,stroke:#d35400
+  style b6 fill:#ccc,color:#666,stroke:#aaa
+  style b4 fill:#ccc,color:#666,stroke:#aaa
+  style b2 fill:#ccc,color:#666,stroke:#aaa
+  style b0 fill:#ccc,color:#666,stroke:#aaa
+
+  style sv7 fill:#2ecc71,color:#fff,stroke:#27ae60
+  style sv5 fill:#3498db,color:#fff,stroke:#2980b9
+  style sv3 fill:#3498db,color:#fff,stroke:#2980b9
+  style sv6 fill:#ccc,color:#666,stroke:#aaa
+  style sv4 fill:#ccc,color:#666,stroke:#aaa
+  style sv2 fill:#ccc,color:#666,stroke:#aaa
+  style sv1 fill:#ccc,color:#666,stroke:#aaa
+  style sv0 fill:#ccc,color:#666,stroke:#aaa
+
+  style sb fill:#2ecc71,color:#fff,stroke:#27ae60
+  style pc fill:#3498db,color:#fff,stroke:#2980b9
+
+  style mbr fill:#3498db,color:#fff,stroke:#2980b9
+  style mfe fill:#3498db,color:#fff,stroke:#2980b9
+  style muf fill:#3498db,color:#fff,stroke:#2980b9
+```
+
+**Figure 9b: Dispatch — MISS (idx=4).** Same bitmap, shift left by 3. Sign bit = 0 (red) → target bit absent.
+
+```mermaid
+block
+  columns 1
+
+  block:MBMP
+    columns 8
+    space
+    block:mbmp_lbl["bitmap: 0b10101010"]:6
+      space
+    end
+    space
+    mi7["7"] mi6["6"] mi5["5"] mi4["4"] mi3["3"] mi2["2"] mi1["1"] mi0["0"]
+    mb7["1"] mb6["0"] mb5["1"] mb4["0"] mb3["1"] mb2["0"] mb1["1"] mb0["0"]
+  end
+
+  block:MSHIFT
+    columns 8
+    space
+    block:mshift_lbl["<< 3: 0b01010000"]:6
+      space
+    end
+    space
+    msi7["7"] msi6["6"] msi5["5"] msi4["4"] msi3["3"] msi2["2"] msi1["1"] msi0["0"]
+    ms7["0"] ms6["1"] ms5["0"] ms4["1"] ms3["0"] ms2["0"] ms1["0"] ms0["0"]
+  end
+
+  block:MSTEPS
+    columns 3
+    block:MSB
+      columns 1
+      block:msb_lbl["sign bit (bit 7)"]:1
+        space
+      end
+      msb["0 → bit NOT set"]
+    end
+    block:MPC
+      columns 1
+      block:mpc_lbl["popcount(shifted)"]:1
+        space
+      end
+      mpc["2"]
+    end
+    block:MADJ
+      columns 1
+      block:madj_lbl["+ prior words"]:1
+        space
+      end
+      madj["(single word: +0)"]
+    end
+  end
+
+  block:MMODES
+    columns 3
+    block:MMBR
+      columns 1
+      block:mmbr_lbl["BRANCHLESS"]:1
+        space
+      end
+      mmbr["2 & -int(0) = 0"]
+      mmbr2["slot 0 → SENTINEL"]
+    end
+    block:MMFE
+      columns 1
+      block:mmfe_lbl["FAST_EXIT"]:1
+        space
+      end
+      mmfe["sign=0 → return -1"]
+      mmfe2["early exit"]
+    end
+    block:MMUF
+      columns 1
+      block:mmuf_lbl["UNFILTERED"]:1
+        space
+      end
+      mmuf["2 − int(0) = 2"]
+      mmuf2["insert pos: 2"]
+    end
+  end
+
+  style mb7 fill:#e67e22,color:#fff,stroke:#d35400
+  style mb5 fill:#e67e22,color:#fff,stroke:#d35400
+  style mb3 fill:#e67e22,color:#fff,stroke:#d35400
+  style mb1 fill:#e67e22,color:#fff,stroke:#d35400
+  style mb6 fill:#ccc,color:#666,stroke:#aaa
+  style mb4 fill:#ccc,color:#666,stroke:#aaa
+  style mb2 fill:#ccc,color:#666,stroke:#aaa
+  style mb0 fill:#ccc,color:#666,stroke:#aaa
+
+  style ms7 fill:#e74c3c,color:#fff,stroke:#c0392b
+  style ms6 fill:#ccc,color:#666,stroke:#aaa
+  style ms5 fill:#ccc,color:#666,stroke:#aaa
+  style ms4 fill:#ccc,color:#666,stroke:#aaa
+  style ms3 fill:#ccc,color:#666,stroke:#aaa
+  style ms2 fill:#ccc,color:#666,stroke:#aaa
+  style ms1 fill:#ccc,color:#666,stroke:#aaa
+  style ms0 fill:#ccc,color:#666,stroke:#aaa
+
+  style msb fill:#e74c3c,color:#fff,stroke:#c0392b
+  style mmbr fill:#e74c3c,color:#fff,stroke:#c0392b
+  style mmfe fill:#e74c3c,color:#fff,stroke:#c0392b
+```
+
+Hit and miss execute the same instruction sequence — no branch. The `& -int(found)` mask zeros the result on miss, routing to slot 0 (sentinel). On hit, `-int(true)` is all-ones, passing the rank through unchanged.
+
+**Scanning (find_next_set, find_prev_set).** To find the next occupied child after a given byte, mask off bits below the starting position and find the lowest set bit in the result via `countr_zero`. If the current word is exhausted, advance to the next word. The reverse operation masks off bits above the starting position and finds the highest set bit via `63 - countl_zero`. These scans drive iterator advancement: when a leaf is exhausted, the iterator walks to the parent branch node and scans the bitmap for the next (or previous) sibling.
+
+**Figure 9c: find_next_set(4)** — mask off bits below 4, find lowest survivor.
+
+```mermaid
+block
+  columns 1
+
+  block:BMP2
+    columns 8
+    space
+    block:bmp2_lbl["bitmap word"]:6
+      space
+    end
+    space
+    si7["7"] si6["6"] si5["5"] si4["4"] si3["3"] si2["2"] si1["1"] si0["0"]
+    s7["1"] s6["0"] s5["1"] s4["0"] s3["1"] s2["0"] s1["1"] s0["0"]
+  end
+
+  block:SMASK
+    columns 8
+    space
+    block:smask_lbl["mask = ~0 << 4"]:6
+      space
+    end
+    space
+    sm7["1"] sm6["1"] sm5["1"] sm4["1"] sm3["0"] sm2["0"] sm1["0"] sm0["0"]
+  end
+
+  block:SAND
+    columns 8
+    space
+    block:sand_lbl["bitmap & mask"]:6
+      space
+    end
+    space
+    sa7["1"] sa6["0"] sa5["1"] sa4["0"] sa3["0"] sa2["0"] sa1["0"] sa0["0"]
+  end
+
+  block:SRESULT
+    columns 1
+    sres["countr_zero = 5 → next set bit is at position 5"]
+  end
+
+  style s7 fill:#e67e22,color:#fff,stroke:#d35400
+  style s5 fill:#e67e22,color:#fff,stroke:#d35400
+  style s3 fill:#e67e22,color:#fff,stroke:#d35400
+  style s1 fill:#e67e22,color:#fff,stroke:#d35400
+  style s6 fill:#ccc,color:#666,stroke:#aaa
+  style s4 fill:#ccc,color:#666,stroke:#aaa
+  style s2 fill:#ccc,color:#666,stroke:#aaa
+  style s0 fill:#ccc,color:#666,stroke:#aaa
+
+  style sm7 fill:#836c12,color:#fff,stroke:#e67e22
+  style sm6 fill:#836c12,color:#fff,stroke:#e67e22
+  style sm5 fill:#836c12,color:#fff,stroke:#e67e22
+  style sm4 fill:#836c12,color:#fff,stroke:#e67e22
+  style sm3 fill:#ccc,color:#666,stroke:#aaa
+  style sm2 fill:#ccc,color:#666,stroke:#aaa
+  style sm1 fill:#ccc,color:#666,stroke:#aaa
+  style sm0 fill:#ccc,color:#666,stroke:#aaa
+
+  style sa7 fill:#3498db,color:#fff,stroke:#2980b9
+  style sa5 fill:#3498db,color:#fff,stroke:#2980b9
+  style sa6 fill:#ccc,color:#666,stroke:#aaa
+  style sa4 fill:#ccc,color:#666,stroke:#aaa
+  style sa3 fill:#ccc,color:#666,stroke:#aaa
+  style sa2 fill:#ccc,color:#666,stroke:#aaa
+  style sa1 fill:#ccc,color:#666,stroke:#aaa
+  style sa0 fill:#ccc,color:#666,stroke:#aaa
+
+  style sres fill:#3498db,color:#fff,stroke:#2980b9
+```
+
+**Figure 9d: find_prev_set(4)** — mask off bits above 4, find highest survivor.
+
+```mermaid
+block
+  columns 1
+
+  block:BMP3
+    columns 8
+    space
+    block:bmp3_lbl["bitmap word"]:6
+      space
+    end
+    space
+    pi7["7"] pi6["6"] pi5["5"] pi4["4"] pi3["3"] pi2["2"] pi1["1"] pi0["0"]
+    p7["1"] p6["0"] p5["1"] p4["0"] p3["1"] p2["0"] p1["1"] p0["0"]
+  end
+
+  block:PMASK
+    columns 8
+    space
+    block:pmask_lbl["mask = ~0 >> (7 − 4)"]:6
+      space
+    end
+    space
+    pm7["0"] pm6["0"] pm5["0"] pm4["1"] pm3["1"] pm2["1"] pm1["1"] pm0["1"]
+  end
+
+  block:PAND
+    columns 8
+    space
+    block:pand_lbl["bitmap & mask"]:6
+      space
+    end
+    space
+    pa7["0"] pa6["0"] pa5["0"] pa4["0"] pa3["1"] pa2["0"] pa1["1"] pa0["0"]
+  end
+
+  block:PRESULT
+    columns 1
+    pres["7 − countl_zero = 7 − 4 = 3 → prev set bit is at position 3"]
+  end
+
+  style p7 fill:#e67e22,color:#fff,stroke:#d35400
+  style p5 fill:#e67e22,color:#fff,stroke:#d35400
+  style p3 fill:#e67e22,color:#fff,stroke:#d35400
+  style p1 fill:#e67e22,color:#fff,stroke:#d35400
+  style p6 fill:#ccc,color:#666,stroke:#aaa
+  style p4 fill:#ccc,color:#666,stroke:#aaa
+  style p2 fill:#ccc,color:#666,stroke:#aaa
+  style p0 fill:#ccc,color:#666,stroke:#aaa
+
+  style pm4 fill:#836c12,color:#fff,stroke:#e67e22
+  style pm3 fill:#836c12,color:#fff,stroke:#e67e22
+  style pm2 fill:#836c12,color:#fff,stroke:#e67e22
+  style pm1 fill:#836c12,color:#fff,stroke:#e67e22
+  style pm0 fill:#836c12,color:#fff,stroke:#e67e22
+  style pm7 fill:#ccc,color:#666,stroke:#aaa
+  style pm6 fill:#ccc,color:#666,stroke:#aaa
+  style pm5 fill:#ccc,color:#666,stroke:#aaa
+
+  style pa3 fill:#3498db,color:#fff,stroke:#2980b9
+  style pa1 fill:#3498db,color:#fff,stroke:#2980b9
+  style pa7 fill:#ccc,color:#666,stroke:#aaa
+  style pa6 fill:#ccc,color:#666,stroke:#aaa
+  style pa5 fill:#ccc,color:#666,stroke:#aaa
+  style pa4 fill:#ccc,color:#666,stroke:#aaa
+  style pa2 fill:#ccc,color:#666,stroke:#aaa
+  style pa0 fill:#ccc,color:#666,stroke:#aaa
+
+  style pres fill:#3498db,color:#fff,stroke:#2980b9
+```
 
 **Mutation (set_bit, clear_bit).** Setting a bit uses OR; clearing uses AND-NOT. These maintain the bitmap as children are added or removed by the insert and erase paths.
 
