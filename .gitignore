@@ -15,3 +15,6 @@
 /out/build/x64-Debug
 /.vs
 /out/build/x64-Release
+/KNTRIE/chart16.err
+/KNTRIE/chart32.err
+/KNTRIE/chart64.err
