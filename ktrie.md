@@ -1946,7 +1946,7 @@ Category B applies when the value type is `bool`. Instead of storing one byte pe
 
 Category C applies to all remaining types: those with `sizeof > 8`, non-trivially-copyable types, or types requiring a destructor. The value is heap-allocated via the rebind allocator, constructed in place, and the 8-byte pointer is stored in the slot array. Since a pointer is trivially copyable, the compiler optimizes moves of pointer arrays to `memcpy`/`memmove` automatically. The destructor must be called on erase or node teardown, and the heap allocation must be freed.
 
-All dispatch between categories uses `if constexpr`, which eliminates dead branches at compile time. The slot movement strategy is uniform: non-overlapping transfers (reallocation, new node, split) use `memcpy`; overlapping transfers (in-place insert gap, erase compaction) use `memmove`.
+All dispatch between categories uses `if constexpr`, which eliminates dead branches at compile time. The slot movement strategy is uniform: non-overlapping transfers (reallocation, new node, split) use `memcpy`; overlapping transfers (in-place insert gap, erase compaction) use `memmove`. The value type must be move-constructible; Category C values must additionally be destructible. Types with throwing move constructors are supported but may leave the container in a partially-modified state if an exception propagates during a node split or coalesce.
 
 To reduce template instantiations, Category A values are normalized to a fixed-width unsigned integer type: 1-byte values map to `uint8_t`, 2-byte to `uint16_t`, 3–4-byte to `uint32_t`, and 5–8-byte to `uint64_t`. This means `kntrie<uint64_t, int>` and `kntrie<uint64_t, float>` share the same internal code — the distinction is invisible to the node layer.
 
@@ -2024,7 +2024,7 @@ The EOS child's parent byte is `EOS_PARENT_BYTE = 257`, distinguishing it from b
 
 **Character maps.** The KSTRIE's character map is a compile-time constant: a 256-element `std::array<uint8_t, 256>` that transforms each input byte before it enters the structure. The default identity map preserves raw byte ordering. Case-insensitive maps fold uppercase and lowercase to the same value — `'A'` and `'a'` map to the same byte, causing `find("Hello")` and `find("hello")` to resolve to the same entry. The map need not be a bijection; many-to-one mappings are permitted and are the intended mechanism for case-insensitive or normalization-aware containers.
 
-The map is a template parameter, so it is resolved entirely at compile time. Each unique map produces a distinct template instantiation with the map lookup inlined into every byte-level operation. There is no runtime dispatch cost. On iteration, keys are returned in their mapped (internal) form — inserting `"Hello"` with an uppercase map and then iterating returns `"HELLO"`. The user is responsible for preserving the original key form if needed.
+The map is a template parameter, so it is resolved entirely at compile time. Each unique map produces a distinct template instantiation with the map lookup inlined into every byte-level operation. There is no runtime dispatch cost. On iteration, keys are returned in their mapped (internal) form — inserting `"Hello"` with an uppercase map and then iterating returns `"HELLO"`. This is a deliberate design choice: storing the original-case key alongside the mapped form would double the key storage cost and complicate the keysuffix sharing mechanism, since two entries that are equivalent under the map might have different original forms. Applications that need original-case keys should maintain an external mapping or use the identity character map with application-level normalization.
 
 Creating a custom map requires constructing a 256-element array and wrapping it in the `char_map` template. For example, a map that treats all digits as equivalent would map `'0'` through `'9'` to a single value, causing numeric suffixes to collide. A degenerate map that maps all 256 byte values to a single output is valid — it produces a container that sorts entries by key length only.
 
@@ -2492,7 +2492,7 @@ return end
 
 When a sibling is found, the iterator descends to its edge entry: following first (or last) children at each branch level until reaching a compact node, then taking the first (or last) entry. The cost of the cold path is one upward step per exhausted level plus one downward descent to the sibling's edge. In practice, most walks go up one level, because compact nodes hold many entries and exhaust events are rare relative to within-leaf advances.
 
-The amortized cost across a full iteration from `begin()` to `end()` is O(1) per advance: the total number of cold-path steps across all N advances is proportional to the number of branch nodes, which is O(N / C) — each branch node is entered and exited exactly once. Dividing by N advances gives O(1 / C) cold-path cost per advance, dominated by the O(1) hot-path cost.
+The amortized cost across a full iteration from `begin()` to `end()` is O(1) per advance: the total number of cold-path steps across all N advances is proportional to the number of branch nodes, which is O(N / C) — each branch node is entered and exited exactly once. Dividing by N advances gives O(1 / C) cold-path cost per advance, dominated by the O(1) hot-path cost. More precisely, if the minimum compact node entry count is C_min (at least 1 after a split, but typically much larger due to the hysteresis policy which delays shrinkage), then the cold-path cost per advance is bounded by O(1 / C_min). Since C_min ≥ 1, the bound is O(1); in practice C_min is hundreds or thousands, making the cold path negligible.
 
 **Lazy key reconstruction (KSTRIE).** In KSTRIE, the key is not maintained during iteration. The `operator*()` returns a `lazy_key` proxy. On first access — comparison, conversion to `std::string`, or any operation that reads the key — `ensure_key()` walks from the current compact node to the root via parent pointers, prepending skip bytes and dispatch bytes at each level into a `fast_string` buffer. The walk is O(D) where D is the tree depth, which is at most L (the key length). The buffer is cached in the iterator and reused until the next advance invalidates it. For forward iteration over N entries, the key reconstruction cost is amortized: most advances within a leaf only invalidate the cached key without rebuilding it, and rebuilding occurs only when the key is actually accessed.
 
@@ -2640,6 +2640,18 @@ The primary contribution is the prefix/branch/suffix decomposition as a unified 
 ![Erase](images/chart64_erase.svg)
 
 ![Memory](images/chart64_mem.svg)
+
+#### KNTRIE — u64 → i32, sequential keys
+
+![Find](images/chart64_seq_find.svg)
+
+![Iteration](images/chart64_seq_iter.svg)
+
+![Insert](images/chart64_seq_insert.svg)
+
+![Erase](images/chart64_seq_erase.svg)
+
+![Memory](images/chart64_seq_mem.svg)
 
 #### KSTRIE — words.txt, string → i32
 
