@@ -6,8 +6,11 @@ Same four u32 keys with two levels of bitmask dispatch. Byte 0 splits {00, FE}. 
 block
   columns 2
 
-  NF{"NOT FOUND"}
+  space
   ROOT(("ROOT"))
+  
+  NF{"NOT FOUND"}
+  space
 
   space
   block:BM0
