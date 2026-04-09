@@ -480,7 +480,7 @@ block
 
 The KTRIE combines these two inheritances. Each key is decomposed into three logical regions — a shared PREFIX absorbed into a single comparison, one or more BRANCH levels that fan out via bitmap-compressed dispatch, and a SUFFIX region collected into a B-tree-style flat sorted compact node. Branch nodes replace the sparse trie nodes: a bitmap records which of the 256 possible children exist, and child pointers are packed into a dense array indexed by popcount. Compact nodes replace the deep leaf chains: rather than branching all the way to individual entries, the KTRIE collects remaining suffixes into contiguous sorted arrays and searches them with binary search. The boundaries between prefix, branch, and suffix adapt dynamically to the data — dense key ranges branch deeply, sparse ranges are absorbed into a single compact node.
 
-[Figure: The same key sets from the trie and digital trie figures above, now stored in a KTRIE. Branch nodes contain only the children that exist (bitmap-compressed). Compact nodes hold sorted suffix arrays. Visual contrast: the 9 × 27 or 9 × 256 sparse nodes collapse to 2–3 branch nodes plus compact nodes holding all entries.]
+The same key sets are revisited in §3.2 (Figure 5) and §3.3 (Figure 6), showing how the KTRIE compresses them: branch nodes contain only the children that exist (bitmap-compressed), and compact nodes hold sorted suffix arrays in a single allocation.
 
 The result is an ordered associative container that approaches hash-table lookup speed while providing full key ordering, range queries, and prefix operations, with a memory footprint that can fall below the raw key-value data size through prefix and suffix compression.
 
@@ -950,6 +950,107 @@ block
 
 **KNTRIE branch node layout.** The allocation begins with a 2-u64 header: `node[0]` is the packed 8-byte node header (§5.1), and `node[1]` is the parent pointer for bidirectional iteration. The bitmap follows, then the miss pointer (sentinel) at slot 0, then the dense child array, and finally a descendant count at the end of the allocation. The descendant count holds the exact total entry count for the subtree and drives coalesce decisions on erase. Embed chains for skip prefix compression are described in §3.4.
 
+**Figure 7: KNTRIE bitmask nodes** — the same four u32 keys from Figure 2 with two levels of bitmask dispatch. Byte 0 splits {00, FE}. Byte 1 splits the 00-subtree into {00, 04}. Sentinel miss path shown with "X" edges to NOT FOUND. Suffix type narrows from u32 → u16 at depth 2.
+
+```mermaid
+block
+  columns 2
+
+  space
+  ROOT(("ROOT"))
+  
+  NF{"NOT FOUND"}
+  space
+
+  space
+  block:BM0
+    columns 5
+    space
+    block:bm0_title("bitmask — byte 0 • bitmap: {00, FE}"):3
+      space
+    end
+    space
+    bm0_bmp["bitmap: 00 FE"] bm0_sent["SENTINEL"] bm0_c0["→ 00"] bm0_c1["→ FE"] bm0_desc["desc: 4"]
+  end
+
+  space:2
+
+    block:BM1
+      columns 5
+      space
+      block:bm1_title("bitmask via 00 — byte 1 • bitmap: {00, 04}"):3
+        space
+      end
+      space
+      bm1_bmp["bitmap: 00 04"] bm1_sent["SENTINEL"] bm1_c0["→ 00"] bm1_c1["→ 04"] bm1_desc["desc: 3"]
+    end
+
+    block:CK_FE
+      columns 4
+      space
+      block:ckfe_title("compact via FE — 1 entry, depth 1"):2
+        space
+      end
+      space
+      ckfe_k0["0xEDFACE"] space ckfe_V0[["HAMBURGER"]] space 
+    end
+
+    space:2
+
+    block:CK_00
+      columns 4
+      space
+      block:ck00_title("compact via 00→00 — 2 entries, suffix: u16"):2
+        space
+      end
+      space
+      ck00_k0["0x0000"] ck00_k1["0x0004"] ck00_V0[["NULL"]] ck00_V1[["FOUR"]]
+    end
+
+    block:CK_04
+      columns 4
+      space
+      block:ck04_title("compact via 00→04 — 1 entry, suffix: u16"):2
+        space
+      end
+      space
+      ck04_k0["0x01BC"] space ck04_V0[["POTITUS"]] space
+    end
+
+  ROOT --> BM0
+  bm0_c0 --> BM1
+  bm0_c1 --> CK_FE
+  bm1_c0 --> CK_00
+  bm1_c1 --> CK_04
+  bm0_sent-- "X" -->NF
+  bm1_sent-- "X" -->NF
+
+  style ROOT fill:#555,color:#fff,stroke:#333
+
+  style bm0_bmp fill:#e67e22,color:#fff,stroke:#d35400
+  style bm0_sent fill:#888,color:#fff,stroke:#666
+  style bm0_c0 fill:#3498db,color:#fff,stroke:#2980b9
+  style bm0_c1 fill:#e74c3c,color:#fff,stroke:#c0392b
+  style bm0_desc fill:#888,color:#fff,stroke:#666
+
+  style bm1_bmp fill:#e67e22,color:#fff,stroke:#d35400
+  style bm1_sent fill:#888,color:#fff,stroke:#666
+  style bm1_c0 fill:#3498db,color:#fff,stroke:#2980b9
+  style bm1_c1 fill:#9b59b6,color:#fff,stroke:#8e44ad
+  style bm1_desc fill:#888,color:#fff,stroke:#666
+
+  style ck00_k0 fill:#3498db,color:#fff,stroke:#2980b9
+  style ck00_k1 fill:#3498db,color:#fff,stroke:#2980b9
+  style ck00_V0 fill:#2ecc71,color:#fff,stroke:#27ae60
+  style ck00_V1 fill:#2ecc71,color:#fff,stroke:#27ae60
+
+  style ck04_k0 fill:#9b59b6,color:#fff,stroke:#8e44ad
+  style ck04_V0 fill:#2ecc71,color:#fff,stroke:#27ae60
+
+  style ckfe_k0 fill:#e74c3c,color:#fff,stroke:#c0392b
+  style ckfe_V0 fill:#2ecc71,color:#fff,stroke:#27ae60
+```
+
 **KSTRIE branch node layout.** The allocation begins with an 8-byte header, followed by the parent pointer, a `total_tail` field, the bitmap, the sentinel, the dense child array, an EOS child slot, and skip bytes at the end. The EOS child slot handles keys that terminate at this branch point — for example, `"HELP"` exists alongside `"HELPER"`. When a lookup exhausts its key bytes at a branch node, it follows the EOS child rather than dispatching on a byte that does not exist.
 
 The `total_tail` field estimates the byte cost of collapsing the entire subtree back into a single compact node. The estimate accounts for three components per entry in the subtree: the keysuffix bytes stored in compact leaf children, one dispatch byte per entry for the byte consumed at this bitmask level, and, for each nested branch node with skip length S, an additional S bytes per entry passing through it. This total is maintained incrementally — insert propagates the delta upward, erase subtracts it — and the coalesce check is simply `total_tail <= COMPACT_KEYSUFFIX_LIMIT`. This conservative estimate avoids trial collapse: without it, the erase path would need to walk the entire subtree to determine whether it fits in a single compact node, which was a significant performance problem before this heuristic was introduced.
@@ -1130,7 +1231,44 @@ block
   style rk2_1 fill:#e74c3c,color:#fff,stroke:#c0392b
 ```
 
-[Figure: KNTRIE compact node layout (sorted keys + values). Same integer key sets from §1 shown as they would be stored when the entire dataset fits in a single compact node.]
+**Figure 8: KNTRIE compact node** — the same four u32 keys stored in a single compact node (the small-N case). No skip prefix (byte 0 diverges: 0x00 vs 0xFE). Sorted array of u32 suffix/value pairs. Lookup is a branchless binary search: `bit_width(3) = 2`, count2 = 2, diff = 2, one diff comparison + one loop iteration.
+
+```mermaid
+block
+  columns 1
+
+  ROOT(("ROOT"))
+
+  block:NODE
+    columns 8
+      space
+      block:k_lbl["sorted keys (u32)"]:2
+        space
+      end
+      space
+      space
+      block:v_lbl["values"]:2
+        space
+      end
+      space
+      k0["0x00000000"] k1["0x00000004"] k2["0x000401BC"] k3["0xFEEDFACE"]
+      V0[["NULL"]] V1[["FOUR"]] V2[["POTITUS"]] V3[["HAMBURGER"]]
+    end
+
+  ROOT --> NODE
+
+  style ROOT fill:#555,color:#fff,stroke:#333
+
+  style k0 fill:#3498db,color:#fff,stroke:#2980b9
+  style k1 fill:#9b59b6,color:#fff,stroke:#8e44ad
+  style k2 fill:#e74c3c,color:#fff,stroke:#c0392b
+  style k3 fill:#e67e22,color:#fff,stroke:#d35400
+
+  style V0 fill:#2ecc71,color:#fff,stroke:#27ae60
+  style V1 fill:#2ecc71,color:#fff,stroke:#27ae60
+  style V2 fill:#2ecc71,color:#fff,stroke:#27ae60
+  style V3 fill:#2ecc71,color:#fff,stroke:#27ae60
+```
 
 **KNTRIE compact nodes.** Each entry is a suffix/value pair. The suffix type narrows with depth: at depth 4 in a `uint64_t` key, the suffix is a `uint32_t`; at depth 6, it is a `uint16_t`. The suffixes are stored in a sorted array, and the values occupy a parallel array at a computed offset. Lookup uses a branchless adaptive binary search.
 
