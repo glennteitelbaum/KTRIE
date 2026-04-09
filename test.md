@@ -9,9 +9,11 @@ block
   block:NODE
     columns 6
 
-    block:title("compact node — 3 entries, 1 allocation"):6
+    space
+    block:title("compact node — 3 entries, 1 allocation"):4
       space
     end
+    space
 
     block:SK
       columns 3
@@ -64,14 +66,8 @@ block
   end
 
 %% Reconstruction
-
-
   block:RECON
-    columns 7
-
-    block:rtitle("reconstruction: skip + F + keysuffix[ O .. O+L−2 ]"):7
-      space
-    end
+    columns 6
 
     block:CS
       columns 1
@@ -119,12 +115,15 @@ block
       ro20["H"] ro21["E"] ro22["L"] ro23["P"] ro024["E"] ro25["R"]
     end
 
-
-
     %% Note
-    block:NOTE:2
+    block:NOTE
       columns 1
-      note["O[1] = O[2] = 1 — HELP shares HELPER's offset because L=1 means zero tail bytes read"]
+      block:notel["NOTES:"]
+        space
+      end
+      note["O[1] = O[2] = 1"]
+      note2["HELP shares HELPER's offset"]
+      note3["Because L=1 means zero tail bytes read"]
     end
 
   end
@@ -176,10 +175,6 @@ block
   style rk2_0 fill:#e74c3c,color:#fff,stroke:#c0392b
   style rk2_1 fill:#e74c3c,color:#fff,stroke:#c0392b
 
-  %% style ro0 fill:#2ecc71,color:#fff,stroke:#27ae60
-  %% style ro1 fill:#2ecc71,color:#fff,stroke:#27ae60
-  %% style ro2 fill:#2ecc71,color:#fff,stroke:#27ae60
-
 ```
 
 ```mermaid
@@ -192,9 +187,11 @@ block
   block:BM0
     columns 6
 
-    block:bm0_title("bitmask node — root • bitmap: {H}"):6
+    space
+    block:bm0_title("bitmask node — root • bitmap: {H}"):4
       space
     end
+    space
 
     block:BM0_HDR
       columns 1
@@ -250,9 +247,11 @@ block
   block:BM1
     columns 7
 
-    block:bm1_title("bitmask node — after H • skip: E L • bitmap: {L, P}"):7
+    space
+    block:bm1_title("bitmask node — after H • skip: E L • bitmap: {L, P}"):5
       space
     end
+    space
 
     block:BM1_HDR
       columns 1
@@ -350,9 +349,11 @@ block
 %% Compact via P: two entries
     block:CK_P
       columns 6
-      block:ckp_title("compact leaf via P — 2 entries"):6
+      space
+      block:ckp_title("compact leaf via P — 2 entries"):4
         space
       end
+      space
 
       block:CKP_L
         columns 2
@@ -392,16 +393,10 @@ block
       space
 
     end
-
   end
-
 %% ── Reconstruction ───────────────────────────────────────────
   block:RECON
     columns 7
-
-    block:rtitle("reconstruction: root dispatch + skip + leaf dispatch + F + keysuffix"):7
-      space
-    end
 
     block:CS
       columns 1
