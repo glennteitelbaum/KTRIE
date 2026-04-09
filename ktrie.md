@@ -2584,5 +2584,20 @@ The primary contribution is the prefix/branch/suffix decomposition as a unified 
 
 ### References
 
-### Appendix
-- A: Performance graphs — KNTRIE u16/u32/u64 (find, insert, erase, iteration, memory), KSTRIE (find, insert, erase, iteration, memory, prefix operations), threshold sensitivity sweeps
+### Appendix A: Performance Graphs
+
+#### KNTRIE — u64 → i32, random keys
+
+![Find](images/chart64_find.svg)
+
+![Iteration](images/chart64_iter.svg)
+
+![Insert](images/chart64_insert.svg)
+
+![Erase](images/chart64_erase.svg)
+
+![Memory](images/chart64_mem.svg)
+
+#### KSTRIE — words.txt
+
+*(charts pending — awaiting benchmark run)*
