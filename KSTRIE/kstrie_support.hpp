@@ -87,35 +87,30 @@ struct bitmap_n {
         if constexpr (WORDS == 1) words[0] &= ~(uint64_t(1) << idx);
         else words[idx >> LOG2_U64_BITS] &= ~(uint64_t(1) << (idx & U64_BIT_MASK));
     }
-    [[nodiscard]] int find_slot(uint8_t idx) const noexcept {
-        if (!has_bit(idx)) return -1;
-        return count_below(idx);
-    }
+    // Shift-left + popcount: counts set bits at and below idx.
+    // If idx's bit is set, it IS included in the count.
+    // Callers that need 0-based slot (bit known set) subtract 1.
+    // Callers that need insert position (bit known not set) use as-is.
     [[nodiscard]] int count_below(uint8_t idx) const noexcept {
         if constexpr (WORDS == 1) {
-            uint64_t mask = (uint64_t(1) << idx) - 1;
-            return std::popcount(words[0] & mask);
+            uint64_t before = words[0] << (U64_BIT_MASK - idx);
+            return std::popcount(before);
         } else if constexpr (WORDS == 2) {
             int w = idx >> LOG2_U64_BITS;
-            uint64_t mask = (uint64_t(1) << (idx & U64_BIT_MASK)) - 1;
-            int pc0 = std::popcount(words[0]);
-            int cnt = std::popcount(words[w] & mask);
-            cnt += pc0 & -int(w > 0);
+            uint64_t before = words[w] << (U64_BIT_MASK - (idx & U64_BIT_MASK));
+            int cnt = std::popcount(before);
+            cnt += std::popcount(words[0]) & -int(w > 0);
             return cnt;
         } else {
             int w = idx >> LOG2_U64_BITS;
-            uint64_t mask = (uint64_t(1) << (idx & U64_BIT_MASK)) - 1;
-            int pc0 = std::popcount(words[0]);
-            int pc1 = std::popcount(words[1]);
-            int pc2 = std::popcount(words[2]);
-            int cnt = std::popcount(words[w] & mask);
-            cnt += pc0 & -int(w > 0);
-            cnt += pc1 & -int(w > 1);
-            cnt += pc2 & -int(w > 2);
+            uint64_t before = words[w] << (U64_BIT_MASK - (idx & U64_BIT_MASK));
+            int cnt = std::popcount(before);
+            cnt += std::popcount(words[0]) & -int(w > 0);
+            cnt += std::popcount(words[1]) & -int(w > 1);
+            cnt += std::popcount(words[2]) & -int(w > 2);
             return cnt;
         }
     }
-    [[nodiscard]] int slot_for_insert(uint8_t idx) const noexcept { return count_below(idx); }
     [[nodiscard]] int popcount() const noexcept {
         if constexpr (WORDS == 1) return std::popcount(words[0]);
         else if constexpr (WORDS == 2) return std::popcount(words[0]) + std::popcount(words[1]);

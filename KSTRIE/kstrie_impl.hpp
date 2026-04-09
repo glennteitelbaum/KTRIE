@@ -1500,7 +1500,7 @@ private:
             const auto* bm = bitmask_type::get_bitmap(node, h);
             int idx = bm->find_next_set(0);
             if (idx < 0) return {nullptr, 0};
-            int slot = bm->count_below(static_cast<uint8_t>(idx));
+            int slot = bm->count_below(static_cast<uint8_t>(idx)) - 1;  // bit set
             node = bitmask_type::child_by_slot(node, h, slot);
         }
         return {nullptr, 0};
@@ -1518,7 +1518,7 @@ private:
         else
             sib = bm->find_next_set(static_cast<uint8_t>(byte) + 1);
         if (sib < 0) return {nullptr, 0};
-        int slot = bm->count_below(static_cast<uint8_t>(sib));
+        int slot = bm->count_below(static_cast<uint8_t>(sib)) - 1;  // bit set
         return descend_first_compact(
             bitmask_type::child_by_slot(bm_node, h, slot));
     }

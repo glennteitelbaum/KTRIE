@@ -132,7 +132,7 @@ struct kstrie_bitmask {
     static void replace_child(uint64_t* node, const hdr_type& h,
                               uint8_t idx, uint64_t* new_child) noexcept {
         const bitmap_type* bm = get_bitmap(node, h);
-        int slot = bm->count_below(idx);
+        int slot = bm->count_below(idx) - 1;  // bit set — 0-based slot
         slots::store_child(child_slots(node), slot, new_child);
         link_child_to_parent(node, new_child, static_cast<uint16_t>(idx));
     }
@@ -213,7 +213,7 @@ struct kstrie_bitmask {
     static uint64_t* insert_child(uint64_t* node, hdr_type& h, mem_type& mem,
                                     uint8_t idx, uint64_t* child) {
         bitmap_type* bm = get_bitmap(node, h);
-        int pos = bm->slot_for_insert(idx);
+        int pos = bm->count_below(idx);  // bit not set — insert position
         uint16_t old_cc = h.count;
         uint16_t new_cc = old_cc + 1;
 
@@ -274,7 +274,7 @@ struct kstrie_bitmask {
     static uint64_t* remove_child(uint64_t* node, hdr_type& h,
                                     uint8_t idx) noexcept {
         bitmap_type* bm = get_bitmap(node, h);
-        int pos = bm->count_below(idx);
+        int pos = bm->count_below(idx) - 1;  // bit set — 0-based slot
         // Save eos + skip
         uint64_t* old_eos = eos_child(node, h);
         uint8_t skip_buf[hdr_type::SKIP_MAX];

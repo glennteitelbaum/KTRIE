@@ -393,7 +393,7 @@ public:
                     const auto* bm = bitmask_type::get_bitmap(node, h);
                     int idx = bm->find_next_set(0);
                     if (idx < 0) [[unlikely]] return;
-                    int slot = bm->count_below(static_cast<uint8_t>(idx));
+                    int slot = bm->count_below(static_cast<uint8_t>(idx)) - 1;  // bit set
                     node = bitmask_type::child_by_slot(node, h, slot);
                 }
             } else {
@@ -409,7 +409,7 @@ public:
                         static_cast<int>(CHARMAP::BITMAP_WORDS * sizeof(uint64_t) * CHAR_BIT) - 1;
                     int idx = bm->find_prev_set(MAX_BIT);
                     if (idx >= 0) {
-                        int slot = bm->count_below(static_cast<uint8_t>(idx));
+                        int slot = bm->count_below(static_cast<uint8_t>(idx)) - 1;  // bit set
                         node = bitmask_type::child_by_slot(node, h, slot);
                         continue;
                     }
@@ -440,7 +440,7 @@ public:
                     else
                         sib = bm->find_next_set(byte + 1);
                     if (sib >= 0) {
-                        int slot = bm->count_below(static_cast<uint8_t>(sib));
+                        int slot = bm->count_below(static_cast<uint8_t>(sib)) - 1;  // bit set
                         edge_entry(bitmask_type::child_by_slot(
                             parent, ph, slot), dir_t::FWD);
                         return;
@@ -449,7 +449,7 @@ public:
                     if (byte != EOS_PARENT_BYTE) {
                         int sib = bm->find_prev_set(byte - 1);
                         if (sib >= 0) {
-                            int slot = bm->count_below(static_cast<uint8_t>(sib));
+                            int slot = bm->count_below(static_cast<uint8_t>(sib)) - 1;  // bit set
                             edge_entry(bitmask_type::child_by_slot(
                                 parent, ph, slot), dir_t::BWD);
                             return;
@@ -760,7 +760,7 @@ public:
                 const auto* bm = bitmask_type::get_bitmap(
                     best_rt.bm_node, best_rt.h);
                 int slot = bm->count_below(
-                    static_cast<uint8_t>(best_rt.next_idx));
+                    static_cast<uint8_t>(best_rt.next_idx)) - 1;  // bit set
                 last.edge_entry(bitmask_type::child_by_slot(
                     best_rt.bm_node, best_rt.h, slot),
                     kstrie_detail::dir_t::FWD);
@@ -936,7 +936,7 @@ private:
             int next_idx = bm->find_next_set(byte + 1);
             if (next_idx < 0) [[unlikely]] return false;
 
-            int slot = bm->count_below(static_cast<uint8_t>(next_idx));
+            int slot = bm->count_below(static_cast<uint8_t>(next_idx)) - 1;  // bit set
             it.edge_entry(bitmask_type::child_by_slot(node, h, slot),
                           kstrie_detail::dir_t::FWD);
             return true;
@@ -958,7 +958,7 @@ private:
             const auto* bm = bitmask_type::get_bitmap(node, h);
             int idx = bm->find_next_set(0);
             if (idx < 0) [[unlikely]] return false;
-            int slot = bm->count_below(static_cast<uint8_t>(idx));
+            int slot = bm->count_below(static_cast<uint8_t>(idx)) - 1;  // bit set
             it.edge_entry(bitmask_type::child_by_slot(node, h, slot),
                           kstrie_detail::dir_t::FWD);
             return true;
