@@ -4,7 +4,7 @@
 
 We present the KTRIE, a hybrid of a trie and a B-tree. Each key is decomposed into three logical regions: a shared prefix absorbed into a single node, one or more branch levels handled in a trie-like fashion, fanning out only where the data requires, and a suffix region collected into a B-tree-like flat sorted compact leaf.
 
-The KTRIE offers O(L + log C) lookup, insertion, and deletion, where L is the key length in bytes and C is the bounded compact node capacity. Its distinguishing contribution is suffix compression: the KTRIE collects remaining suffixes into flat sorted leaves. Whereas a traditional trie scatters sparse keys across many small deep nodes, suffix compression collapses them into contiguous arrays. This eliminates per-node overhead, improves locality, and enables O(1) amortized per-element ordered iteration. Effective depth falls well below L for non-adversarial data distributions.
+The KTRIE offers O(L + log C) lookup, insertion, and deletion, where L is the key length in bytes and C is bounded by a fixed split threshold (making log C a small constant, approximately 12 comparisons). Its distinguishing contribution is suffix compression: the KTRIE collects remaining suffixes into flat sorted leaves. Whereas a traditional trie scatters sparse keys across many small deep nodes, suffix compression collapses them into contiguous arrays. This eliminates per-node overhead, improves locality, and enables O(1) amortized per-element ordered iteration. Effective depth falls well below L for non-adversarial data distributions.
 
 We evaluate two concrete instantiations: KNTRIE and KSTRIE. Both employ bitmap-compressed 256-way branch nodes with branchless dispatch, compact sorted leaves, and share a value storage layer specialized by type: packed bits for Booleans, inline embedding for small trivial types (≤ 8 bytes), and heap-indirected owned copies for larger or non-trivial types.
 
@@ -12,9 +12,7 @@ KNTRIE is specialized for fixed-width integer keys (16-, 32-, and 64-bit), provi
 
 KSTRIE is specialized for variable-length string keys, addressing the challenges of unbounded key length and unpredictable depth. KSTRIE extends prefix compression into the suffix leaves themselves via keysuffix sharing, with leaf capacity governed by a compressed suffix byte budget.
 
-Benchmarks demonstrate that across all operations, both KNTRIE and KSTRIE are competitive with `std::unordered_map` while providing full ordering, and consistently outperform `std::map`. By exploiting prefix compression and suffix truncation, KNTRIE and KSTRIE typically occupy a third or less of the space of `std::map` and `std::unordered_map`. Some benchmark distributions show KNTRIE occupying less space than the raw key-value data alone.
-
-The primary contribution is the prefix/branch/suffix decomposition as a unified hybrid design, with the novel integration of keysuffix sharing.
+Benchmarks demonstrate that across all operations, both KNTRIE and KSTRIE are competitive with `std::unordered_map` while providing full ordering, and consistently outperform `std::map`. By exploiting prefix compression and suffix truncation, KNTRIE and KSTRIE typically occupy a third or less of the space of `std::map` and `std::unordered_map` — KNTRIE achieves 12–15 bytes per entry for `uint64_t` keys with `int32_t` values, compared to ~48 bytes for `std::unordered_map` and ~64 bytes for `std::map`. At favorable size points, KNTRIE's per-entry cost drops below the 12 bytes of raw key-value data, enabled by suffix narrowing that eliminates redundant prefix storage.
 
 **Keywords:** trie, B-tree, ordered associative container, prefix/suffix decomposition, keysuffix sharing, cache locality, bitmap indexing, branchless search, variable-length keys
 
@@ -1410,7 +1408,7 @@ block
 
 **KSTRIE branch node layout.** The allocation begins with an 8-byte header, followed by the parent pointer, a `total_tail` field, the bitmap, the sentinel, the dense child array, an EOS child slot, and skip bytes at the end. The EOS child slot handles keys that terminate at this branch point — for example, `"HELP"` exists alongside `"HELPER"`. When a lookup exhausts its key bytes at a branch node, it follows the EOS child rather than dispatching on a byte that does not exist.
 
-The `total_tail` field estimates the byte cost of collapsing the entire subtree back into a single compact node. The estimate accounts for three components per entry in the subtree: the keysuffix bytes stored in compact leaf children, one dispatch byte per entry for the byte consumed at this bitmask level, and, for each nested branch node with skip length S, an additional S bytes per entry passing through it. This total is maintained incrementally — insert propagates the delta upward, erase subtracts it — and the coalesce check is simply `total_tail <= COMPACT_KEYSUFFIX_LIMIT`. This conservative estimate avoids trial collapse: without it, the erase path would need to walk the entire subtree to determine whether it fits in a single compact node, which was a significant performance problem before this heuristic was introduced.
+The `total_tail` field estimates the byte cost of collapsing the entire subtree back into a single compact node. The estimate accounts for three components per entry in the subtree: the keysuffix bytes stored in compact leaf children, one dispatch byte per entry for the byte consumed at this bitmask level, and, for each nested branch node with skip length S, an additional S bytes per entry passing through it. This total is maintained incrementally — insert propagates the delta upward, erase subtracts it — and the coalesce check is simply `total_tail <= COMPACT_KEYSUFFIX_LIMIT`. The estimate always overestimates: it counts each entry's contribution independently without accounting for keysuffix sharing that would reduce the actual collapsed size. This means coalesce may trigger late (missing some compression opportunities) but never too early (never producing an oversized compact node). This conservative direction avoids trial collapse: without it, the erase path would need to walk the entire subtree to determine whether it fits in a single compact node, which was a significant performance problem before this heuristic was introduced.
 
 #### 3.3 Compact Nodes
 
@@ -2518,12 +2516,16 @@ All benchmarks were run on a single machine:
 
 - **CPU**: Intel Core i7-11700F @ 2.50 GHz (Rocket Lake, 8 cores / 16 threads)
 - **RAM**: 56 GB DDR4
-- **OS**: Windows 10/11, 64-bit
+- **OS**: Windows, 64-bit
 - **Compiler**: MSVC, Visual Studio 2022 Community, `/O2 /arch:AVX512`
 
-Each data point measures a single operation in a tight loop over all N entries, reporting total time in nanoseconds. Results are plotted as ns/entry (total time divided by N) on log-log axes. Memory is reported as bytes/entry (total allocated bytes divided by N). "FND" denotes 100% hit lookups; "NF" denotes 100% miss lookups against keys not in the container.
+The library targets C++23 with `-O2 -march=x86-64-v4` (GCC/Clang on Linux). MSVC was used for benchmarking for two reasons: the available Linux environment had inconsistent background load that produced unreliable timings, and MSVC's `std::unordered_map` implementation routes both bucket array and node allocations through the custom allocator, enabling accurate total memory measurement including the sawtooth pattern visible on rehash. On libstdc++, the bucket array bypasses the custom allocator via a rebind path, which would undercount `std::unordered_map` memory. MSVC's optimizer is generally more conservative than GCC/Clang on template-heavy code; a reviewer benchmarking on GCC may observe different absolute numbers, though relative rankings are expected to hold.
 
-The tracking allocator intercepts all allocations routed through `std::allocator_traits`. For KNTRIE and KSTRIE, this captures all node memory — every compact node, branch node, and value allocation flows through the custom allocator. For `std::map`, it captures the per-node allocations. For `std::unordered_map`, MSVC's implementation routes both bucket array and node allocations through the custom allocator, producing accurate total memory measurement including the sawtooth pattern visible on rehash. On libstdc++, the bucket array bypasses the custom allocator via a rebind path, which would undercount `std::unordered_map` memory — this is why we use MSVC numbers for the memory comparison.
+Each benchmark runs 3 independent trials per data point and reports the minimum. Within each trial, find operations are repeated multiple times to reduce timing noise: 2000 iterations at N ≤ 200, scaling down to 500 at N ≤ 1000, 50 at N ≤ 10,000, 5 at N ≤ 100,000, and 1 iteration at larger sizes. Insert and erase are measured once per trial (they modify the container). Timing uses `std::chrono::high_resolution_clock`; results are prevented from being optimized away by a `do_not_optimize` sink. Results are plotted as ns/entry (total time divided by N) on log-log axes. Memory is reported as bytes/entry (total allocated bytes divided by N). "FND" denotes 100% hit lookups; "NF" denotes 100% miss lookups against keys not in the container.
+
+The tracking allocator intercepts all allocations routed through `std::allocator_traits`. For KNTRIE and KSTRIE, this captures all node memory — every compact node, branch node, and value allocation flows through the custom allocator. For `std::map`, it captures the per-node allocations.
+
+At large N, `std::map` benchmarks are omitted. The O(N log N) total cost of inserting and then looking up N entries in a balanced tree makes `std::map` impractical above approximately 200K entries for KNTRIE (where N reaches 97M) and above approximately 45K entries for KSTRIE. The cutoff is pragmatic: including `std::map` at these sizes would require hours of wall-clock time per data point and compress the useful detail in the graph into a narrow band at the bottom. The `std::map` curves at smaller N already establish the performance relationship.
 
 #### 7.2 KNTRIE — Random u64 Keys
 
@@ -2538,8 +2540,6 @@ The KNTRIE benchmark inserts random `uint64_t` keys mapped to `int32_t` values, 
 **Erase.** KNTRIE erase shows periodic spikes at certain size points (notably around N = 2500–5800 and again at N ≈ 500K–1.1M). These correspond to coalesce events: when the descendant count drops below COMPACT_MAX after a sequence of erases, the entire subtree is collected into a single compact node — an O(C) operation that amortizes over subsequent erases but produces a visible spike at the trigger point. Between spikes, erase performance is competitive with `std::unordered_map`.
 
 **Memory.** KNTRIE's memory advantage is dramatic. At all sizes, KNTRIE uses approximately 12–15 bytes per entry for `uint64_t` keys with `int32_t` values — compared to ~48 bytes per entry for `std::unordered_map` (with sawtooth variation from rehash) and ~64 bytes per entry for `std::map`. At favorable size points, KNTRIE's per-entry cost drops below 12 bytes — less than the 12 bytes of raw key-value data (`uint64_t` + `int32_t`). This sub-raw-data memory is possible because prefix compression and suffix narrowing eliminate redundant key storage: entries sharing the first four bytes store only the remaining four as a `uint32_t` suffix, and the shared prefix bytes are captured once in the root skip or branch node structure.
-
-At large N (above 10M entries), `std::map` benchmarks are omitted because run times exceed practical measurement limits.
 
 Performance graphs are in Appendix A.
 
@@ -2556,8 +2556,6 @@ The KSTRIE benchmark uses a corpus of 466,550 unique English words (average leng
 **Erase.** KSTRIE erase performance is stable across all sizes, without the pronounced spikes seen in the KNTRIE benchmark. The `total_tail` heuristic for coalesce decisions spreads the reorganization cost more evenly than KNTRIE's descendant-count threshold. KSTRIE erase is consistently faster than `std::map` erase and comparable to `std::unordered_map`.
 
 **Memory.** KSTRIE uses approximately 19–22 bytes per entry for the words.txt corpus — roughly one-third of `std::map`'s ~72 bytes per entry and one-third of `std::unordered_map`'s ~56–75 bytes per entry (which varies with rehash state). The memory advantage comes from two sources: prefix compression (the branch structure captures shared prefixes once rather than storing them per entry) and keysuffix sharing (entries like "compute" and "computer" share suffix storage in the keysuffix region). For a corpus with high prefix overlap like English words, these compression mechanisms are particularly effective.
-
-At large N (above 45K entries), `std::map` benchmarks are omitted because run times exceed practical measurement limits.
 
 Performance graphs are in Appendix A.
 
@@ -2606,6 +2604,28 @@ The KTRIE is not a universal replacement for hash tables or balanced trees. It i
 The primary contribution is the prefix/branch/suffix decomposition as a unified design pattern — not a single data structure, but a framework within which different key types, value types, and capacity policies can be instantiated. The pattern separates the concerns of routing (branch nodes), storage (compact nodes), and compression (skip prefix, keysuffix sharing), allowing each to be optimized independently. The novel integration of keysuffix sharing in KSTRIE demonstrates that this separation enables techniques specific to one key type without affecting the shared design.
 
 ### References
+
+[Askitis and Sinha 2007] Nikolas Askitis and Ranjan Sinha. "HAT-trie: A Cache-conscious Trie-based Data Structure for Strings." In *Proceedings of the 30th Australasian Conference on Computer Science (ACSC)*, pp. 97–105, 2007.
+
+[Austern 1998] Matthew H. Austern. *Generic Programming and the STL: Using and Extending the C++ Standard Template Library*. Addison-Wesley, 1998.
+
+[Baskins 2004] Douglas Baskins. "Judy Arrays." http://judy.sourceforge.net/, 2004.
+
+[Bayer and McCreight 1972] Rudolf Bayer and Edward M. McCreight. "Organization and Maintenance of Large Ordered Indexes." *Acta Informatica*, 1(3):173–189, 1972.
+
+[Fredkin 1960] Edward Fredkin. "Trie Memory." *Communications of the ACM*, 3(9):490–499, 1960.
+
+[Heinz, Zobel, and Williams 2002] Steffen Heinz, Justin Zobel, and Hugh E. Williams. "Burst Tries: A Fast, Efficient Data Structure for String Keys." *ACM Transactions on Information Systems*, 20(2):192–223, 2002.
+
+[Khuong and Morin 2017] Paul-Virak Khuong and Pat Morin. "Array Layouts for Comparison-Based Searching." *Journal of Experimental Algorithmics*, 22:1.3:1–1.3:39, 2017.
+
+[Knuth 1973] Donald E. Knuth. *The Art of Computer Programming, Volume 3: Sorting and Searching*. Addison-Wesley, 1973. Second edition, 1998.
+
+[Leis et al. 2013] Viktor Leis, Alfons Kemper, and Thomas Neumann. "The Adaptive Radix Tree: ARTful Indexing for Main-Memory Databases." In *Proceedings of the 29th IEEE International Conference on Data Engineering (ICDE)*, pp. 38–49, 2013.
+
+[Morrison 1968] Donald R. Morrison. "PATRICIA — Practical Algorithm To Retrieve Information Coded In Alphanumeric." *Journal of the ACM*, 15(4):514–534, 1968.
+
+[Stepanov and Lee 1994] Alexander Stepanov and Meng Lee. "The Standard Template Library." HP Laboratories Technical Report HPL-94-34, 1994.
 
 ### Appendix A: Performance Graphs
 
