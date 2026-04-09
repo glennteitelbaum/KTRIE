@@ -526,7 +526,7 @@ The HAT-trie's leaves are unordered. Iterating in sorted order requires sorting 
 
 *Ordered iteration.* Red-black trees, B-trees, and the KTRIE provide sorted iteration natively with O(1) amortized advance. Hash tables and HAT-trie leaves do not — sorted access requires an O(N log N) sort.
 
-*Prefix queries.* The KTRIE and ART support structural prefix descent: navigate to the prefix point in the trie, then collect the subtree below. The KTRIE additionally supports prefix_split (O(1) subtree steal at branch boundaries) and prefix_copy (structural clone). HAT-trie can descend to the prefix point but must then scan unordered hash containers. Hash tables cannot perform prefix queries at all.
+*Prefix queries.* The KTRIE and ART support structural prefix descent: navigate to the prefix point in the trie, then collect the subtree below. The KTRIE additionally supports prefix_split (O(1) subtree steal at branch boundaries) and prefix_copy (structural clone). HAT-trie can descend to the prefix point but must then scan unordered hash containers. Hash tables cannot perform prefix queries at all. These operations are described in §5.2; their performance is characterized analytically rather than benchmarked.
 
 *Memory.* The KTRIE compresses shared prefixes (via skip) and shared suffixes (via keysuffix sharing in KSTRIE). ART compresses prefixes via path compression but stores each key path independently. Hash tables store the full key per entry plus bucket overhead. `std::map` adds ~64 bytes of per-node structural overhead. KTRIE benchmarks show 12–18 bytes per entry for `uint64_t` keys with `int32_t` values, compared to 48–64 for `std::unordered_map` and 64 for `std::map`.
 
@@ -2545,7 +2545,7 @@ Performance graphs are in Appendix A.
 
 #### 7.3 KSTRIE — words.txt
 
-The KSTRIE benchmark uses a corpus of 466,550 unique English words (average length 10.4 characters, maximum 46 characters), mapped to `int32_t` values. Words are drawn from `words.txt` in file order, which is roughly alphabetical — a distribution that exercises prefix sharing heavily, as consecutive words often share long common prefixes (e.g., "compute", "computer", "computing").
+The KSTRIE benchmark uses a corpus of 466,550 unique English words (average length 10.4 characters, maximum 46 characters), mapped to `int32_t` values. Words are drawn from `words.txt` in file order, which is roughly alphabetical — a distribution that exercises prefix sharing heavily, as consecutive words often share long common prefixes (e.g., "compute", "computer", "computing"). This corpus represents a favorable case for KSTRIE's compression mechanisms; §8 analyzes performance characteristics under adversarial distributions analytically.
 
 **Find.** KSTRIE find is consistently faster than `std::map` by 2–3× across all sizes. `std::unordered_map` is faster than both for point lookups, as expected for a hash table with O(1) string hashing. The gap narrows at larger N as cache effects equalize. Not-found lookups are slightly more expensive for KSTRIE than found lookups — the miss path must traverse branch nodes to the point of divergence before detecting absence — but the difference is modest (typically 30–50% overhead).
 
