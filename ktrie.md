@@ -2066,17 +2066,191 @@ After insert returns to the root level, KNTRIE's `normalize_root` checks whether
 
 The amortized cost is O(L + log C): O(L) for the descent, O(log C) for the binary search, and amortized O(1) for the memmove (since most inserts find room in the existing allocation). The worst case is O(L + C), occurring when a compact node overflows and splits.
 
-[Figure — KNTRIE structural evolution]:
-1. Empty: sentinel root.
-2. Insert 1: single compact node, one entry, root skip captures prefix.
-3. Insert 2: same compact node, two sorted entries.
-4. Insert COMPACT_MAX+1: compact overflows → branch node with compact children, entries distributed by dispatch byte.
+**Figure 12: KNTRIE structural evolution** — four stages of insert from empty to overflow.
 
-[Figure — KSTRIE structural evolution]:
-1. Empty: sentinel root.
-2. Insert 1: single compact node, one entry, skip captures full key minus suffix.
-3. Insert 2: same compact node, two entries in L[]/F[]/O[] arrays, keysuffix region grows.
-4. Insert past COMPACT_KEYSUFFIX_LIMIT: compact overflows → branch node with EOS + compact children, keysuffix bytes distributed across child nodes.
+```mermaid
+block
+  columns 4
+
+  block:S1
+    columns 1
+    block:s1_title("1. Empty"):1
+      space
+    end
+    s1_root(("ROOT"))
+    s1_sent{{"SENTINEL"}}
+    space
+    s1_root --> s1_sent
+  end
+
+  block:S2
+    columns 1
+    block:s2_title("2. Insert 1st key"):1
+      space
+    end
+    block: rt2
+       columns 2
+       s2_root(("ROOT"))
+       s2_skip["skip: 6 bytes"]
+    end
+    s2_leaf[["compact: 1 entry"]]
+    space
+    s2_root --> s2_leaf
+  end
+
+  block:S3
+    columns 1
+    block:s3_title("3. Insert 2nd key"):1
+      space
+    end
+    block:rt3
+       columns 2
+       s3_root(("ROOT"))
+       s3_skip["skip: 4 bytes"]
+    end
+    s3_leaf[["compact: 2 entries"]]
+    s3_note["skip shrinks as keys diverge"]
+    s3_root --> s3_leaf
+  end
+
+  block:S4
+    columns 1
+    block:s4_title("4. Insert COMPACT_MAX+1"):1
+      space
+    end
+
+    block:rt4
+       columns 2
+       s4_root(("ROOT"))
+       s4_skip["skip: 2 bytes"]
+    end
+    space
+    s4_bm["bitmask: N children"]
+    block:compacts
+      columns 3
+      s4_c0[["compact"]] s4_c1[["compact"]] s4_c2[["..."]]
+    end
+
+    s4_root --> s4_bm
+    s4_bm --> s4_c0
+    s4_bm --> s4_c1
+    s4_bm --> s4_c2
+  end
+
+  style s1_sent fill:#888,color:#fff,stroke:#666
+  style s1_root fill:#555,color:#fff,stroke:#333
+  style s2_root fill:#555,color:#fff,stroke:#333
+  style s3_root fill:#555,color:#fff,stroke:#333
+  style s4_root fill:#555,color:#fff,stroke:#333
+
+  style s2_skip fill:#836c12,color:#fff,stroke:#e67e22
+  style s3_skip fill:#836c12,color:#fff,stroke:#e67e22
+  style s4_skip fill:#836c12,color:#fff,stroke:#e67e22
+
+  style s2_leaf fill:#2ecc71,color:#fff,stroke:#27ae60
+  style s3_leaf fill:#2ecc71,color:#fff,stroke:#27ae60
+
+  style s3_note fill:none,color:#666,stroke:none
+
+  style s4_bm fill:#e67e22,color:#fff,stroke:#d35400
+  style s4_c0 fill:#2ecc71,color:#fff,stroke:#27ae60
+  style s4_c1 fill:#2ecc71,color:#fff,stroke:#27ae60
+  style s4_c2 fill:#2ecc71,color:#fff,stroke:#27ae60
+```
+
+1. **Empty**: root points to sentinel. All operations check sentinel before descent.
+2. **Insert 1st key**: allocate compact node with one entry. Root captures up to 6 prefix bytes (u64). Skip = full key minus the suffix stored in the leaf.
+3. **Insert 2nd key**: same compact node, two sorted entries. Root skip shrinks to the shared prefix length — if keys diverge at byte 4, skip drops from 6 to 4 and new branch levels are created.
+4. **Insert COMPACT_MAX+1**: compact overflows (>4096 entries). `convert_to_bitmask` distributes entries across up to 256 compact children by dispatch byte. Each child holds entries sharing that byte value. Suffix type narrows by one byte.
+
+**Figure 13: KSTRIE structural evolution** — four stages of insert from empty to keysuffix overflow.
+
+```mermaid
+block
+  columns 4
+
+  block:S1
+    columns 1
+    block:s1_title("1. Empty"):1
+      space
+    end
+    s1_root(("ROOT"))
+    s1_sent{{"SENTINEL"}}
+    space
+    s1_root --> s1_sent
+  end
+
+  block:S2
+    columns 1
+    block:s2_title("2. Insert 1st key"):1
+      space
+    end
+    s2_root(("ROOT"))
+    s2_leaf[["compact: 1 entry"]]
+    s2_skip["skip: full prefix"]
+    s2_root --> s2_leaf
+  end
+
+  block:S3
+    columns 1
+    block:s3_title("3. Insert 2nd key"):1
+      space
+    end
+    s3_root(("ROOT"))
+    s3_leaf[["compact: 2 entries"]]
+    s3_skip["skip shrinks to shared prefix"]
+    s3_root --> s3_leaf
+  end
+
+  block:S4
+    columns 1
+    block:s4_title("4. Keysuffix overflow"):1
+      space
+    end
+
+    s4_root(("ROOT"))
+    space
+    block:bm4
+      columns 3
+      space s4_bm["bitmask"] space
+      s4_eos[["EOS"]] space s4_skip["skip"]
+    end
+    block:compacts
+      columns 3
+      s4_c0[["compact"]] s4_c1[["compact"]] s4_c2[["..."]]
+    end
+
+    s4_root --> s4_bm
+    s4_bm --> s4_eos
+    s4_bm --> s4_c0
+    s4_bm --> s4_c1
+    s4_bm --> s4_c2
+  end
+
+  style s1_sent fill:#888,color:#fff,stroke:#666
+  style s1_root fill:#555,color:#fff,stroke:#333
+  style s2_root fill:#555,color:#fff,stroke:#333
+  style s3_root fill:#555,color:#fff,stroke:#333
+  style s4_root fill:#555,color:#fff,stroke:#333
+
+  style s2_leaf fill:#2ecc71,color:#fff,stroke:#27ae60
+  style s3_leaf fill:#2ecc71,color:#fff,stroke:#27ae60
+
+  style s2_skip fill:#836c12,color:#fff,stroke:#e67e22
+  style s3_skip fill:none,color:#666,stroke:none
+
+  style s4_bm fill:#e67e22,color:#fff,stroke:#d35400
+  style s4_eos fill:#9b59b6,color:#fff,stroke:#8e44ad
+  style s4_skip fill:#836c12,color:#fff,stroke:#e67e22
+  style s4_c0 fill:#2ecc71,color:#fff,stroke:#27ae60
+  style s4_c1 fill:#2ecc71,color:#fff,stroke:#27ae60
+  style s4_c2 fill:#2ecc71,color:#fff,stroke:#27ae60
+```
+
+1. **Empty**: root points to sentinel (static 4-u64 zero node).
+2. **Insert 1st key**: allocate compact node with one entry. Skip captures the full key prefix minus the suffix stored in L[]/F[]/O[]/keysuffix.
+3. **Insert 2nd key**: same compact node, two sorted entries. Skip shrinks to the shared prefix — keysuffix region grows to hold both tails.
+4. **Keysuffix overflow**: `keysuffix_used` exceeds COMPACT_KEYSUFFIX_LIMIT. Node splits into bitmask with compact children. EOS child holds entries that terminate at the branch point. Keysuffix bytes distributed across child nodes, each child's total_tail reflecting its share.
 
 #### 6.3 Erase — O(L + log C) amortized, O(L + C) worst case
 
@@ -2094,17 +2268,204 @@ If the compact node becomes empty (the last entry is erased), it is deallocated 
 
 For compact nodes, erase shrinkage follows the hysteresis policy (§4.3): the node only reallocates to a smaller size class when the current allocation exceeds the size class for twice the needed size. Most erases compact the entry array in place without reallocation.
 
-[Figure — KNTRIE structural collapse (reverse of insert evolution)]:
-1. Branch node with compact children (starting state, >COMPACT_MAX entries).
-2. Erase below COMPACT_MAX: descendant count triggers coalesce → single compact node, branch node deallocated.
-3. Erase to 1: single compact node, one entry.
-4. Erase last: compact node deallocated → sentinel root.
 
-[Figure — KSTRIE structural collapse (reverse of insert evolution)]:
-1. Branch node with EOS + compact children (starting state, keysuffix budget exceeded).
-2. Erase below COMPACT_KEYSUFFIX_LIMIT: total_tail check triggers coalesce → single compact node, branch + children deallocated.
-3. Erase to 1: single compact node, one entry.
-4. Erase last: compact node deallocated → sentinel root.
+**Figure 14: KNTRIE structural collapse** — four stages of erase, reversing the insert evolution.
+
+```mermaid
+block
+  columns 4
+
+  block:S1
+    columns 1
+    block:s1_title("1. Bitmask with children"):1
+      space
+    end
+
+    block:rt1
+      columns 2
+      s1_root(("ROOT"))
+      s1_skip["skip: 2 bytes"]
+    end
+    space
+    s1_bm["bitmask: N children"]
+    block:compacts1
+      columns 3
+      s1_c0[["compact"]] s1_c1[["compact"]] s1_c2[["..."]]
+    end
+
+    s1_root --> s1_bm
+    s1_bm --> s1_c0
+    s1_bm --> s1_c1
+    s1_bm --> s1_c2
+  end
+
+  block:S2
+    columns 1
+    block:s2_title("2. Erase below COMPACT_MAX"):1
+      space
+    end
+    block:rt2
+      columns 2
+      s2_root(("ROOT"))
+      s2_skip["skip: 4 bytes"]
+    end
+    s2_leaf[["compact: ≤4096 entries"]]
+    space
+    s2_note["coalesce: collect subtree → single node"]
+    s2_root --> s2_leaf
+  end
+
+  block:S3
+    columns 1
+    block:s3_title("3. Erase to 1"):1
+      space
+    end
+    block:rt3
+      columns 2
+      s3_root(("ROOT"))
+      s3_skip["skip: 6 bytes"]
+    end
+    s3_leaf[["compact: 1 entry"]]
+    s3_note["skip grows as entries converge"]
+    s3_root --> s3_leaf
+  end
+
+  block:S4
+    columns 1
+    block:s4_title("4. Erase last"):1
+      space
+    end
+    s4_root(("ROOT"))
+    s4_sent{{"SENTINEL"}}
+    space
+    s4_root --> s4_sent
+  end
+
+  style s1_root fill:#555,color:#fff,stroke:#333
+  style s2_root fill:#555,color:#fff,stroke:#333
+  style s3_root fill:#555,color:#fff,stroke:#333
+  style s4_root fill:#555,color:#fff,stroke:#333
+
+  style s1_skip fill:#836c12,color:#fff,stroke:#e67e22
+  style s2_skip fill:#836c12,color:#fff,stroke:#e67e22
+  style s3_skip fill:#836c12,color:#fff,stroke:#e67e22
+
+  style s1_bm fill:#e67e22,color:#fff,stroke:#d35400
+  style s1_c0 fill:#2ecc71,color:#fff,stroke:#27ae60
+  style s1_c1 fill:#2ecc71,color:#fff,stroke:#27ae60
+  style s1_c2 fill:#2ecc71,color:#fff,stroke:#27ae60
+
+  style s2_leaf fill:#2ecc71,color:#fff,stroke:#27ae60
+  style s3_leaf fill:#2ecc71,color:#fff,stroke:#27ae60
+
+  style s2_note fill:none,color:#666,stroke:none
+  style s3_note fill:none,color:#666,stroke:none
+
+  style s4_sent fill:#888,color:#fff,stroke:#666
+```
+
+1. **Bitmask with children**: starting state, >COMPACT_MAX entries distributed across compact children.
+2. **Erase below COMPACT_MAX**: descendant count drops to threshold. `coalesce_bm_to_leaf` collects all entries from the subtree into a single compact node. Bitmask + children deallocated. Root skip grows to absorb the freed branch levels.
+3. **Erase to 1**: single compact node, one entry. Root skip extends to maximum (up to 6 bytes for u64). `normalize_root` absorbs single-child roots.
+4. **Erase last**: compact node deallocated. Root reverts to sentinel.
+
+**Figure 15: KSTRIE structural collapse** — four stages of erase, reversing the insert evolution.
+
+```mermaid
+block
+  columns 4
+
+  block:S1
+    columns 1
+    block:s1_title("1. Bitmask with children"):1
+      space
+    end
+
+    s1_root(("ROOT"))
+    space
+    block:bm1
+      columns 3
+      space s1_bm["bitmask"] space
+      s1_eos[["EOS"]] space s1_skip["skip"]
+    end
+    block:compacts1
+      columns 3
+      s1_c0[["compact"]] s1_c1[["compact"]] s1_c2[["..."]]
+    end
+
+    s1_root --> s1_bm
+    s1_bm --> s1_eos
+    s1_bm --> s1_c0
+    s1_bm --> s1_c1
+    s1_bm --> s1_c2
+  end
+
+  block:S2
+    columns 1
+    block:s2_title("2. Erase below budget"):1
+      space
+    end
+    s2_root(("ROOT"))
+    space
+    s2_leaf[["compact: ≤budget entries"]]
+    s2_skip["skip absorbs branch bytes"]
+    space
+    space
+    s2_note["total_tail ≤ KEYSUFFIX_LIMIT → coalesce"]
+    space
+    s2_root --> s2_leaf
+  end
+
+  block:S3
+    columns 1
+    block:s3_title("3. Erase to 1"):1
+      space
+    end
+    s3_root(("ROOT"))
+    s3_leaf[["compact: 1 entry"]]
+    s3_skip["skip: full prefix"]
+    s3_root --> s3_leaf
+  end
+
+  block:S4
+    columns 1
+    block:s4_title("4. Erase last"):1
+      space
+    end
+    s4_root(("ROOT"))
+    s4_sent{{"SENTINEL"}}
+    space
+    s4_root --> s4_sent
+  end
+
+  style s1_root fill:#555,color:#fff,stroke:#333
+  style s2_root fill:#555,color:#fff,stroke:#333
+  style s3_root fill:#555,color:#fff,stroke:#333
+  style s4_root fill:#555,color:#fff,stroke:#333
+
+  style s1_bm fill:#e67e22,color:#fff,stroke:#d35400
+  style s1_eos fill:#9b59b6,color:#fff,stroke:#8e44ad
+  style s1_skip fill:#836c12,color:#fff,stroke:#e67e22
+  style s1_c0 fill:#2ecc71,color:#fff,stroke:#27ae60
+  style s1_c1 fill:#2ecc71,color:#fff,stroke:#27ae60
+  style s1_c2 fill:#2ecc71,color:#fff,stroke:#27ae60
+
+  style s2_leaf fill:#2ecc71,color:#fff,stroke:#27ae60
+  style s3_leaf fill:#2ecc71,color:#fff,stroke:#27ae60
+
+  style s2_skip fill:#836c12,color:#fff,stroke:#e67e22
+  style s3_skip fill:#836c12,color:#fff,stroke:#e67e22
+
+  style s2_note fill:none,color:#666,stroke:none
+
+  style s4_sent fill:#888,color:#fff,stroke:#666
+```
+
+1. **Bitmask with children**: starting state, keysuffix budget exceeded. EOS child holds entries terminating at the branch point. total_tail tracks collapse cost.
+2. **Erase below budget**: `total_tail` drops to COMPACT_KEYSUFFIX_LIMIT. Subtree collected into a single compact node — dispatch bytes become F[] entries, skip bytes prepended to suffixes. Bitmask + EOS + children deallocated. Compact node skip absorbs the freed branch bytes.
+3. **Erase to 1**: single compact node, one entry. Skip extends to the full key prefix.
+4. **Erase last**: compact node deallocated. Root reverts to sentinel (static 4-u64 zero node).
+
 
 **Aggressive reclamation.** The erase path reclaims memory eagerly. Every erase triggers memmove compaction within the compact node. The shrink hysteresis policy downsizes node allocations when excess capacity accumulates. Coalesce rebuilds entire subtrees into single compact nodes when the entry count drops below the threshold. This is in contrast to `std::unordered_map`, which retains its bucket array until an explicit `rehash()` or `reserve()` call — the bucket array only grows, never shrinks, and memory released by erase is not returned to the allocator until the table is destroyed or explicitly rehashed.
 
