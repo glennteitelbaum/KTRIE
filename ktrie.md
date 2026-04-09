@@ -1754,113 +1754,126 @@ When the remaining suffix narrows to a single byte (the suffix type is `uint8_t`
 
 Search in a KSTRIE compact node exploits the parallel array structure to minimize string comparisons. A binary search on F[] narrows the candidate set to entries sharing the same first byte — all other entries are eliminated without touching the keysuffix region. Among matching-F entries, length mismatches (L[] comparison) resolve without memcmp. Only entries with matching first byte and matching length require a memcmp into the keysuffix region via the O[] offset. In practice, for a node with many entries, F[] eliminates the vast majority, and the number of actual string comparisons is small.
 
-**Figure 11: KSTRIE search walkthrough** — compact node with skip "api/" and 8 entries, searching for "api/config". Binary search on F[] eliminates 6 entries, L[] eliminates 1 more, memcmp touches only 1. Edges trace the binary search path through the midpoint.
+**Figure 11: KSTRIE search walkthrough** — compact node with skip "api/" and 8 entries, searching for "api/config". O[] arrows show offsets into the keysuffix region. O[1]=O[2]=3: config shares configure's storage.
 
 ```mermaid
 block
-  columns 8
+  columns 14
 
   space
-  block:skip_title("skip"):6
+  block:skip_title("skip"):12
     space
   end
   space
-  k0["a"] space k1["p"] space k2["i"] space k3["/"] space
+  space space space sk0["a"] space sk1["p"] space sk2["i"] space sk3["/"] space space space space
 
   space
-  block:slot_title("slot"):6
+  block:slot_title("slot"):12
     space
   end
   space
-  s0["0"] s1["1"] s2["2"] s3["3"] s4["4"] s5["5"] s6["6"] s7["7"]
+  space space space s0["0"] s1["1"] s2["2"] s3["3"] s4["4"] s5["5"] s6["6"] s7["7"] space space space
 
   space
-  block:f_title("F[] — first byte"):6
+  block:f_title("F[]"):12
     space
   end
   space
-  f0["a"] f1["c"] f2["c"] f3["d"] f4["g"] f5["l"] f6["p"] f7["p"]
+  space space space f0["a"] f1["c"] f2["c"] f3["c"] f4["e"] f5["f"] f6["p"] f7["s"] space space space
 
   space
-  block:l_title("L[] — suffix length"):6
+  block:l_title("L[]"):12
     space
   end
   space
-  l0["4"] l1["3"] l2["6"] l3["6"] l4["3"] l5["4"] l6["4"] l7["3"]
+  space space space l0["4"] l1["6"] l2["9"] l3["6"] l4["4"] l5["4"] l6["4"] l7["4"] space space space
 
   space
-  block:o_title("O[] — keysuffix offset"):6
+  block:o_title("O[]"):12
     space
   end
   space
-  o0["0"] o1["3"] o2["5"] o3["10"] o4["15"] o5["17"] o6["20"] o7["23"]
+  space space space o0["0"] o1["3"] o2["3"] o3["11"] o4["16"] o5["19"] o6["22"] o7["25"] space space space
 
   space
-  block:v_title("values"):6
-    space
-  end
-  space
-  v0[["auth"]] v1[["cat"]] v2[["config"]] v3[["deploy"]] v4[["get"]] v5[["list"]] v6[["post"]] v7[["put"]]
-
-  space:8
-
-  strt{{"Search for api/config"}}:8
-
-  space
-  block:skipped_title("Step 1: match skip prefix of 'api/'"):6
+  block:ks_title("keysuffix region — O[1]=O[2]=3: config shares configure's storage"):12
     space
   end
   space
 
-  srch{{"Binary Search for config"}}:8
+    space
+    block:ks_hdr("offset"):12
+      space
+    end
+    space
+    ks0["u"] ks1["t"] ks2["h"] ks3["o"] ks4["n"] ks5["f"] ks6["i"] ks7["g"] ks8["u"] ks9["r"] ks10["e"] ks11["r"] ks12["e"] ks13["..."]
 
-  space
-  block:step1_title("Step 2: binary search F[] for 'c' → slots 1,2"):6
+    space
+  block:v_title("values"):12
     space
   end
   space
-  e1_0["a"] e1_1[["c"]] e1_2[["c"]] e1_3["d"] e1_4["g"] e1_5["l"] e1_6["p"] e1_7["p"]
+  space space space v0[["auth"]] v1[["config"]] v2[["configure"]] v3[["create"]] v4[["edit"]] v5[["find"]] v6[["post"]] v7[["sync"]] space space space
+
+  space:14
+
+  strt{{"Search for api/config"}}:14
 
   space
-  block:step2_title("Step 3: check L[] = 6 → slot 1 eliminated"):6
+  block:skipped_title("Step 1: match skip 'api/' → suffix = 'config'"):12
     space
   end
   space
-  e2_0[" "] e2_1["3≠6"] e2_2[["6=6"]] e2_3[" "] e2_4[" "] e2_5[" "] e2_6[" "] e2_7[" "]
+
+  srch{{"Binary search: fb='c', tail='onfig', L=6"}}:14
 
   space
-  block:step3_title("Step 4: memcmp O[2] → tail = 'onfig' = match"):6
+  block:step1_title("m=4: F='e'≠'c' → LEFT (no memcmp needed)"):12
     space
   end
   space
-  e3_0[" "] e3_1[" "] e3_2[["FOUND"]] e3_3[" "] e3_4[" "] e3_5[" "] e3_6[" "] e3_7[" "]
+  space space space e1_0["a"] e1_1["c"] e1_2["c"] e1_3["c"] e1_4["e≠c"] e1_5["f"] e1_6["p"] e1_7["p"] space space space
 
-  f2 --> e1_2
+  space
+  block:step2_title("m=2: F='c' → memcmp O[2]=3: 'onfig'='onfig' → L: 9≠6 → LEFT"):12
+    space
+  end
+  space
+  space space space e2_0[" "] e2_1["c"] e2_2["9≠6"] e2_3[" "] e2_4[" "] e2_5[" "] e2_6[" "] e2_7[" "] space space space
 
-  srch --> e1_3
-  e1_3 --> e1_1
-  e1_1 --> e2_1
-  e2_1 --> e2_2
-  e2_2 --> e3_2
+  space
+  block:step3_title("m=1: F='c' → memcmp O[1]=3: 'onfig'='onfig' → L: 6=6 → FOUND"):12
+    space
+  end
+  space
+  space space space e3_0[" "] e3_1[["FOUND"]] e3_2[" "] e3_3[" "] e3_4[" "] e3_5[" "] e3_6[" "] e3_7[" "] space space space
 
-  style k0 fill:#9b59b6,color:#fff,stroke:#444444
-  style k1 fill:#9b59b6,color:#fff,stroke:#444444
-  style k2 fill:#9b59b6,color:#fff,stroke:#444444
-  style k3 fill:#9b59b6,color:#fff,stroke:#444444
+  srch --> e1_4
+  e1_4 --> e2_2
+  e2_2 --> e3_1
+
+  o0 --> ks0
+  o1 --> ks3
+  o2 --> ks3
+  o3 --> ks11
+
+  style sk0 fill:#9b59b6,color:#fff,stroke:#444444
+  style sk1 fill:#9b59b6,color:#fff,stroke:#444444
+  style sk2 fill:#9b59b6,color:#fff,stroke:#444444
+  style sk3 fill:#9b59b6,color:#fff,stroke:#444444
 
   style f0 fill:#ccc,color:#666,stroke:#aaa
   style f1 fill:#9b59b6,color:#fff,stroke:#444444
-  style f2 fill:#9b59b6,color:#fff,stroke:#444444
-  style f3 fill:#ccc,color:#666,stroke:#aaa
+  style f2 fill:#e67e22,color:#fff,stroke:#444444
+  style f3 fill:#b69b59,color:#fff,stroke:#444444
   style f4 fill:#ccc,color:#666,stroke:#aaa
   style f5 fill:#ccc,color:#666,stroke:#aaa
   style f6 fill:#ccc,color:#666,stroke:#aaa
   style f7 fill:#ccc,color:#666,stroke:#aaa
 
-  style l1 fill:#ccc,color:#666,stroke:#aaa
-  style l2 fill:#9b59b6,color:#fff,stroke:#444444
+  style l1 fill:#9b59b6,color:#fff,stroke:#444444
 
-  style o2 fill:#9b59b6,color:#fff,stroke:#444444
+  style o1 fill:#2ecc71,color:#fff,stroke:#27ae60
 
   style v0 fill:#2ecc71,color:#fff,stroke:#27ae60
   style v1 fill:#2ecc71,color:#fff,stroke:#27ae60
@@ -1871,19 +1884,34 @@ block
   style v6 fill:#2ecc71,color:#fff,stroke:#27ae60
   style v7 fill:#2ecc71,color:#fff,stroke:#27ae60
 
-  style e1_0 fill:#e74c3c,color:#fff,stroke:#444444
-  style e1_1 fill:#9b59b6,color:#fff,stroke:#444444
-  style e1_2 fill:#9b59b6,color:#fff,stroke:#444444
-  style e1_3 fill:#e74c3c,color:#fff,stroke:#444444
-  style e1_4 fill:#ccc,color:#666,stroke:#aaa
+  style ks0 fill:#ccc,color:#666,stroke:#aaa
+  style ks1 fill:#ccc,color:#666,stroke:#aaa
+  style ks2 fill:#ccc,color:#666,stroke:#aaa
+  style ks3 fill:#9b59b6,color:#fff,stroke:#444444
+  style ks4 fill:#9b59b6,color:#fff,stroke:#444444
+  style ks5 fill:#9b59b6,color:#fff,stroke:#444444
+  style ks6 fill:#9b59b6,color:#fff,stroke:#444444
+  style ks7 fill:#9b59b6,color:#fff,stroke:#444444
+  style ks8 fill:#e67e22,color:#fff,stroke:#444444
+  style ks9 fill:#e67e22,color:#fff,stroke:#444444
+  style ks10 fill:#e67e22,color:#fff,stroke:#444444
+  style ks11 fill:#b69b59,color:#fff,stroke:#444444
+  style ks12 fill:#b69b59,color:#fff,stroke:#444444
+  style ks13 fill:#ccc,color:#666,stroke:#aaa
+
+  style e1_0 fill:#ccc,color:#666,stroke:#aaa
+  style e1_1 fill:#ccc,color:#666,stroke:#aaa
+  style e1_2 fill:#ccc,color:#666,stroke:#aaa
+  style e1_3 fill:#ccc,color:#666,stroke:#aaa
+  style e1_4 fill:#e74c3c,color:#fff,stroke:#444444
   style e1_5 fill:#ccc,color:#666,stroke:#aaa
   style e1_6 fill:#ccc,color:#666,stroke:#aaa
   style e1_7 fill:#ccc,color:#666,stroke:#aaa
 
-  style e2_1 fill:#e74c3c,color:#fff,stroke:#444444
-  style e2_2 fill:#9b59b6,color:#fff,stroke:#444444
+  style e2_1 fill:#ccc,color:#666,stroke:#aaa
+  style e2_2 fill:#e74c3c,color:#fff,stroke:#444444
 
-  style e3_2 fill:#2ecc71,color:#fff,stroke:#444444
+  style e3_1 fill:#2ecc71,color:#fff,stroke:#444444
 ```
 
 Keysuffix sharing reduces the effective byte cost of the node. When consecutive entries share suffix tails — a common occurrence for keys with hierarchical structure like URLs or file paths — they reference the same offset in the keysuffix region. Inserting a longer key whose prefix matches an existing entry can chain from the existing suffix storage rather than duplicating the shared tail bytes.
