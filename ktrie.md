@@ -1754,7 +1754,137 @@ When the remaining suffix narrows to a single byte (the suffix type is `uint8_t`
 
 Search in a KSTRIE compact node exploits the parallel array structure to minimize string comparisons. A binary search on F[] narrows the candidate set to entries sharing the same first byte — all other entries are eliminated without touching the keysuffix region. Among matching-F entries, length mismatches (L[] comparison) resolve without memcmp. Only entries with matching first byte and matching length require a memcmp into the keysuffix region via the O[] offset. In practice, for a node with many entries, F[] eliminates the vast majority, and the number of actual string comparisons is small.
 
-[Figure: KSTRIE search walkthrough. 10 entries, binary search on F[] eliminates ~8, L[] eliminates ~1, memcmp touches ~1. Show keysuffix sharing where O[i] == O[i+1].]
+**Figure 11: KSTRIE search walkthrough** — compact node with skip "api/" and 8 entries, searching for "api/config". Binary search on F[] eliminates 6 entries, L[] eliminates 1 more, memcmp touches only 1. Edges trace the binary search path through the midpoint.
+
+```mermaid
+block
+  columns 8
+
+  space
+  block:skip_title("skip"):6
+    space
+  end
+  space
+  k0["a"] space k1["p"] space k2["i"] space k3["/"] space
+
+  space
+  block:slot_title("slot"):6
+    space
+  end
+  space
+  s0["0"] s1["1"] s2["2"] s3["3"] s4["4"] s5["5"] s6["6"] s7["7"]
+
+  space
+  block:f_title("F[] — first byte"):6
+    space
+  end
+  space
+  f0["a"] f1["c"] f2["c"] f3["d"] f4["g"] f5["l"] f6["p"] f7["p"]
+
+  space
+  block:l_title("L[] — suffix length"):6
+    space
+  end
+  space
+  l0["4"] l1["3"] l2["6"] l3["6"] l4["3"] l5["4"] l6["4"] l7["3"]
+
+  space
+  block:o_title("O[] — keysuffix offset"):6
+    space
+  end
+  space
+  o0["0"] o1["3"] o2["5"] o3["10"] o4["15"] o5["17"] o6["20"] o7["23"]
+
+  space
+  block:v_title("values"):6
+    space
+  end
+  space
+  v0[["auth"]] v1[["cat"]] v2[["config"]] v3[["deploy"]] v4[["get"]] v5[["list"]] v6[["post"]] v7[["put"]]
+
+  space:8
+
+  strt{{"Search for api/config"}}:8
+
+  space
+  block:skipped_title("Step 1: match skip prefix of 'api/'"):6
+    space
+  end
+  space
+
+  srch{{"Binary Search for config"}}:8
+
+  space
+  block:step1_title("Step 2: binary search F[] for 'c' → slots 1,2"):6
+    space
+  end
+  space
+  e1_0["a"] e1_1[["c"]] e1_2[["c"]] e1_3["d"] e1_4["g"] e1_5["l"] e1_6["p"] e1_7["p"]
+
+  space
+  block:step2_title("Step 3: check L[] = 6 → slot 1 eliminated"):6
+    space
+  end
+  space
+  e2_0[" "] e2_1["3≠6"] e2_2[["6=6"]] e2_3[" "] e2_4[" "] e2_5[" "] e2_6[" "] e2_7[" "]
+
+  space
+  block:step3_title("Step 4: memcmp O[2] → tail = 'onfig' = match"):6
+    space
+  end
+  space
+  e3_0[" "] e3_1[" "] e3_2[["FOUND"]] e3_3[" "] e3_4[" "] e3_5[" "] e3_6[" "] e3_7[" "]
+
+  f2 --> e1_2
+
+  srch --> e1_3
+  e1_3 --> e1_1
+  e1_1 --> e2_1
+  e2_1 --> e2_2
+  e2_2 --> e3_2
+
+  style k0 fill:#9b59b6,color:#fff,stroke:#444444
+  style k1 fill:#9b59b6,color:#fff,stroke:#444444
+  style k2 fill:#9b59b6,color:#fff,stroke:#444444
+  style k3 fill:#9b59b6,color:#fff,stroke:#444444
+
+  style f0 fill:#ccc,color:#666,stroke:#aaa
+  style f1 fill:#9b59b6,color:#fff,stroke:#444444
+  style f2 fill:#9b59b6,color:#fff,stroke:#444444
+  style f3 fill:#ccc,color:#666,stroke:#aaa
+  style f4 fill:#ccc,color:#666,stroke:#aaa
+  style f5 fill:#ccc,color:#666,stroke:#aaa
+  style f6 fill:#ccc,color:#666,stroke:#aaa
+  style f7 fill:#ccc,color:#666,stroke:#aaa
+
+  style l1 fill:#ccc,color:#666,stroke:#aaa
+  style l2 fill:#9b59b6,color:#fff,stroke:#444444
+
+  style o2 fill:#9b59b6,color:#fff,stroke:#444444
+
+  style v0 fill:#2ecc71,color:#fff,stroke:#27ae60
+  style v1 fill:#2ecc71,color:#fff,stroke:#27ae60
+  style v2 fill:#2ecc71,color:#fff,stroke:#27ae60
+  style v3 fill:#2ecc71,color:#fff,stroke:#27ae60
+  style v4 fill:#2ecc71,color:#fff,stroke:#27ae60
+  style v5 fill:#2ecc71,color:#fff,stroke:#27ae60
+  style v6 fill:#2ecc71,color:#fff,stroke:#27ae60
+  style v7 fill:#2ecc71,color:#fff,stroke:#27ae60
+
+  style e1_0 fill:#e74c3c,color:#fff,stroke:#444444
+  style e1_1 fill:#9b59b6,color:#fff,stroke:#444444
+  style e1_2 fill:#9b59b6,color:#fff,stroke:#444444
+  style e1_3 fill:#e74c3c,color:#fff,stroke:#444444
+  style e1_4 fill:#ccc,color:#666,stroke:#aaa
+  style e1_5 fill:#ccc,color:#666,stroke:#aaa
+  style e1_6 fill:#ccc,color:#666,stroke:#aaa
+  style e1_7 fill:#ccc,color:#666,stroke:#aaa
+
+  style e2_1 fill:#e74c3c,color:#fff,stroke:#444444
+  style e2_2 fill:#9b59b6,color:#fff,stroke:#444444
+
+  style e3_2 fill:#2ecc71,color:#fff,stroke:#444444
+```
 
 Keysuffix sharing reduces the effective byte cost of the node. When consecutive entries share suffix tails — a common occurrence for keys with hierarchical structure like URLs or file paths — they reference the same offset in the keysuffix region. Inserting a longer key whose prefix matches an existing entry can chain from the existing suffix storage rather than duplicating the shared tail bytes.
 
