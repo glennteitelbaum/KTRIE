@@ -709,7 +709,9 @@ struct kntrie_ops {
 
         // For IS_BOOL, packed bits cannot be addressed as VST* — unpack first.
         // Cold path (fires once per leaf lifetime at overflow).
-        VST unpacked_vals[COMPACT_MAX];
+        // Sized to 1 for non-bool to avoid dead stack allocation.
+        constexpr size_t UNPACK_SIZE = VT::IS_BOOL ? COMPACT_MAX : 1;
+        VST unpacked_vals[UNPACK_SIZE];
         const VST* old_vals;
         if constexpr (VT::IS_BOOL) {
             auto bv = CO::bool_vals(node);
@@ -720,9 +722,11 @@ struct kntrie_ops {
             old_vals = CO::vals(node);
         }
 
-        // Find insertion point in old sorted array
-        unsigned ins = 0;
-        while (ins < old_count && old_keys[ins] < suffix) ++ins;
+        // Find insertion point in old sorted array via adaptive binary search
+        const NK* ins_base = adaptive_search<NK>::find_base_first(
+            old_keys, old_count, suffix);
+        unsigned ins = static_cast<unsigned>(ins_base - old_keys)
+                     + (*ins_base < suffix);
 
         // Stack scratch buffer for key narrowing — allocated once, reused at every level
         constexpr size_t SCRATCH_BYTES = (COMPACT_MAX + 1) * sizeof(NK);
@@ -1118,7 +1122,7 @@ struct kntrie_ops {
             uint64_t exact = dec_descendants(node, hdr);
             if (exact <= COMPACT_MAX) [[unlikely]] {
                 return depth_switch(depth, [&]<int BITS>() {
-                    return do_coalesce<BITS>(node, hdr, ik, bld);
+                    return do_coalesce<BITS>(node, hdr, ik, exact, bld);
                 });
             }
             return {tag_bitmask(node), true, exact, resolved_next};
@@ -1162,7 +1166,7 @@ struct kntrie_ops {
 
         if (exact <= COMPACT_MAX) [[unlikely]] {
             return depth_switch(depth, [&]<int BITS>() {
-                return do_coalesce<BITS>(nn, get_header(nn), ik, bld);
+                return do_coalesce<BITS>(nn, get_header(nn), ik, exact, bld);
             });
         }
         return {tag_bitmask(nn), true, exact, resolved_next};
@@ -1233,6 +1237,67 @@ struct kntrie_ops {
         }
     }
 
+    // ==================================================================
+    // walk_collect_and_dealloc — single-pass collect + post-order free
+    //
+    // Combines walk_entries_in_order + dealloc_coalesced_node into one
+    // traversal.  Each node is freed after its entries are collected.
+    // Values are transferred (not freed) — caller owns them in the
+    // new leaf.
+    // ==================================================================
+
+    template<int BITS, typename Fn>
+    static void walk_collect_and_dealloc(uint64_t tagged, Fn&& cb, BLD& bld) {
+        using NK = nk_for_bits_t<BITS>;
+
+        if (tagged & LEAF_BIT) [[unlikely]] {
+            uint64_t* node = untag_leaf_mut(tagged);
+            const auto* hdr = get_header(node);
+            if constexpr (sizeof(NK) == sizeof(uint8_t)) {
+                BO::for_each_bitmap(node, [&](uint8_t s, VST v) {
+                    cb(static_cast<NK>(s), v);
+                });
+                BO::bitmap_dealloc_node_only(node, bld);
+            } else {
+                using CO = compact_ops<NK, VALUE, ALLOC>;
+                CO::for_each(node, hdr, [&](NK s, const VST& v) {
+                    cb(s, v);
+                });
+                CO::dealloc_node_only(node, bld);
+            }
+            return;
+        }
+
+        uint64_t* node = bm_to_node(tagged);
+        const auto* hdr = get_header(node);
+        uint8_t sc = hdr->skip();
+        size_t node_au64 = hdr->alloc_u64();
+
+        if constexpr (BITS > U8_BITS) {
+            constexpr int NK_BITS = static_cast<int>(sizeof(NK) * CHAR_BIT);
+            using CNK = nk_for_bits_t<BITS - CHAR_BIT>;
+            constexpr int CNK_BITS = static_cast<int>(sizeof(CNK) * CHAR_BIT);
+
+            const bitmap_256_t& fbm = BO::chain_bitmap(node, sc);
+            const uint64_t* rch = BO::chain_children(node, sc);
+
+            fbm.for_each_set([&](uint8_t idx, int slot) {
+                walk_collect_and_dealloc<BITS - CHAR_BIT>(rch[slot],
+                    [&](CNK child_suffix, VST v) {
+                        NK full = (NK(idx) << (NK_BITS - CHAR_BIT))
+                            | static_cast<NK>(
+                                static_cast<uint64_t>(child_suffix)
+                                << (U64_BITS - CNK_BITS)
+                                >> (U64_BITS - NK_BITS + CHAR_BIT));
+                        cb(full, v);
+                    }, bld);
+            });
+        }
+
+        // Post-order: children already freed, now free this bitmask node
+        bld.dealloc_node(node, node_au64);
+    }
+
     // Descend to first leaf, return its prefix (for rep_key in coalesce)
     static uint64_t descend_first_prefix(uint64_t tagged) noexcept {
         while (!(tagged & LEAF_BIT)) {
@@ -1246,17 +1311,21 @@ struct kntrie_ops {
     }
 
     // ==================================================================
-    // do_coalesce — single-pass direct write
+    // do_coalesce — single-pass collect + dealloc
+    //
+    // Collects all entries from the subtree into a new leaf and frees
+    // every node in one traversal.  Uses ik (the erased key) for the
+    // prefix — all entries in this subtree share the same prefix bits
+    // up to this depth.  total_entries is passed from the caller to
+    // avoid re-reading chain_descendants.
     // ==================================================================
 
     template<int BITS> requires (BITS >= U8_BITS)
     static erase_result_t do_coalesce(uint64_t* node, node_header_t* hdr,
-                                        uint64_t ik, BLD& bld) {
+                                        uint64_t ik, uint64_t total_entries,
+                                        BLD& bld) {
         using NK = nk_for_bits_t<BITS>;
         uint8_t sc = hdr->skip();
-        uint64_t total_entries = BO::chain_descendants(node, sc, hdr->entries());
-
-        uint64_t rep_key = descend_first_prefix(tag_bitmask(node));
 
         uint64_t* leaf;
         if constexpr (sizeof(NK) == sizeof(uint8_t)) {
@@ -1264,11 +1333,12 @@ struct kntrie_ops {
             uint8_t byte_keys[BYTE_VALUES];
             VST vals_arr[BYTE_VALUES];
             size_t wi = 0;
-            walk_entries_in_order<BITS>(tag_bitmask(node), [&](NK s, VST v) {
-                byte_keys[wi] = static_cast<uint8_t>(s);
-                vals_arr[wi] = v;
-                wi++;
-            });
+            walk_collect_and_dealloc<BITS>(tag_bitmask(node),
+                [&](NK s, VST v) {
+                    byte_keys[wi] = static_cast<uint8_t>(s);
+                    vals_arr[wi] = v;
+                    wi++;
+                }, bld);
             leaf = BO::make_bitmap_leaf(byte_keys, vals_arr,
                 static_cast<uint32_t>(wi), bld);
         } else {
@@ -1286,28 +1356,28 @@ struct kntrie_ops {
             if constexpr (VT::IS_BOOL) {
                 auto bv = CO::bool_vals_mut(leaf);
                 bv.clear_all(total_entries);
-                walk_entries_in_order<BITS>(tag_bitmask(node), [&](NK s, VST v) {
-                    dk[wi] = s;
-                    bv.set(wi, v);
-                    wi++;
-                });
+                walk_collect_and_dealloc<BITS>(tag_bitmask(node),
+                    [&](NK s, VST v) {
+                        dk[wi] = s;
+                        bv.set(wi, v);
+                        wi++;
+                    }, bld);
             } else {
                 VST* dv = CO::vals_mut(leaf);
-                walk_entries_in_order<BITS>(tag_bitmask(node), [&](NK s, VST v) {
-                    dk[wi] = s;
-                    VT::init_slot(&dv[wi], v);
-                    wi++;
-                });
+                walk_collect_and_dealloc<BITS>(tag_bitmask(node),
+                    [&](NK s, VST v) {
+                        dk[wi] = s;
+                        VT::init_slot(&dv[wi], v);
+                        wi++;
+                    }, bld);
             }
         }
 
-        init_leaf_fns<BITS>(leaf, rep_key);
+        init_leaf_fns<BITS>(leaf, ik);
 
         if (sc > 0) [[unlikely]] {
-            leaf = prepend_skip<BITS>(leaf, sc, rep_key, bld);
+            leaf = prepend_skip<BITS>(leaf, sc, ik, bld);
         }
-
-        dealloc_coalesced_node<BITS>(node, sc, bld);
 
         // Compute next entry in coalesced leaf (cold path).
         // The erased key is gone; find first entry with suffix > erased suffix.
