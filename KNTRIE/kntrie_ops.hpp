@@ -698,8 +698,6 @@ struct kntrie_ops {
         using NK = nk_for_bits_t<BITS>;
         using CO = compact_ops<NK, VALUE, ALLOC>;
         constexpr int NK_BITS = static_cast<int>(sizeof(NK) * CHAR_BIT);
-        NK suffix = leaf_ops_t<BITS>::template to_suffix<BITS>(ik);
-        uint8_t new_top_byte = static_cast<uint8_t>(suffix >> (NK_BITS - CHAR_BIT));
 
         uint16_t old_count = hdr->entries();
         constexpr size_t hs = LEAF_HEADER_U64;
@@ -722,12 +720,6 @@ struct kntrie_ops {
             old_vals = CO::vals(node);
         }
 
-        // Find insertion point in old sorted array via adaptive binary search
-        const NK* ins_base = adaptive_search<NK>::find_base_first(
-            old_keys, old_count, suffix);
-        unsigned ins = static_cast<unsigned>(ins_base - old_keys)
-                     + (*ins_base < suffix);
-
         // Stack scratch buffer for key narrowing — allocated once, reused at every level
         constexpr size_t SCRATCH_BYTES = (COMPACT_MAX + 1) * sizeof(NK);
         char scratch[SCRATCH_BYTES];
@@ -746,19 +738,11 @@ struct kntrie_ops {
             return cs;
         };
 
-        // Partition by top byte into children
+        // Partition by top byte into children — single pass, old entries only
         uint8_t indices[BYTE_VALUES];
         uint64_t child_ptrs[BYTE_VALUES];
         int n_children = 0;
 
-        // Stack merge buffers for loop 2 (key merge)
-        constexpr size_t MERGE_MAX = COMPACT_MAX + 1;
-        NK  merge_keys[MERGE_MAX];
-        VST merge_vals[MERGE_MAX];
-
-        size_t i = 0;
-
-        // Helper: build child from a contiguous byte group in the old array.
         auto build_byte_group = [&](size_t start, size_t count, uint8_t ti) {
             uint64_t child_ik = (ik & safe_prefix_mask<BITS>())
                 | leaf_ops_t<BITS>::template suffix_to_u64<BITS>(old_keys[start]);
@@ -770,42 +754,7 @@ struct kntrie_ops {
             n_children++;
         };
 
-        // Loop 1: byte ranges < new_top_byte
-        while (i < old_count) {
-            uint8_t ti = static_cast<uint8_t>(old_keys[i] >> (NK_BITS - CHAR_BIT));
-            if (ti >= new_top_byte) break;
-            size_t start = i;
-            while (i < old_count &&
-                   static_cast<uint8_t>(old_keys[i] >> (NK_BITS - CHAR_BIT)) == ti) ++i;
-            build_byte_group(start, i - start, ti);
-        }
-
-        // Loop 2: byte == new_top_byte — merge old range + new entry
-        {
-            size_t range_start = i;
-            while (i < old_count &&
-                   static_cast<uint8_t>(old_keys[i] >> (NK_BITS - CHAR_BIT)) == new_top_byte) ++i;
-            size_t range_old = i - range_start;
-            size_t range_new = range_old + 1;
-            unsigned local_ins = ins - static_cast<unsigned>(range_start);
-
-            std::memcpy(merge_keys, old_keys + range_start, local_ins * sizeof(NK));
-            merge_keys[local_ins] = suffix;
-            std::memcpy(merge_keys + local_ins + 1, old_keys + range_start + local_ins,
-                         (range_old - local_ins) * sizeof(NK));
-            std::memcpy(merge_vals, old_vals + range_start, local_ins * sizeof(VST));
-            merge_vals[local_ins] = value;
-            std::memcpy(merge_vals + local_ins + 1, old_vals + range_start + local_ins,
-                         (range_old - local_ins) * sizeof(VST));
-
-            indices[n_children] = new_top_byte;
-            CNK* cs = narrow(merge_keys, range_new);
-            child_ptrs[n_children] = build_node_from_arrays_tagged<BITS - CHAR_BIT>(
-                cs, merge_vals, range_new, ik, bld, scratch);
-            n_children++;
-        }
-
-        // Loop 3: byte ranges > new_top_byte
+        size_t i = 0;
         while (i < old_count) {
             uint8_t ti = static_cast<uint8_t>(old_keys[i] >> (NK_BITS - CHAR_BIT));
             size_t start = i;
@@ -814,16 +763,14 @@ struct kntrie_ops {
             build_byte_group(start, i - start, ti);
         }
 
-        size_t total = old_count + 1;
         uint8_t ps = hdr->skip();
 
-        uint64_t child_tagged=0;
+        uint64_t child_tagged = 0;
         bool collapsed = false;
 
         if (n_children == 1) {
             // Try to collapse single-child bitmask into skip.
-            // The dispatch byte becomes a skip byte, plus propagate old skip.
-            uint8_t add_skip = ps + 1;  // old skip + dispatch byte
+            uint8_t add_skip = ps + 1;
 
             child_tagged = child_ptrs[0];
 
@@ -858,7 +805,7 @@ struct kntrie_ops {
 
         if (!collapsed) {
             child_tagged = tag_bitmask(
-                BO::make_bitmask(indices, child_ptrs, n_children, bld, total));
+                BO::make_bitmask(indices, child_ptrs, n_children, bld, old_count));
 
             if (ps > 0) {
                 constexpr int BS = byte_shift<BITS>();
@@ -873,18 +820,14 @@ struct kntrie_ops {
 
         bld.dealloc_node(const_cast<uint64_t*>(node), CO::alloc_total_u64(hdr->alloc_u64()));
 
-        // Locate the inserted entry in the new subtree (cache-hot)
-        iter_entry_t lp;
-        if (child_tagged & LEAF_BIT) {
-            uint64_t* leaf = untag_leaf_mut(child_tagged);
-            lp = get_find_fn(leaf)(leaf, ik);
-        } else {
-            constexpr int CONSUMED_BITS = KEY_BITS - BITS;
-            int shift_amt = CONSUMED_BITS - ps * CHAR_BIT;
-            uint64_t shifted = (shift_amt > 0) ? (ik << shift_amt) : ik;
-            lp = BO::find_loop(child_tagged, ik, shifted);
-        }
-        return {child_tagged, true, false, nullptr, lp.leaf, lp.pos};
+        // Insert new entry into the just-built subtree via normal path.
+        // The subtree has room — old entries were distributed across children.
+        constexpr int CONSUMED_BITS = KEY_BITS - BITS;
+        int shift_amt = CONSUMED_BITS - ps * CHAR_BIT;
+        uint64_t shifted = (shift_amt > 0) ? (ik << shift_amt) : ik;
+        uint8_t node_depth = static_cast<uint8_t>((CONSUMED_BITS - ps * CHAR_BIT) / CHAR_BIT);
+
+        return insert_node<true, false>(child_tagged, ik, shifted, node_depth, value, bld);
     }
 
     // ==================================================================
