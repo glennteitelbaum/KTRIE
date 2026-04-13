@@ -13,6 +13,7 @@
 #include <cstring>
 #include <cmath>
 #include <new>
+#include <thread>
 
 // ==========================================================================
 // Tracking allocator
@@ -553,7 +554,10 @@ static void bench_all(size_t target_n, const std::string& pattern,
 
     // Pre-generate find orders
     constexpr bool SMALL_KEY = sizeof(K) <= 2;
-    constexpr uint64_t KEY_RANGE = SMALL_KEY ? (uint64_t(1) << (sizeof(K) * 8)) : 0;
+    uint64_t KEY_RANGE = 0;
+    if constexpr (SMALL_KEY) {
+      KEY_RANGE = uint64_t(1) << (sizeof(K) * 8);
+    }
     bool has_nf = SMALL_KEY ? (n <= KEY_RANGE / 2) : !w.find_nf.empty();
     std::vector<std::vector<uint64_t>> fnd_orders(fi), nf_orders(fi);
     for (int r = 0; r < fi; ++r) {
@@ -708,6 +712,7 @@ static void run_bench(size_t max_n, bool verbose,
     }
 
     emit_html(rows, key_name, val_name);
+    std::fflush(stdout);  // Forces immediate output to the console
 }
 
 // ==========================================================================
@@ -736,12 +741,12 @@ static type_id parse_type(const char* s) {
 
 
 int main(int argc, char* argv[]) {
-    if (argc != 5) {
+    if (argc < 5 || argc > 6) {
         std::fprintf(stderr,
-            "Usage: %s <key_type> <val_type> <max_entries> <verbose:y/n>\n"
+            "Usage: %s <key_type> <val_type> <max_entries> <verbose:y/n> [output.html]\n"
             "  Key types:   u16 i16 u32 i32 u64 i64\n"
             "  Value types: bool i8 i16 i32 i64 string big256\n"
-            "  Example: %s u64 i32 6000000 y\n",
+            "  Example: %s u64 i32 6000000 y chart64.html\n",
             argv[0], argv[0]);
         return 1;
     }
@@ -750,6 +755,13 @@ int main(int argc, char* argv[]) {
     const char* vn = argv[2];
     size_t max_n = static_cast<size_t>(std::atof(argv[3]));
     bool verbose = (argv[4][0] == 'y' || argv[4][0] == 'Y');
+
+    if (argc == 6) {
+        if (!std::freopen(argv[5], "w", stdout)) {
+            std::fprintf(stderr, "Cannot open output file: %s\n", argv[5]);
+            return 1;
+        }
+    }
 
     type_id kt = parse_type(kn);
     type_id vt = parse_type(vn);
@@ -835,7 +847,9 @@ int main(int argc, char* argv[]) {
             std::fprintf(stderr, "Invalid key type: %s\n", kn);
             return 1;
     }
-
+    std::this_thread::sleep_for(std::chrono::milliseconds(
+        10000));            // Ensure all output is flushed before exiting
+    std::fflush(stdout);  // Forces immediate output to the console
     return 0;
 
 bad_val:

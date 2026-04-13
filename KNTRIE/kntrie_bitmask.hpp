@@ -21,11 +21,15 @@ namespace gteitelbaum::kntrie_detail {
 //   - values at header_size + 4
 // ==========================================================================
 
-template<typename VALUE, typename ALLOC>
+template<typename K, typename VALUE, typename ALLOC>
 struct bitmask_ops {
     using VT   = value_traits<VALUE, ALLOC>;
     using VST  = typename VT::slot_type;
     using BLD  = builder<VALUE, VT::IS_TRIVIAL, ALLOC>;
+    using KO   = key_ops<K>;
+
+    // Bitmap leaf header size (compact uses COMPACT_HEADER_U64 separately)
+    static constexpr std::size_t BHS = BITMAP_LEAF_HEADER_U64;
 
     // ==================================================================
     // Sentinel — pure tag value, no physical node.
@@ -42,7 +46,7 @@ struct bitmask_ops {
         return hu + BM_CHILDREN_START + n_children + DESC_U64;
     }
 
-    static constexpr size_t bitmap_leaf_size_u64(size_t count, size_t hu = LEAF_HEADER_U64) noexcept {
+    static constexpr size_t bitmap_leaf_size_u64(size_t count, size_t hu = BHS) noexcept {
         if constexpr (VT::IS_BOOL) {
             return hu + BITMAP_WORDS + BITMAP_WORDS;  // presence + value bitmap
         } else {
@@ -138,14 +142,14 @@ struct bitmask_ops {
         return real_children_mut(node, chain_hs(sc));
     }
 
-    // Iterate final bitmap children: cb(slot, tagged_child)
+    // Iterate final bitmap children: cb(tagged_child)
     template<typename Fn>
     static void chain_for_each_child(const uint64_t* node, uint8_t sc, Fn&& cb) noexcept {
         size_t hs = chain_hs(sc);
         unsigned nc = static_cast<unsigned>(bm(node, hs).popcount());
         const uint64_t* ch = real_children(node, hs);
         for (unsigned i = 0; i < nc; ++i)
-            cb(i, ch[i]);
+            cb(ch[i]);
     }
 
     // Embed child pointer (the pointer in embed e that links to next embed or final bitmap)
@@ -500,86 +504,108 @@ struct bitmask_ops {
     }
 
     // ==================================================================
-    // find_fn_bitmap — exact match → iter_entry_t
-    // pos = slot (via popcount). bit = byte value.
+    // Base key helpers — stored K with bitmap byte zeroed.
+    // Lives in node[BITMAP_LEAF_SKIP_IDX] for bitmap leaves.
+    // Used for key reconstruction in advance/edge/next_after.
     // ==================================================================
 
-    template<bool DO_SKIP>
-    static iter_entry_t find_fn_bitmap(uint64_t* node, uint64_t ik) noexcept {
-        constexpr size_t hs = LEAF_HEADER_U64;
-        depth_t d = get_depth(node);
+    static K read_base_key(const uint64_t* node) noexcept {
+        K val{};
+        std::memcpy(&val, &node[BITMAP_LEAF_SKIP_IDX], sizeof(K));
+        return val;
+    }
 
-        if constexpr (DO_SKIP) {
-            if (!skip_eq(leaf_prefix(node), d, ik)) [[unlikely]]
-                return {};
-        }
-
-        uint8_t suffix = static_cast<uint8_t>(d.suffix(ik));
-        const bitmap_256_t& bmp = bm(node, hs);
-        if (!bmp.has_bit(suffix)) [[unlikely]] return {};
-        int slot = bmp.find_slot<slot_mode::UNFILTERED>(suffix);  // bit confirmed set
-        uint64_t key = d.to_ik(leaf_prefix(node), static_cast<uint64_t>(suffix));
-        // IS_BOOL: pos = suffix (byte value) so operator* indexes val_bm correctly.
-        // Non-bool: pos = slot (ordinal) for val pointer stride.
-        uint16_t ret_pos = VT::IS_BOOL ? static_cast<uint16_t>(suffix) : static_cast<uint16_t>(slot);
-        return {node, ret_pos, static_cast<uint16_t>(suffix),
-                key, bm_val_ptr(node, hs, slot), true};
+    static void write_base_key(uint64_t* node, K base_key) noexcept {
+        node[BITMAP_LEAF_SKIP_IDX] = 0;  // clear full u64 first
+        std::memcpy(&node[BITMAP_LEAF_SKIP_IDX], &base_key, sizeof(K));
     }
 
     // ==================================================================
-    // find_adv_fn_bitmap — positional advance using (pos, bit).
-    // bit = current byte value. next_set_after(bit) → new bit + new pos = pos+1.
+    // bitmap_find — exact match via stored K and shift.
+    // No skip check — bitmap leaves have no skip.
+    // Called directly via is_bitmap() dispatch, not via function pointer.
+    // ==================================================================
+
+    static iter_entry_t<K> bitmap_find(uint64_t* node, const node_header_t* /*hdr*/,
+                                       K stored, unsigned shift) noexcept {
+        constexpr size_t hs = BHS;
+
+        uint8_t suffix = static_cast<uint8_t>((stored >> shift) & 0xFF);
+        const bitmap_256_t& bmp = bm(node, hs);
+        if (!bmp.has_bit(suffix)) [[unlikely]] return {};
+        int slot = bmp.find_slot<slot_mode::UNFILTERED>(suffix);
+        uint16_t ret_pos = VT::IS_BOOL ? static_cast<uint16_t>(suffix) : static_cast<uint16_t>(slot);
+        return {node, ret_pos, static_cast<uint16_t>(suffix),
+                stored, bm_val_ptr(node, hs, slot), true};
+    }
+
+    // ==================================================================
+    // bitmap_find_byte — hot-path version for find_loop.
+    // Byte already extracted by caller.  No header load needed.
+    // ==================================================================
+
+    static iter_entry_t<K> bitmap_find_byte(uint64_t* node, K stored,
+                                            uint8_t suffix) noexcept {
+        constexpr size_t hs = BHS;
+        const bitmap_256_t& bmp = bm(node, hs);
+        if (!bmp.has_bit(suffix)) [[unlikely]] return {};
+        int slot = bmp.find_slot<slot_mode::UNFILTERED>(suffix);
+        uint16_t ret_pos = VT::IS_BOOL ? static_cast<uint16_t>(suffix) : static_cast<uint16_t>(slot);
+        return {node, ret_pos, static_cast<uint16_t>(suffix),
+                stored, bm_val_ptr(node, hs, slot), true};
+    }
+
+    // ==================================================================
+    // bitmap_advance — positional advance using (pos, bit, key).
+    // Reconstructs key by replacing last byte with new bit position.
     // O(1) hot path: one word shift + tzcnt.
     // ==================================================================
 
-    static iter_entry_t find_adv_fn_bitmap(uint64_t* node, uint16_t pos, uint16_t bit,
-                                             uint64_t ik, void* val, dir_t dir) noexcept {
-        constexpr size_t hs = LEAF_HEADER_U64;
+    static iter_entry_t<K> bitmap_advance(uint64_t* node, uint16_t pos, uint16_t bit,
+                                          K current_key, void* val, dir_t dir) noexcept {
+        constexpr size_t hs = BHS;
         constexpr int VAL_STRIDE = VT::IS_BOOL ? 0 : static_cast<int>(sizeof(VST));
         int d_int = static_cast<int>(dir);
-        depth_t d = get_depth(node);
-        uint64_t pfx = leaf_prefix(node);
 
         if (dir == dir_t::FWD) {
             auto r = bm(node, hs).next_bit_after(static_cast<uint8_t>(bit));
             if (!r.found) return {};
-            uint64_t key = d.to_ik(pfx, static_cast<uint64_t>(r.idx));
+            K new_key = (current_key & ~K(0xFF)) | K(r.idx);
             uint16_t ret_pos = VT::IS_BOOL ? static_cast<uint16_t>(r.idx)
                                            : static_cast<uint16_t>(pos + 1);
             return {node, ret_pos, static_cast<uint16_t>(r.idx),
-                    key, static_cast<char*>(val) + d_int * VAL_STRIDE, true};
+                    new_key, static_cast<char*>(val) + d_int * VAL_STRIDE, true};
         } else {
             auto r = bm(node, hs).prev_bit_before(static_cast<uint8_t>(bit));
             if (!r.found) return {};
-            uint64_t key = d.to_ik(pfx, static_cast<uint64_t>(r.idx));
+            K new_key = (current_key & ~K(0xFF)) | K(r.idx);
             uint16_t ret_pos = VT::IS_BOOL ? static_cast<uint16_t>(r.idx)
                                            : static_cast<uint16_t>(pos - 1);
             return {node, ret_pos, static_cast<uint16_t>(r.idx),
-                    key, static_cast<char*>(val) + d_int * VAL_STRIDE, true};
+                    new_key, static_cast<char*>(val) + d_int * VAL_STRIDE, true};
         }
     }
 
     // ==================================================================
-    // find_edge_fn_bitmap — edge entry → iter_entry_t
-    // FWD: slot=0, bit=first_set_bit. BWD: slot=entries-1, bit=last_set_bit.
+    // bitmap_edge — first (FWD) or last (BWD) entry.
+    // Reconstructs key from base_key stored in header.
     // ==================================================================
 
-    static iter_entry_t find_edge_fn_bitmap(uint64_t* node, dir_t dir) noexcept {
-        constexpr size_t hs = LEAF_HEADER_U64;
-        depth_t d = get_depth(node);
-        uint64_t pfx = leaf_prefix(node);
+    static iter_entry_t<K> bitmap_edge(uint64_t* node, dir_t dir) noexcept {
+        constexpr size_t hs = BHS;
+        K base_key = read_base_key(node);
         unsigned entries = get_header(node)->entries();
         const bitmap_256_t& bmp = bm(node, hs);
         if (dir == dir_t::FWD) {
             uint8_t idx = bmp.first_set_bit();
-            uint64_t key = d.to_ik(pfx, static_cast<uint64_t>(idx));
+            K key = base_key | K(idx);
             uint16_t ret_pos = VT::IS_BOOL ? static_cast<uint16_t>(idx) : 0;
             return {node, ret_pos, static_cast<uint16_t>(idx),
                     key, bm_val_ptr(node, hs, 0), true};
         } else {
             uint8_t idx = bmp.last_set_bit();
             uint16_t last_slot = static_cast<uint16_t>(entries - 1);
-            uint64_t key = d.to_ik(pfx, static_cast<uint64_t>(idx));
+            K key = base_key | K(idx);
             uint16_t ret_pos = VT::IS_BOOL ? static_cast<uint16_t>(idx) : last_slot;
             return {node, ret_pos, static_cast<uint16_t>(idx),
                     key, bm_val_ptr(node, hs, static_cast<int>(last_slot)), true};
@@ -595,7 +621,7 @@ struct bitmask_ops {
     static insert_result_t bitmap_insert(uint64_t* node, uint8_t suffix,
                                           VST value, BLD& bld) {
         auto* h = get_header(node);
-        constexpr size_t hs = LEAF_HEADER_U64;
+        constexpr size_t hs = BHS;
         bitmap_256_t& node_bm = bm_mut(node, hs);
         unsigned count = h->entries();
 
@@ -624,7 +650,7 @@ struct bitmask_ops {
             size_t au64 = round_up_u64(new_sz);
             uint64_t* nn = bld.alloc_node(au64);
             auto* nh = get_header(nn);
-            copy_leaf_header(node, nn);
+            copy_leaf_header(node, nn, BHS);
             nh->set_entries(nc);
             nh->set_alloc_u64(au64);
             bm_mut(nn, hs) = node_bm;
@@ -665,7 +691,7 @@ struct bitmask_ops {
             size_t au64 = round_up_u64(new_sz);
             uint64_t* nn = bld.alloc_node(au64);
             auto* nh = get_header(nn);
-            copy_leaf_header(node, nn);
+            copy_leaf_header(node, nn, BHS);
             nh->set_entries(nc);
             nh->set_alloc_u64(au64);
             bitmap_256_t& nbm = bm_mut(nn, hs);
@@ -691,7 +717,7 @@ struct bitmask_ops {
     template<typename F>
     static bool bitmap_modify(uint64_t* node, uint8_t suffix, F&& fn) {
         auto* h = get_header(node);
-        constexpr size_t hs = LEAF_HEADER_U64;
+        constexpr size_t hs = BHS;
         bitmap_256_t& node_bm = bm_mut(node, hs);
         if (!node_bm.has_bit(suffix)) return false;
 
@@ -719,23 +745,23 @@ struct bitmask_ops {
 
     // After erasing suffix, find the next entry in forward order.
     // suffix is already cleared. slot is the erased slot position (non-bool).
-    static iter_entry_t bitmap_next_after(uint64_t* node, uint8_t suffix,
+    static iter_entry_t<K> bitmap_next_after(uint64_t* node, uint8_t suffix,
                                            int slot) noexcept {
-        constexpr size_t hs = LEAF_HEADER_U64;
+        constexpr size_t hs = BHS;
         auto nxt = bm(node, hs).next_bit_after(suffix);
         if (!nxt.found) return {};
-        depth_t d = get_depth(node);
-        uint64_t key = d.to_ik(leaf_prefix(node), static_cast<uint64_t>(nxt.idx));
+        K base_key = read_base_key(node);
+        K key = base_key | K(nxt.idx);
         uint16_t npos = VT::IS_BOOL ? static_cast<uint16_t>(nxt.idx)
                                      : static_cast<uint16_t>(slot);
         return {node, npos, static_cast<uint16_t>(nxt.idx),
                 key, bm_val_ptr(node, hs, VT::IS_BOOL ? 0 : slot), true};
     }
 
-    static erase_result_t bitmap_erase(uint64_t* node, uint8_t suffix,
+    static erase_result_t<K> bitmap_erase(uint64_t* node, uint8_t suffix,
                                         BLD& bld) {
         auto* h = get_header(node);
-        constexpr size_t hs = LEAF_HEADER_U64;
+        constexpr size_t hs = BHS;
         bitmap_256_t& node_bm = bm_mut(node, hs);
         if (!node_bm.has_bit(suffix)) return {tag_leaf(node), false, 0, {}};
 
@@ -756,7 +782,7 @@ struct bitmask_ops {
                 size_t au64 = round_up_u64(new_sz);
                 uint64_t* nn = bld.alloc_node(au64);
                 auto* nh = get_header(nn);
-                copy_leaf_header(node, nn);
+                copy_leaf_header(node, nn, BHS);
                 nh->set_alloc_u64(au64);
                 bm_mut(nn, hs) = node_bm;
                 val_bm_mut(nn, hs) = val_bm(node, hs);
@@ -790,7 +816,7 @@ struct bitmask_ops {
             size_t au64 = round_up_u64(new_sz);
             uint64_t* nn = bld.alloc_node(au64);
             auto* nh = get_header(nn);
-            copy_leaf_header(node, nn);
+            copy_leaf_header(node, nn, BHS);
             nh->set_entries(nc);
             nh->set_alloc_u64(au64);
             bm_mut(nn, hs) = node_bm;
@@ -808,17 +834,20 @@ struct bitmask_ops {
 
     // ==================================================================
     // Bitmap256 leaf: make from sorted suffixes
+    // base_key = stored K with bitmap byte zeroed (for key reconstruction)
     // ==================================================================
 
     static uint64_t* make_bitmap_leaf(const uint8_t* sorted_suffixes,
                                        const VST* values, unsigned count,
-                                       BLD& bld) {
-        constexpr size_t hs = LEAF_HEADER_U64;
+                                       K base_key, BLD& bld) {
+        constexpr size_t hs = BHS;
         size_t sz = round_up_u64(bitmap_leaf_size_u64(count));
         uint64_t* node = bld.alloc_node(sz);
         auto* h = get_header(node);
+        h->set_bitmap(true);
         h->set_entries(count);
         h->set_alloc_u64(sz);
+        write_base_key(node, base_key);
         bitmap_256_t& node_bm = bm_mut(node, hs);
         node_bm = bitmap_256_t{};
         for (unsigned i = 0; i < count; ++i) node_bm.set_bit(sorted_suffixes[i]);
@@ -839,13 +868,16 @@ struct bitmask_ops {
     // Bitmap256 leaf: make single entry
     // ==================================================================
 
-    static uint64_t* make_single_bitmap(uint8_t suffix, VST value, BLD& bld) {
-        constexpr size_t hs = LEAF_HEADER_U64;
+    static uint64_t* make_single_bitmap(uint8_t suffix, VST value,
+                                         K base_key, BLD& bld) {
+        constexpr size_t hs = BHS;
         size_t sz = round_up_u64(bitmap_leaf_size_u64(1));
         uint64_t* node = bld.alloc_node(sz);
         auto* h = get_header(node);
+        h->set_bitmap(true);
         h->set_entries(1);
         h->set_alloc_u64(sz);
+        write_base_key(node, base_key);
         bm_mut(node, hs) = bitmap_256_t{};
         bm_mut(node, hs).set_bit(suffix);
         if constexpr (VT::IS_BOOL) {
@@ -863,7 +895,7 @@ struct bitmask_ops {
 
     template<typename Fn>
     static void for_each_bitmap(const uint64_t* node, Fn&& cb) {
-        constexpr size_t hs = LEAF_HEADER_U64;
+        constexpr size_t hs = BHS;
         const bitmap_256_t& bmp = bm(node, hs);
         if constexpr (VT::IS_BOOL) {
             const bitmap_256_t& vbm = val_bm(node, hs);
@@ -894,7 +926,7 @@ struct bitmask_ops {
         auto* h = get_header(node);
         if constexpr (VT::HAS_DESTRUCTOR) {
             uint16_t count = h->entries();
-            VST* vd = bl_vals_mut(node, LEAF_HEADER_U64);
+            VST* vd = bl_vals_mut(node, BHS);
             for (uint16_t i = 0; i < count; ++i)
                 bld.destroy_value(vd[i]);
         }
@@ -1167,26 +1199,35 @@ public:
     }
 
     // ==================================================================
-    // Read/iter loop functions — called by kntrie_impl
+    // ==================================================================
+    // Read/iter loop functions — called by kntrie_impl/kntrie_ops
     // ==================================================================
 
-    // find_loop: branchless bitmask descent, fn-ptr dispatch at leaf → iter_entry_t
-    static iter_entry_t find_loop(uint64_t ptr, uint64_t ik,
-                                   uint64_t shifted) noexcept {
-        int depth = 0;
+    // Leaf result from descent — caller dispatches based on is_bitmap.
+    struct leaf_result_t {
+        uint64_t* node;
+        node_header_t* hdr;
+        unsigned shift;
+        bool found;
+    };
+
+    // find_descent: branchless bitmask descent, returns leaf + shift.
+    // Caller dispatches to bitmap_find or compact_find based on hdr->is_bitmap().
+    static leaf_result_t find_descent(uint64_t ptr, K stored,
+                                      unsigned shift) noexcept {
         while (!(ptr & LEAF_BIT)) [[likely]] {
-            ptr = bm_child(ptr, static_cast<uint8_t>(shifted >> (U64_TOP_BYTE_SHIFT - depth * CHAR_BIT)));
-            ++depth;
+            ptr = bm_child(ptr, static_cast<uint8_t>((stored >> shift) & 0xFF));
+            shift -= CHAR_BIT;
         }
         if (ptr & NOT_FOUND_BIT) [[unlikely]]
-            return {};
+            return {nullptr, nullptr, 0, false};
         uint64_t* node = untag_leaf_mut(ptr);
-        auto fn = get_find_fn(node);
-        return fn(node, ik);
+        return {node, get_header(node), shift, true};
     }
 
-    // descend_edge_loop: walk to min (FWD) or max (BWD) leaf → iter_entry_t
-    static iter_entry_t descend_edge_loop(uint64_t ptr, dir_t dir) noexcept {
+    // descend_edge: walk to min (FWD) or max (BWD) leaf.
+    // Caller dispatches based on hdr->is_bitmap().
+    static leaf_result_t descend_edge(uint64_t ptr, dir_t dir) noexcept {
         if (dir == dir_t::FWD) {
             while (!(ptr & LEAF_BIT))
                 ptr = bm_first_child(ptr);
@@ -1195,23 +1236,18 @@ public:
                 ptr = bm_last_child(ptr);
         }
         uint64_t* node = untag_leaf_mut(ptr);
-        auto fn = get_find_edge(node);
-        return fn(node, dir);
+        return {node, get_header(node), 0, true};
     }
 
     // ==================================================================
-    // Bitmap leaf type check — for advance_pos dispatch
+    // Bitmap leaf type check — uses header flag
     // ==================================================================
 
-    static constexpr uint8_t BITMAP_SHIFT_THRESHOLD = U64_BITS - U8_BITS;  // 56
-
     static bool is_bitmap_leaf(const uint64_t* node) noexcept {
-        return get_depth(node).shift >= BITMAP_SHIFT_THRESHOLD;
+        return get_header(node)->is_bitmap();
     }
 
     // Return the tagged bitmap pointer for sibling search, handling skip chains.
-    // For non-skip nodes: tag_bitmask(node) points to node[HEADER_U64].
-    // For skip chains: final bitmap is at node + HEADER_U64 + sc * EMBED_U64.
     static uint64_t node_bm_ptr(const uint64_t* node) noexcept {
         uint8_t sc = get_header(node)->skip();
         if (sc == 0) [[likely]]

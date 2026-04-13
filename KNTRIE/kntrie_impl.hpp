@@ -8,212 +8,95 @@
 
 namespace gteitelbaum::kntrie_detail {
 
-// Standalone stats accumulator
 struct kntrie_stats_t {
-    size_t total_bytes    = 0;
-    size_t total_entries  = 0;
-    size_t bitmap_leaves  = 0;
-    size_t compact_leaves = 0;
-    size_t bitmask_nodes  = 0;
-    size_t bm_children    = 0;
+    std::size_t total_bytes    = 0;
+    std::size_t total_entries  = 0;
+    std::size_t bitmap_leaves  = 0;
+    std::size_t compact_leaves = 0;
+    std::size_t bitmask_nodes  = 0;
+    std::size_t bm_children    = 0;
 };
 
 // ======================================================================
-// kntrie_iter_ops<VALUE, ALLOC> — destroy, stats.
+// kntrie_impl<K, VALUE, ALLOC>
 //
-// Iteration moved to fn-pointer dispatch in kntrie_ops.
-// All functions take uint64_t ik. No NK narrowing.
+// K = unsigned stored key type (already sign-flipped by caller).
+// All methods take K directly.  Caller (kntrie.hpp) handles KEY↔K.
 // ======================================================================
 
-template<typename VALUE, typename ALLOC, int KEY_BITS>
-struct kntrie_iter_ops {
-    using BO  = bitmask_ops<VALUE, ALLOC>;
-    using VT  = value_traits<VALUE, ALLOC>;
-    using VST = typename VT::slot_type;
-    using BLD = builder<VALUE, VT::IS_TRIVIAL, ALLOC>;
-    using OPS = kntrie_ops<VALUE, ALLOC, KEY_BITS>;
-
-    // ==================================================================
-    // Destroy leaf: compile-time NK dispatch via BITS
-    // ==================================================================
-
-    template<int BITS>
-    static void destroy_leaf(uint64_t* node, BLD& bld) noexcept {
-        using NK = nk_for_bits_t<BITS>;
-        if constexpr (sizeof(NK) == 1)
-            BO::bitmap_destroy_and_dealloc(node, bld);
-        else {
-            using CO = compact_ops<NK, VALUE, ALLOC>;
-            CO::destroy_and_dealloc(node, bld);
-        }
-    }
-
-    // ==================================================================
-    // Remove subtree: runtime-recursive, depth-based
-    // ==================================================================
-
-    static void remove_subtree(uint64_t tagged, uint8_t depth,
-                                 BLD& bld) noexcept {
-        if (tagged == BO::SENTINEL_TAGGED) return;
-
-        if (tagged & LEAF_BIT) {
-            uint64_t* node = untag_leaf_mut(tagged);
-            auto* hdr = get_header(node);
-            uint8_t skip = hdr->skip();
-            OPS::depth_switch(depth + skip, [&]<int BITS>() {
-                destroy_leaf<BITS>(node, bld);
-            });
-            return;
-        }
-
-        uint64_t* node = bm_to_node(tagged);
-        auto* hdr = get_header(node);
-        uint8_t sc = hdr->skip();
-        uint8_t child_depth = depth + sc + 1;
-        BO::chain_for_each_child(node, sc, [&](unsigned, uint64_t child) {
-            remove_subtree(child, child_depth, bld);
-        });
-        BO::dealloc_bitmask(node, bld);
-    }
-
-    // ==================================================================
-    // Stats collection: runtime-recursive, depth-based
-    // ==================================================================
-
-    using stats_t = kntrie_stats_t;
-
-    static void collect_stats(uint64_t tagged, uint8_t depth,
-                                stats_t& s) noexcept {
-        if (tagged & LEAF_BIT) {
-            const uint64_t* node = untag_leaf(tagged);
-            auto* hdr = get_header(node);
-            s.total_bytes += static_cast<size_t>(hdr->alloc_u64()) * U64_BYTES;
-            s.total_entries += hdr->entries();
-            uint8_t skip = hdr->skip();
-            OPS::depth_switch(depth + skip, [&]<int BITS>() {
-                using NK = nk_for_bits_t<BITS>;
-                if constexpr (sizeof(NK) == 1) s.bitmap_leaves++;
-                else                           s.compact_leaves++;
-            });
-            return;
-        }
-
-        const uint64_t* node = bm_to_node_const(tagged);
-        auto* hdr = get_header(node);
-        s.total_bytes += static_cast<size_t>(hdr->alloc_u64()) * U64_BYTES;
-        s.bitmask_nodes++;
-        s.bm_children += hdr->entries();
-        uint8_t sc = hdr->skip();
-        uint8_t child_depth = depth + sc + 1;
-        BO::chain_for_each_child(node, sc, [&](unsigned, uint64_t child) {
-            collect_stats(child, child_depth, s);
-        });
-    }
-};
-
-template<typename KEY, typename VALUE, typename ALLOC = std::allocator<uint64_t>>
+template<typename K, typename VALUE, typename ALLOC>
 class kntrie_impl {
-    static_assert(std::is_integral_v<KEY> && sizeof(KEY) >= 2,
-                  "KEY must be integral and at least 16 bits");
+    static_assert(std::is_unsigned_v<K>, "K must be unsigned stored type");
 
 public:
-    using key_type       = KEY;
-    using mapped_type    = VALUE;
-    using size_type      = std::size_t;
-    using allocator_type = ALLOC;
+    using key_type    = K;
+    using mapped_type = VALUE;
+    using size_type   = std::size_t;
 
 private:
-    using KO   = key_ops<KEY>;
-    using IK   = typename KO::IK;
     using VT   = value_traits<VALUE, ALLOC>;
     using VST  = typename VT::slot_type;
 
-    // Normalized VALUE for ops: collapse same-sized trivial types
     using NORM_V = normalized_ops_value_t<VALUE>;
     using NVT  = value_traits<NORM_V, ALLOC>;
     using NVST = typename NVT::slot_type;
 
-    using BO   = bitmask_ops<NORM_V, ALLOC>;
+    using BO   = bitmask_ops<K, NORM_V, ALLOC>;
+    using CO   = compact_ops<K, NORM_V, ALLOC>;
     using BLD  = builder<NORM_V, NVT::IS_TRIVIAL, ALLOC>;
+    using OPS  = kntrie_ops<K, NORM_V, ALLOC>;
 
-    static constexpr int IK_BITS  = KO::IK_BITS;
-    static constexpr int KEY_BITS = KO::KEY_BITS;
-
-    using OPS  = kntrie_ops<NORM_V, ALLOC, KEY_BITS>;
-    using ITER_OPS = kntrie_iter_ops<NORM_V, ALLOC, KEY_BITS>;
-
-    // MAX_ROOT_SKIP: leave 1 byte for subtree root dispatch + 1 byte minimum
-    // u16: 0, u32: 2, u64: 6
-    static constexpr int MAX_ROOT_SKIP = KEY_BITS / CHAR_BIT - ROOT_CONSUMED_BYTES;
-
-    // ==================================================================
-    // key_to_u64: left-align internal key in uint64_t
-    // ==================================================================
-
-    static uint64_t key_to_u64(const KEY& key) noexcept {
-        IK internal = KO::to_internal(key);
-        return static_cast<uint64_t>(internal) << (U64_BITS - IK_BITS);
-    }
-
+    static constexpr unsigned TOP_SHIFT    = (sizeof(K) - 1) * CHAR_BIT;
+    static constexpr int      KEY_BYTES    = static_cast<int>(sizeof(K));
+    static constexpr int      MAX_ROOT_SKIP = KEY_BYTES - ROOT_CONSUMED_BYTES;
 
     // --- Data members ---
-    uint64_t  root_ptr_v;       // tagged child (SENTINEL, leaf, or bitmask)
-    uint64_t  root_prefix_v;    // shared prefix bytes, left-aligned
-    size_t    size_v;
-    uint8_t   root_skip_bits_v;
-    BLD       bld_v;
+    std::uint64_t root_ptr_v;
+    K             root_prefix_v;
+    std::size_t   size_v;
+    unsigned      root_skip_bytes_v;
+    BLD           bld_v;
 
-    uint64_t root_prefix_mask() const noexcept {
-        return ~(~0ULL >> root_skip_bits_v);
-    }
-    uint8_t root_skip_bytes() const noexcept {
-        return root_skip_bits_v / CHAR_BIT;
-    }
-
-    void set_root(uint8_t skip_bytes) noexcept {
-        root_skip_bits_v = skip_bytes * CHAR_BIT;
+    K root_prefix_mask() const noexcept {
+        if (root_skip_bytes_v == 0) return K(0);
+        unsigned shift = (sizeof(K) - root_skip_bytes_v) * CHAR_BIT;
+        if (shift >= sizeof(K) * CHAR_BIT) return ~K(0);
+        return ~K(0) << shift;
     }
 
-    void set_root(uint64_t ptr, uint64_t prefix, uint8_t skip_bytes) noexcept {
-        root_ptr_v = ptr;
-        root_prefix_v = prefix;
-        set_root(skip_bytes);
-        mark_root();
+    unsigned root_dispatch_shift() const noexcept {
+        return TOP_SHIFT - root_skip_bytes_v * CHAR_BIT;
     }
 
-    // Mark current root_ptr_v as root (no parent).
+    void set_root(unsigned skip_bytes) noexcept {
+        root_skip_bytes_v = skip_bytes;
+    }
+
     void mark_root() noexcept {
-        if (root_ptr_v != BO::SENTINEL_TAGGED)
-            set_root_parent(root_ptr_v);
+        set_root_parent(root_ptr_v);
     }
 
 public:
-    // ==================================================================
-    // Constructor / Destructor
-    // ==================================================================
+    kntrie_impl() : root_ptr_v(BO::SENTINEL_TAGGED), root_prefix_v{},
+                     size_v(0), root_skip_bytes_v(0), bld_v() {}
 
-    kntrie_impl()
-        : root_ptr_v(BO::SENTINEL_TAGGED),
-          root_prefix_v(0),
-          size_v(0),
-          root_skip_bits_v(0),
-          bld_v() {}
+    explicit kntrie_impl(const ALLOC& a)
+        : root_ptr_v(BO::SENTINEL_TAGGED), root_prefix_v{},
+          size_v(0), root_skip_bytes_v(0), bld_v(a) {}
 
-    ~kntrie_impl() { remove_all(); bld_v.drain(); }
+    ~kntrie_impl() { remove_all(); }
 
     kntrie_impl(const kntrie_impl&) = delete;
     kntrie_impl& operator=(const kntrie_impl&) = delete;
 
     kntrie_impl(kntrie_impl&& o) noexcept
-        : root_ptr_v(o.root_ptr_v),
-          root_prefix_v(o.root_prefix_v),
-          size_v(o.size_v),
-          root_skip_bits_v(o.root_skip_bits_v),
+        : root_ptr_v(o.root_ptr_v), root_prefix_v(o.root_prefix_v),
+          size_v(o.size_v), root_skip_bytes_v(o.root_skip_bytes_v),
           bld_v(std::move(o.bld_v)) {
         o.root_ptr_v = BO::SENTINEL_TAGGED;
-        o.root_prefix_v = 0;
+        o.root_prefix_v = K{};
         o.size_v = 0;
-        o.root_skip_bits_v = 0;
+        o.root_skip_bytes_v = 0;
     }
 
     kntrie_impl& operator=(kntrie_impl&& o) noexcept {
@@ -223,12 +106,12 @@ public:
             root_ptr_v = o.root_ptr_v;
             root_prefix_v = o.root_prefix_v;
             size_v = o.size_v;
-            root_skip_bits_v = o.root_skip_bits_v;
+            root_skip_bytes_v = o.root_skip_bytes_v;
             bld_v = std::move(o.bld_v);
             o.root_ptr_v = BO::SENTINEL_TAGGED;
-            o.root_prefix_v = 0;
+            o.root_prefix_v = K{};
             o.size_v = 0;
-            o.root_skip_bits_v = 0;
+            o.root_skip_bytes_v = 0;
         }
         return *this;
     }
@@ -237,7 +120,7 @@ public:
         std::swap(root_ptr_v, o.root_ptr_v);
         std::swap(root_prefix_v, o.root_prefix_v);
         std::swap(size_v, o.size_v);
-        std::swap(root_skip_bits_v, o.root_skip_bits_v);
+        std::swap(root_skip_bytes_v, o.root_skip_bytes_v);
         bld_v.swap(o.bld_v);
     }
 
@@ -252,396 +135,384 @@ public:
     }
 
     // ==================================================================
-    // Find — no sentinel checks, sentinel fn returns nullptr
+    // Find — takes stored K directly
     // ==================================================================
 
-    // Find entry — returns iter_entry_t with key+val.
-    iter_entry_t find_entry(const KEY& key) const noexcept {
-        uint64_t ik = key_to_u64(key);
-        if ((ik ^ root_prefix_v) & root_prefix_mask()) [[unlikely]] return {};
-        return BO::find_loop(root_ptr_v, ik, ik << root_skip_bits_v);
+    iter_entry_t<K> find_entry(K stored) const noexcept {
+        if ((stored ^ root_prefix_v) & root_prefix_mask()) [[unlikely]] return {};
+        return OPS::find_loop(root_ptr_v, stored, root_dispatch_shift());
     }
 
-    bool contains(const KEY& key) const noexcept {
-        return find_entry(key).found;
-    }
-
-    // ==================================================================
-    // Edge entry — first (FWD) or last (BWD) entry in container.
-    // ==================================================================
-
-    iter_entry_t edge_entry(dir_t dir) const noexcept {
-        if (size_v == 0) [[unlikely]] return {};
-        return BO::descend_edge_loop(root_ptr_v, dir);
+    bool contains(K stored) const noexcept {
+        return find_entry(stored).found;
     }
 
     // ==================================================================
-    // Parent walk — static, no impl pointer needed.
-    // All parents are bitmask nodes.
+    // Edge entry
     // ==================================================================
 
-    // Walk from a leaf: get parent byte + leaf_parent, then walk bitmask chain.
-    static iter_entry_t walk_from_leaf(uint64_t* leaf, dir_t dir) noexcept {
-        uint16_t byte = get_header(leaf)->parent_byte();
-        uint64_t* parent = leaf_parent(leaf);
+    iter_entry_t<K> edge_entry(dir_t dir) const noexcept {
+        if (size_v == 0) return {};
+        return OPS::descend_edge_loop(root_ptr_v, dir);
+    }
+
+    // ==================================================================
+    // Iteration helpers
+    // ==================================================================
+
+    static iter_entry_t<K> walk_from_leaf(std::uint64_t* leaf, dir_t dir) noexcept {
+        auto* hdr = get_header(leaf);
+        std::uint64_t* parent = leaf_parent(leaf);
+        if (!parent || hdr->is_root()) [[unlikely]] return {};
+        std::uint16_t byte = hdr->parent_byte();
         return walk_bm_chain(parent, byte, dir);
     }
 
-    // Walk from a bitmask node: get parent byte + bm_parent, then walk chain.
-    static iter_entry_t walk_from_bm(uint64_t* bm_node, dir_t dir) noexcept {
-        uint16_t byte = get_header(bm_node)->parent_byte();
-        uint64_t* parent = bm_parent(bm_node);
+    static iter_entry_t<K> walk_from_bm(std::uint64_t* bm_node, dir_t dir) noexcept {
+        auto* hdr = get_header(bm_node);
+        std::uint64_t* parent = bm_parent(bm_node);
+        if (!parent || hdr->is_root()) [[unlikely]] return {};
+        std::uint16_t byte = hdr->parent_byte();
         return walk_bm_chain(parent, byte, dir);
     }
 
-    // Walk bitmask parent chain. All nodes are bitmask.
-    static iter_entry_t walk_bm_chain(uint64_t* parent, uint16_t byte, dir_t dir) noexcept {
-        while (byte != node_header_t::ROOT_BYTE) {
-            uint64_t bm_ptr = BO::node_bm_ptr(parent);
-            auto [sib, found] = (dir == dir_t::FWD)
-                ? BO::bm_next_sibling(bm_ptr, static_cast<uint8_t>(byte))
-                : BO::bm_prev_sibling(bm_ptr, static_cast<uint8_t>(byte));
-            if (found) return BO::descend_edge_loop(sib, dir);
-            byte = get_header(parent)->parent_byte();
-            parent = bm_parent(parent);
+    static iter_entry_t<K> walk_bm_chain(std::uint64_t* parent, std::uint16_t byte, dir_t dir) noexcept {
+        auto* phdr = get_header(parent);
+        std::uint8_t sc = phdr->skip();
+        std::uint64_t bm_ptr = BO::node_bm_ptr(parent);
+
+        typename bitmap_256_t::adj_result adj;
+        if (dir == dir_t::FWD)
+            adj = bitmap_ref(bm_ptr).next_set_after(static_cast<std::uint8_t>(byte));
+        else
+            adj = bitmap_ref(bm_ptr).prev_set_before(static_cast<std::uint8_t>(byte));
+
+        if (adj.found) {
+            std::uint64_t child = BO::chain_child(parent, sc, adj.slot);
+            return OPS::descend_edge_loop(child, dir);
         }
-        return {};
+
+        std::uint64_t* grandparent = bm_parent(parent);
+        if (!grandparent || phdr->is_root()) [[unlikely]] return {};
+        return walk_bm_chain(grandparent, phdr->parent_byte(), dir);
+    }
+
+    static iter_entry_t<K> advance_pos(iter_entry_t<K> cur, dir_t dir) noexcept {
+        if (!cur.found) return {};
+        auto* hdr = get_header(cur.leaf);
+
+        iter_entry_t<K> next;
+        if (hdr->is_bitmap())
+            next = BO::bitmap_advance(cur.leaf, cur.pos, cur.bit, cur.key, cur.val, dir);
+        else
+            next = CO::compact_advance(cur.leaf, cur.pos, cur.val, dir);
+
+        if (next.found) return next;
+        return walk_from_leaf(cur.leaf, dir);
     }
 
     // ==================================================================
-    // Tracked descent for lower_bound / upper_bound.
-    // On bitmask miss, tries next sibling then walks parents.
+    // Lower/upper bound
     // ==================================================================
 
-    template<typename LeafFn>
-    iter_entry_t tracked_descent_fwd(uint64_t ik, LeafFn&& leaf_fn) const noexcept {
-        if (size_v == 0) [[unlikely]] return {};
+    iter_entry_t<K> lower_bound_entry(K stored) const noexcept {
+        return find_ge_entry(stored);
+    }
 
-        uint64_t diff = (ik ^ root_prefix_v) & root_prefix_mask();
-        if (diff) [[unlikely]] {
-            int shift = std::countl_zero(diff) & BYTE_BOUNDARY_MASK;
-            uint8_t kb = static_cast<uint8_t>(ik >> (U64_TOP_BYTE_SHIFT - shift));
-            uint8_t pb = static_cast<uint8_t>(root_prefix_v >> (U64_TOP_BYTE_SHIFT - shift));
-            if (kb < pb) return edge_entry(dir_t::FWD);
-            return {};
-        }
+    iter_entry_t<K> find_ge_entry(K stored) const noexcept {
+        return tracked_descent_fwd(stored, [](std::uint64_t* leaf, K s) -> iter_entry_t<K> {
+            return OPS::leaf_find_ge(leaf, s);
+        });
+    }
 
-        uint64_t ptr = root_ptr_v;
-        uint64_t shifted = ik << root_skip_bits_v;
-        int depth = 0;
-
-        while (!(ptr & LEAF_BIT)) [[likely]] {
-            uint8_t byte = static_cast<uint8_t>(shifted >> (U64_TOP_BYTE_SHIFT - depth * CHAR_BIT));
-            auto [child, slot] = BO::bm_child_exact(ptr, byte);
-            if (slot < 0) [[unlikely]] {
-                auto [sib, found] = BO::bm_next_sibling(ptr, byte);
-                if (found) return BO::descend_edge_loop(sib, dir_t::FWD);
-                uint64_t* bm_node = bm_to_node(ptr);
-                return walk_from_bm(bm_node, dir_t::FWD);
+    iter_entry_t<K> upper_bound_entry(K stored) const noexcept {
+        return tracked_descent_fwd(stored, [](std::uint64_t* leaf, K s) -> iter_entry_t<K> {
+            auto r = OPS::leaf_find_ge(leaf, s);
+            if (r.found && r.key == s) {
+                auto* hdr = get_header(leaf);
+                if (hdr->is_bitmap())
+                    return BO::bitmap_advance(leaf, r.pos, r.bit, r.key, r.val, dir_t::FWD);
+                else
+                    return CO::compact_advance(leaf, r.pos, r.val, dir_t::FWD);
             }
-            ptr = child;
-            ++depth;
-        }
-
-        uint64_t* leaf = untag_leaf_mut(ptr);
-        return leaf_fn(leaf, ik);
-    }
-
-    iter_entry_t lower_bound_entry(const KEY& key) const noexcept {
-        uint64_t ik = key_to_u64(key);
-        return find_ge_entry(ik);
-    }
-
-    // Lower-bound by raw ik — single-pass leaf search.
-    iter_entry_t find_ge_entry(uint64_t ik) const noexcept {
-        return tracked_descent_fwd(ik, [](uint64_t* leaf, uint64_t ik_) -> iter_entry_t {
-            auto r = OPS::leaf_find_ge(leaf, ik_);
-            if (r.found) return r;
-            return walk_from_leaf(leaf, dir_t::FWD);
+            return r;
         });
     }
 
-    iter_entry_t upper_bound_entry(const KEY& key) const noexcept {
-        uint64_t ik = key_to_u64(key);
-        return tracked_descent_fwd(ik, [](uint64_t* leaf, uint64_t ik_) -> iter_entry_t {
-            // First entry > ik in this leaf (key-based, cold path)
-            auto r = OPS::leaf_first_after(leaf, ik_, dir_t::FWD);
-            if (r.found) return r;
-            return walk_from_leaf(leaf, dir_t::FWD);
-        });
-    }
-
-public:
     // ==================================================================
-    // Insert / Insert-or-assign / Assign
+    // Insert — takes stored K directly
     // ==================================================================
 
-    bool insert(const KEY& key, const VALUE& value) {
-        auto r = insert_dispatch<true, false>(key, value);
+    bool insert(K stored, const VALUE& value) {
+        auto r = insert_dispatch<true, false>(stored, value);
         return r.inserted;
     }
 
-    bool insert_or_assign(const KEY& key, const VALUE& value) {
-        auto r = insert_dispatch<true, true>(key, value);
+    bool insert_or_assign(K stored, const VALUE& value) {
+        auto r = insert_dispatch<true, true>(stored, value);
         return r.inserted;
     }
 
-    bool assign(const KEY& key, const VALUE& value) {
-        auto r = insert_dispatch<false, true>(key, value);
-        return r.inserted;
+    insert_pos_result_t insert_with_pos(K stored, const VALUE& value) {
+        return insert_dispatch<true, false>(stored, value);
     }
 
-    // Insert returning {leaf, pos, inserted} for live iterators.
-    // Single-walk: insert_dispatch propagates leaf/pos from compact/bitmap insert.
-    // Re-find only after rare normalize_root/coalesce_bm_to_leaf.
-    insert_pos_result_t insert_with_pos(const KEY& key, const VALUE& value) {
-        return insert_dispatch<true, false>(key, value);
+    iter_entry_t<K> entry_from_pos(std::uint64_t* leaf, std::uint16_t pos, K stored) const noexcept {
+        return OPS::entry_from_insert_pos(leaf, pos, stored);
     }
 
-    // Build iter_entry_t from {leaf, pos} returned by insert_dispatch.
-    // Single-walk: avoids the second find_entry descent.
-    iter_entry_t entry_from_pos(uint64_t* leaf, uint16_t pos, const KEY& key) const noexcept {
-        return OPS::entry_from_insert_pos(leaf, pos, key_to_u64(key));
-    }
-
-    // Insert-or-assign returning {leaf, pos, was_new_insert}.
-    insert_pos_result_t upsert_with_pos(const KEY& key, const VALUE& value) {
-        return insert_dispatch<true, true>(key, value);
+    insert_pos_result_t upsert_with_pos(K stored, const VALUE& value) {
+        return insert_dispatch<true, true>(stored, value);
     }
 
     // ==================================================================
-    // Erase
+    // Erase — takes stored K directly
     // ==================================================================
 
-    bool erase(const KEY& key) {
+    bool erase(K stored) {
         if (size_v == 0) [[unlikely]] return false;
-        return erase_ik(key_to_u64(key)).erased;
+        return erase_stored(stored).erased;
     }
 
-    // Erase by leaf position — reconstruct key from {leaf, pos},
-    // then delegate to key-based erase. Caller must advance iterator
-    // before calling.
-    bool erase_at(uint64_t* leaf, uint16_t pos) {
+    bool erase_at(std::uint64_t* leaf, std::uint16_t pos) {
         if (size_v == 0) [[unlikely]] return false;
-        uint64_t ik = OPS::reconstruct_ik(leaf, pos);
-        return erase_ik(ik).erased;
+        auto* hdr = get_header(leaf);
+        K stored;
+        if (hdr->is_bitmap())
+            stored = BO::read_base_key(leaf) | K(pos);
+        else
+            stored = CO::keys(leaf, COMPACT_HEADER_U64)[pos];
+        return erase_stored(stored).erased;
     }
 
-    // Erase by cached ik — used by iterator which already has the key.
-    bool erase_by_ik(uint64_t ik) {
-        if (size_v == 0) [[unlikely]] return false;
-        return erase_ik(ik).erased;
-    }
-
-    // Erase by cached ik and return next entry — used by erase(iterator).
-    // Hot path: next is computed during the erase unwind at zero extra cost.
-    // Cold path (root coalesce or erased the max entry): re-find via lower_bound.
-    iter_entry_t erase_with_next(uint64_t ik) {
+    iter_entry_t<K> erase_with_next(K stored) {
         if (size_v == 0) [[unlikely]] return {};
-        auto r = erase_ik(ik);
+        auto r = erase_stored(stored);
         if (!r.erased) return {};
         if (r.next.found) [[likely]] return r.next;
         if (size_v == 0) return {};
-        // Rare: root-level coalesce invalidated next, or erased the max entry.
-        // Re-find from root — still O(K) but only on structural change.
-        return find_ge_entry(ik);
+        return find_ge_entry(stored);
     }
 
 private:
-    using erase_result_t = kntrie_detail::erase_result_t;
-
-    erase_result_t erase_ik(uint64_t ik) {
-        if ((ik ^ root_prefix_v) & root_prefix_mask()) [[unlikely]]
+    erase_result_t<K> erase_stored(K stored) {
+        if ((stored ^ root_prefix_v) & root_prefix_mask()) [[unlikely]]
             return {0, false, 0, {}};
 
-        uint64_t old_root_ptr = root_ptr_v;
-        auto r = OPS::erase_node(root_ptr_v, ik, ik << root_skip_bits_v, root_skip_bytes(), bld_v);
+        std::uint64_t old_root_ptr = root_ptr_v;
+        auto r = OPS::erase_node(root_ptr_v, stored, root_dispatch_shift(), bld_v);
         if (r.erased) [[likely]] {
             root_ptr_v = r.tagged_ptr ? r.tagged_ptr : BO::SENTINEL_TAGGED;
             mark_root();
             --size_v;
             if (size_v == 0) [[unlikely]] {
                 root_ptr_v = BO::SENTINEL_TAGGED;
-                root_prefix_v = 0;
+                root_prefix_v = K{};
                 set_root(0);
-                r.next = {};  // empty trie
+                r.next = {};
             } else {
                 bool root_changed = (root_ptr_v != old_root_ptr);
-                if (root_changed) [[unlikely]] normalize_root();
-                if (size_v <= COMPACT_MAX && !(root_ptr_v & LEAF_BIT)
-                    && root_ptr_v != BO::SENTINEL_TAGGED) [[unlikely]] {
-                    coalesce_bm_to_leaf();
-                    // Root-level coalesce deallocates all old nodes.
-                    // r.next is stale — caller re-finds via find_ge_entry.
+                if (root_changed) [[unlikely]] {
+                    normalize_root();
+                    if (size_v <= COMPACT_MAX && !(root_ptr_v & LEAF_BIT)) [[unlikely]]
+                        coalesce_bm_to_leaf();
                     r.next = {};
                 }
             }
         }
         return r;
     }
-public:
 
+public:
     // ==================================================================
-    // Stats / Memory
+    // Stats
     // ==================================================================
 
     kntrie_stats_t debug_stats() const noexcept {
         kntrie_stats_t s{};
         s.total_bytes = sizeof(*this);
-        if (root_ptr_v != BO::SENTINEL_TAGGED) {
-            kntrie_stats_t os{};
-            ITER_OPS::collect_stats(root_ptr_v, root_skip_bytes(), os);
-            s.total_bytes    += os.total_bytes;
-            s.total_entries  += os.total_entries;
-            s.bitmap_leaves  += os.bitmap_leaves;
-            s.compact_leaves += os.compact_leaves;
-            s.bitmask_nodes  += os.bitmask_nodes;
-            s.bm_children    += os.bm_children;
-        }
+        // TODO: walk tree and collect stats
         return s;
     }
 
-    // O(N): walks all nodes to sum allocations. Not for hot paths.
-    size_t memory_usage() const noexcept { return debug_stats().total_bytes; }
+    std::size_t memory_usage() const noexcept { return debug_stats().total_bytes; }
 
-    struct root_info_t {
-        uint16_t entries; uint8_t skip;
-        bool is_leaf;
-    };
-
-    root_info_t debug_root_info() const {
-        bool is_leaf = (root_ptr_v & LEAF_BIT) != 0;
-        uint16_t entries = 0;
-        if (root_ptr_v != BO::SENTINEL_TAGGED) {
-            if (is_leaf)
-                entries = get_header(untag_leaf(root_ptr_v))->entries();
-            else
-                entries = get_header(bm_to_node_const(root_ptr_v))->entries();
-        }
-        return {entries, root_skip_bytes(), is_leaf};
-    }
-
-    const uint64_t* debug_root() const noexcept {
+    const std::uint64_t* debug_root() const noexcept {
         if (root_ptr_v == BO::SENTINEL_TAGGED) return nullptr;
         if (root_ptr_v & LEAF_BIT) return untag_leaf(root_ptr_v);
         return bm_to_node_const(root_ptr_v);
     }
 
+private:
     template<bool INSERT, bool ASSIGN>
-    insert_pos_result_t insert_dispatch(const KEY& key, const VALUE& value) {
-        uint64_t ik = key_to_u64(key);
-
-        // Convert VALUE → normalized slot for ops
+    insert_pos_result_t insert_dispatch(K stored, const VALUE& value) {
         NVST sv;
         if constexpr (std::is_same_v<VALUE, NORM_V>) {
             sv = bld_v.store_value(value);
         } else {
-            // Trivial same-size: direct bit conversion
             static_assert(sizeof(VALUE) <= sizeof(NVST));
             sv = NVST{};
             std::memcpy(&sv, &value, sizeof(VALUE));
         }
 
-        // First insert: root at skip=0, leaf handles its own prefix
         if (size_v == 0) [[unlikely]] {
             if constexpr (!INSERT) { bld_v.destroy_value(sv); return {}; }
             set_root(0);
         }
 
-        if (root_skip_bits_v > 0) [[unlikely]] {
-            uint64_t diff = (ik ^ root_prefix_v) & root_prefix_mask();
+        if (root_skip_bytes_v > 0) [[unlikely]] {
+            K diff = (stored ^ root_prefix_v) & root_prefix_mask();
             if (diff) [[unlikely]] {
                 if constexpr (!INSERT) { bld_v.destroy_value(sv); return {}; }
-                int clz = std::countl_zero(diff);
-                uint8_t div_pos = static_cast<uint8_t>(clz / CHAR_BIT);
+                unsigned shift_pos = TOP_SHIFT;
+                unsigned div_pos = 0;
+                while (div_pos < root_skip_bytes_v) {
+                    if (((stored >> shift_pos) & 0xFF) != ((root_prefix_v >> shift_pos) & 0xFF))
+                        break;
+                    shift_pos -= CHAR_BIT;
+                    div_pos++;
+                }
                 reduce_root_skip(div_pos);
             }
         }
 
-        uint64_t old_root_ptr = root_ptr_v;
+        std::uint64_t old_root_ptr = root_ptr_v;
         auto r = OPS::template insert_node<INSERT, ASSIGN>(
-            root_ptr_v, ik, ik << root_skip_bits_v, root_skip_bytes(), sv, bld_v);
+            root_ptr_v, stored, root_dispatch_shift(), sv, bld_v);
         if (r.tagged_ptr != root_ptr_v) [[unlikely]] { root_ptr_v = r.tagged_ptr; mark_root(); }
 
         if (r.inserted) [[likely]] {
             ++size_v;
-            if (root_ptr_v != old_root_ptr) [[unlikely]] {
+            if (size_v == 1) [[unlikely]] {
+                root_prefix_v = stored;
+                set_root(MAX_ROOT_SKIP);
+                normalize_root();
+            } else if (root_ptr_v != old_root_ptr) [[unlikely]] {
                 normalize_root();
                 if (size_v <= COMPACT_MAX && !(root_ptr_v & LEAF_BIT)) [[unlikely]]
                     coalesce_bm_to_leaf();
-                // normalize/coalesce may have reallocated — re-find
-                auto lp = find_entry(key);
+                auto lp = find_entry(stored);
                 return {lp.leaf, lp.pos, true};
             }
             return {r.leaf, r.pos, true};
         }
         bld_v.destroy_value(sv);
-        // Not inserted — r.leaf/r.pos point to the existing entry
         return {r.leaf, r.pos, false};
     }
 
-private:
-
     // ==================================================================
-    // first_descendant_prefix: descend to any leaf, return node[2]
+    // tracked_descent_fwd — for lower/upper bound
     // ==================================================================
 
-    static uint64_t first_descendant_prefix(uint64_t tagged) noexcept {
-        while (!(tagged & LEAF_BIT)) {
-            const uint64_t* node = bm_to_node_const(tagged);
-            auto* hdr = get_header(node);
-            uint8_t sc = hdr->skip();
-            const uint64_t* ch = BO::chain_children(node, sc);
-            tagged = ch[0];
+    template<typename LeafFn>
+    iter_entry_t<K> tracked_descent_fwd(K stored, LeafFn&& leaf_fn) const noexcept {
+        if (size_v == 0) return {};
+
+        K diff = (stored ^ root_prefix_v) & root_prefix_mask();
+        if (diff) {
+            unsigned shift_pos = TOP_SHIFT;
+            for (unsigned i = 0; i < root_skip_bytes_v; ++i) {
+                std::uint8_t sb = static_cast<std::uint8_t>((stored >> shift_pos) & 0xFF);
+                std::uint8_t rb = static_cast<std::uint8_t>((root_prefix_v >> shift_pos) & 0xFF);
+                if (sb != rb) {
+                    if (sb < rb) return edge_entry(dir_t::FWD);
+                    return {};
+                }
+                shift_pos -= CHAR_BIT;
+            }
         }
-        return leaf_prefix(untag_leaf(tagged));
+
+        std::uint64_t ptr = root_ptr_v;
+        unsigned shift = root_dispatch_shift();
+
+        while (!(ptr & LEAF_BIT)) {
+            std::uint64_t* node = bm_to_node(ptr);
+            auto* hdr = get_header(node);
+            std::uint8_t sc = hdr->skip();
+
+            for (std::uint8_t si = 0; si < sc; ++si) {
+                std::uint8_t expected = static_cast<std::uint8_t>((stored >> shift) & 0xFF);
+                std::uint8_t actual = BO::skip_byte(node, si);
+                if (expected != actual) {
+                    if (expected < actual)
+                        return OPS::descend_edge_loop(ptr, dir_t::FWD);
+                    return walk_from_bm(node, dir_t::FWD);
+                }
+                shift -= CHAR_BIT;
+            }
+
+            std::uint8_t ti = static_cast<std::uint8_t>((stored >> shift) & 0xFF);
+            typename BO::child_lookup cl;
+            if (sc > 0) [[unlikely]]
+                cl = BO::chain_lookup(node, sc, ti);
+            else
+                cl = BO::lookup(node, ti);
+
+            if (cl.found) {
+                ptr = cl.child;
+                shift -= CHAR_BIT;
+            } else {
+                std::uint64_t bm_ptr = (sc > 0)
+                    ? static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(
+                        &BO::chain_bitmap(node, sc)))
+                    : BO::node_bm_ptr(node);
+                auto [sib, sib_found] = BO::bm_next_sibling(bm_ptr, ti);
+                if (sib_found)
+                    return OPS::descend_edge_loop(sib, dir_t::FWD);
+                return walk_from_bm(node, dir_t::FWD);
+            }
+        }
+
+        if (ptr & NOT_FOUND_BIT) return {};
+        std::uint64_t* leaf = untag_leaf_mut(ptr);
+        auto result = leaf_fn(leaf, stored);
+        if (result.found) return result;
+        return walk_from_leaf(leaf, dir_t::FWD);
     }
 
     // ==================================================================
-    // normalize_root: enforce invariant —
-    //   leaf root → root_skip_bits_v=0 (prepend root skip bytes into leaf's own skip)
-    //   BM root   → absorb bitmask chains into root_skip_bits_v
+    // normalize_root
     // ==================================================================
 
     void normalize_root() {
         if (root_ptr_v == BO::SENTINEL_TAGGED) return;
 
-        // Leaf root → enforce root_skip_bits_v=0
-        if (root_ptr_v & LEAF_BIT) {
-            if (root_skip_bits_v > 0) {
-                // Leaf returned from do_coalesce at depth=root_skip_bytes().
-                // Prepend root's skip bytes into the leaf's own skip.
-                // O(1): updates header + fn ptrs, no reallocation.
-                // leaf_prefix already has the correct root prefix bytes
-                // (set during init_leaf_fns via ik & safe_prefix_mask).
-                uint64_t* leaf = untag_leaf_mut(root_ptr_v);
-                leaf = OPS::template prepend_skip<KEY_BITS>(
-                    leaf, root_skip_bytes(), leaf_prefix(leaf), bld_v);
-                root_ptr_v = tag_leaf(leaf);
-                set_root(0);
-                mark_root();
-            }
+        // Leaf root → root_skip stays as-is (valid fast-reject filter)
+        if (root_ptr_v & LEAF_BIT)
             return;
-        }
 
-        // BM root → absorb chains if present
-        uint64_t* node = bm_to_node(root_ptr_v);
+        // BM root → absorb chains into root_skip
+        std::uint64_t* node = bm_to_node(root_ptr_v);
         auto* hdr = get_header(node);
-        uint8_t sc = hdr->skip();
+        std::uint8_t sc = hdr->skip();
         if (sc == 0) return;
 
-        uint8_t old_skip = root_skip_bytes();
+        unsigned old_skip = root_skip_bytes_v;
         unsigned nc = hdr->entries();
-        uint64_t desc = BO::chain_descendants(node, sc, nc);
+        std::uint64_t desc = BO::chain_descendants(node, sc, nc);
 
-        root_prefix_v = first_descendant_prefix(root_ptr_v);
+        // Read prefix from first descendant leaf
+        std::uint64_t tagged = root_ptr_v;
+        while (!(tagged & LEAF_BIT)) {
+            std::uint64_t* n = bm_to_node(tagged);
+            auto* h = get_header(n);
+            std::uint8_t s = h->skip();
+            const std::uint64_t* ch = BO::chain_children(n, s);
+            tagged = ch[0];
+        }
+        std::uint64_t* first_leaf = untag_leaf_mut(tagged);
+        auto* first_hdr = get_header(first_leaf);
+        if (first_hdr->is_bitmap())
+            root_prefix_v = BO::read_base_key(first_leaf);
+        else
+            root_prefix_v = CO::keys(first_leaf, COMPACT_HEADER_U64)[0];
 
         const bitmap_256_t& fbm = BO::chain_bitmap(node, sc);
-        const uint64_t* cch = BO::chain_children(node, sc);
+        const std::uint64_t* cch = BO::chain_children(node, sc);
 
-        uint8_t indices[BYTE_VALUES];
-        uint64_t children[BYTE_VALUES];
-        fbm.for_each_set([&](uint8_t idx, int slot) {
+        std::uint8_t indices[BYTE_VALUES];
+        std::uint64_t children[BYTE_VALUES];
+        fbm.for_each_set([&](std::uint8_t idx, int slot) {
             indices[slot] = idx;
             children[slot] = cch[slot];
         });
@@ -654,120 +525,82 @@ private:
         mark_root();
     }
 
-    // coalesce_bm_to_leaf: flatten BM tree to single leaf.
-    // Called when root is BM but size ≤ COMPACT_MAX (invariant violation).
-    // BM tree is implicitly sorted (bitmap order × sorted child COs),
-    // so collection produces sorted output. O(n) single pass.
+    // ==================================================================
+    // coalesce_bm_to_leaf
     // ==================================================================
 
     void coalesce_bm_to_leaf() {
-        OPS::depth_switch(root_skip_bytes(), [&]<int BITS>() {
-            using NK = nk_for_bits_t<BITS>;
-            using VST = typename OPS::VST;
-            uint64_t rep_key = OPS::descend_first_prefix(root_ptr_v);
+        constexpr std::size_t hu = COMPACT_HEADER_U64;
+        std::size_t total_u64 = round_up_u64(CO::size_u64(size_v, hu));
+        std::uint64_t* leaf = bld_v.alloc_node(total_u64, false);
+        auto* lh = get_header(leaf);
+        lh->set_entries(static_cast<std::uint16_t>(size_v));
+        CO::set_capacity(leaf, total_u64);
 
-            uint64_t* leaf;
-            if constexpr (sizeof(NK) == sizeof(uint8_t)) {
-                uint8_t byte_keys[BYTE_VALUES];
-                VST vals_arr[BYTE_VALUES];
-                size_t wi = 0;
-                OPS::template walk_entries_in_order<BITS>(root_ptr_v,
-                    [&](NK s, VST v) {
-                        byte_keys[wi] = static_cast<uint8_t>(s);
-                        vals_arr[wi] = v;
-                        wi++;
-                    });
-                leaf = BO::make_bitmap_leaf(byte_keys, vals_arr,
-                    static_cast<uint32_t>(wi), bld_v);
-            } else {
-                using CO = compact_ops<NK, NORM_V, ALLOC>;
-                constexpr size_t hu = LEAF_HEADER_U64;
-                size_t total_u64 = round_up_u64(CO::size_u64(size_v, hu));
-                leaf = bld_v.alloc_node(total_u64, false);
-                auto* lh = get_header(leaf);
-                lh->set_entries(static_cast<uint16_t>(size_v));
-                CO::set_capacity(leaf, total_u64);
+        K* dk = CO::keys(leaf, hu);
+        std::size_t wi = 0;
 
-                NK* dk = CO::keys(leaf, hu);
-                size_t wi = 0;
-                if constexpr (NVT::IS_BOOL) {
-                    auto bv = CO::bool_vals_mut(leaf);
-                    bv.clear_all(size_v);
-                    OPS::template walk_entries_in_order<BITS>(root_ptr_v,
-                        [&](NK s, VST v) {
-                            dk[wi] = s;
-                            bv.set(wi, v);
-                            wi++;
-                        });
-                } else {
-                    auto* dv = CO::vals_mut(leaf);
-                    OPS::template walk_entries_in_order<BITS>(root_ptr_v,
-                        [&](NK s, VST v) {
-                            dk[wi] = s;
-                            NVT::init_slot(&dv[wi], v);
-                            wi++;
-                        });
-                }
-            }
+        unsigned walk_shift = root_dispatch_shift();
 
-            OPS::template init_leaf_fns<BITS>(leaf, rep_key);
-            OPS::dealloc_subtree_nodes_only(root_ptr_v, root_skip_bytes(), bld_v);
-            root_ptr_v = tag_leaf(leaf);
-        });
+        if constexpr (NVT::IS_BOOL) {
+            auto bv = CO::bool_vals_mut(leaf);
+            bv.clear_all(size_v);
+            OPS::walk_entries_in_order(root_ptr_v, walk_shift,
+                [&](K key, NVST v) {
+                    dk[wi] = key;
+                    bv.set(wi, v);
+                    wi++;
+                });
+        } else {
+            auto* dv = CO::vals_mut(leaf);
+            OPS::walk_entries_in_order(root_ptr_v, walk_shift,
+                [&](K key, NVST v) {
+                    dk[wi] = key;
+                    NVT::init_slot(&dv[wi], v);
+                    wi++;
+                });
+        }
+
+        OPS::dealloc_subtree_nodes_only(root_ptr_v, walk_shift, bld_v);
+        root_ptr_v = tag_leaf(leaf);
         set_root(0);
         mark_root();
     }
 
     // ==================================================================
-    // reduce_root_skip: restructure root when prefix diverges
+    // reduce_root_skip
     // ==================================================================
 
-    void reduce_root_skip(uint8_t div_pos) {
-        uint8_t old_skip = root_skip_bytes();
-        uint8_t remaining_skip = old_skip - div_pos - 1;
+    void reduce_root_skip(unsigned div_pos) {
+        unsigned old_skip = root_skip_bytes_v;
+        unsigned remaining_skip = old_skip - div_pos - 1;
 
-        uint64_t old_subtree;
+        std::uint64_t old_subtree;
         if (remaining_skip > 0) {
             if (root_ptr_v & LEAF_BIT) {
-                // Leaf: prepend_skip takes root_prefix_v directly
-                uint64_t* leaf = untag_leaf_mut(root_ptr_v);
-                auto do_prepend = [&]<int DIVP>() -> uint64_t* {
-                    constexpr int BITS = KEY_BITS - CHAR_BIT * (DIVP + 1);
-                    return OPS::template prepend_skip<BITS>(
-                        leaf, remaining_skip, root_prefix_v, bld_v);
-                };
-                if constexpr (MAX_ROOT_SKIP >= 1) {
-                    switch (div_pos) {
-                    case 0: leaf = do_prepend.template operator()<0>(); break;
-                    case 1: if constexpr (MAX_ROOT_SKIP >= 2) { leaf = do_prepend.template operator()<1>(); break; } [[fallthrough]];
-                    case 2: if constexpr (MAX_ROOT_SKIP >= 3) { leaf = do_prepend.template operator()<2>(); break; } [[fallthrough]];
-                    case 3: if constexpr (MAX_ROOT_SKIP >= 4) { leaf = do_prepend.template operator()<3>(); break; } [[fallthrough]];
-                    case 4: if constexpr (MAX_ROOT_SKIP >= 5) { leaf = do_prepend.template operator()<4>(); break; } [[fallthrough]];
-                    case 5: if constexpr (MAX_ROOT_SKIP >= 6) { leaf = do_prepend.template operator()<5>(); break; } [[fallthrough]];
-                    default: std::unreachable();
-                    }
-                }
-                old_subtree = tag_leaf(leaf);
+                // Compact leaf at root: no skip needed, return directly
+                old_subtree = root_ptr_v;
             } else {
-                // Bitmask: needs raw bytes for wrap_in_chain
-                uint8_t chain_bytes[MAX_SKIP];
-                for (uint8_t i = 0; i < remaining_skip; ++i)
-                    chain_bytes[i] = pfx_byte(root_prefix_v, div_pos + 1 + i);
-                uint64_t* bm_node = bm_to_node(root_ptr_v);
+                std::uint8_t chain_bytes[MAX_SKIP];
+                unsigned prefix_shift = TOP_SHIFT - (div_pos + 1) * CHAR_BIT;
+                for (unsigned i = 0; i < remaining_skip; ++i) {
+                    chain_bytes[i] = static_cast<std::uint8_t>(
+                        (root_prefix_v >> (prefix_shift - i * CHAR_BIT)) & 0xFF);
+                }
+                std::uint64_t* bm_node = bm_to_node(root_ptr_v);
                 old_subtree = BO::wrap_in_chain(bm_node, chain_bytes, remaining_skip, bld_v);
             }
         } else {
             old_subtree = root_ptr_v;
         }
 
-        // Create a new bitmask with single child at the divergence byte
-        uint8_t old_byte = pfx_byte(root_prefix_v, div_pos);
-        uint8_t indices[1] = {old_byte};
-        uint64_t children[1] = {old_subtree};
+        unsigned div_shift = TOP_SHIFT - div_pos * CHAR_BIT;
+        std::uint8_t old_byte = static_cast<std::uint8_t>((root_prefix_v >> div_shift) & 0xFF);
+        std::uint8_t indices[1] = {old_byte};
+        std::uint64_t children[1] = {old_subtree};
         auto* bm_node = BO::make_bitmask(indices, children, 1, bld_v, size_v);
         root_ptr_v = tag_bitmask(bm_node);
 
-        // Update skip
         set_root(div_pos);
         mark_root();
     }
@@ -778,10 +611,15 @@ private:
 
     void remove_all() noexcept {
         if (root_ptr_v == BO::SENTINEL_TAGGED) return;
-        ITER_OPS::remove_subtree(root_ptr_v, root_skip_bytes(), bld_v);
+        OPS::dealloc_subtree(root_ptr_v, root_dispatch_shift(), bld_v);
         root_ptr_v = BO::SENTINEL_TAGGED;
-        root_prefix_v = 0;
+        root_prefix_v = K{};
         set_root(0);
+    }
+
+    static const bitmap_256_t& bitmap_ref(std::uint64_t bm_tagged) noexcept {
+        return *reinterpret_cast<const bitmap_256_t*>(
+            static_cast<std::uintptr_t>(bm_tagged));
     }
 };
 

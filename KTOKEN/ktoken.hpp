@@ -590,9 +590,17 @@ inline void recover_merge_pairs(vocab_data& vd) {
 
 namespace detail {
     inline constexpr std::array<uint8_t, 256> make_b64_table() {
-        std::array<uint8_t,256> t{}; for (auto& v:t) v=255;
-        for (int i=0;i<26;++i){t['A'+i]=i;t['a'+i]=i+26;}
-        for (int i=0;i<10;++i) t['0'+i]=i+52; t['+']=62;t['/']=63; return t;
+        std::array<uint8_t,256> t{};
+        for (auto& v:t) v=255;
+        for (int i=0;i<26;++i){
+               t['A' + i] = static_cast<uint8_t>(i);
+               t['a' + i] = static_cast<uint8_t>(i + 26);
+           }
+        for (int i = 0; i < 10; ++i)
+          t['0' + i] = static_cast<uint8_t>(i + 52);
+        t['+'] = 62;
+        t['/'] = 63;
+        return t;
     }
     inline byte_string b64_decode(std::string_view s) {
         static constexpr auto B64 = make_b64_table();
