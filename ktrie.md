@@ -12,7 +12,7 @@ KNTRIE is specialized for fixed-width integer keys (16-, 32-, and 64-bit), provi
 
 KSTRIE is specialized for variable-length string keys, addressing the challenges of unbounded key length and unpredictable depth. KSTRIE extends prefix compression into the suffix leaves themselves via keysuffix sharing, with leaf capacity governed by a compressed suffix byte budget.
 
-Benchmarks demonstrate that across all operations, both KNTRIE and KSTRIE are competitive with `std::unordered_map` while providing full ordering, and consistently outperform `std::map`. By exploiting prefix compression, KNTRIE and KSTRIE typically occupy a third or less of the space of `std::map` and `std::unordered_map` — KNTRIE achieves 12–16 bytes per entry for `uint64_t` keys with `int32_t` values, compared to ~48 bytes for `std::unordered_map` and ~64 bytes for `std::map`. For dense key distributions that reach bitmap depth, KNTRIE's per-entry cost drops well below the 12 bytes of raw key-value data, as bitmap leaves encode key presence in a single bit with no per-entry key storage.
+Benchmarks demonstrate that across all operations, both KNTRIE and KSTRIE are competitive with `std::unordered_map` while providing full ordering, and consistently outperform `std::map`. By exploiting prefix compression, KNTRIE and KSTRIE typically occupy a third or less of the space of `std::map` and `std::unordered_map` — KNTRIE uses 12–20 bytes per entry for `uint64_t` keys with `int32_t` values under random keys (typically 14–16 at scale), compared to ~48 bytes for `std::unordered_map` and ~64 bytes for `std::map`. For dense key distributions that reach bitmap depth, KNTRIE drops to 6.2 bytes per entry — roughly half the 12 bytes of raw key-value data — as bitmap leaves encode key presence in a single bit with no per-entry key storage.
 
 **Keywords:** trie, B-tree, ordered associative container, prefix/suffix decomposition, keysuffix sharing, cache locality, bitmap indexing, branchless search, variable-length keys
 
@@ -476,7 +476,7 @@ block
 
 The KTRIE combines these two inheritances. Each key is decomposed into three logical regions — a shared PREFIX absorbed into a single comparison, one or more BRANCH levels that fan out via bitmap-compressed dispatch, and a SUFFIX region collected into a B-tree-style flat sorted compact node. Branch nodes replace the sparse trie nodes: a bitmap records which of the 256 possible children exist, and child pointers are packed into a dense array indexed by popcount. Compact nodes replace the deep leaf chains: rather than branching all the way to individual entries, the KTRIE collects remaining suffixes into contiguous sorted arrays and searches them with binary search. The boundaries between prefix, branch, and suffix adapt dynamically to the data — dense key ranges branch deeply, sparse ranges are absorbed into a single compact node.
 
-The same key sets are revisited in §3.2 (Figure 5) and §3.3 (Figure 6), showing how the KTRIE compresses them: branch nodes contain only the children that exist (bitmap-compressed), and compact nodes hold sorted suffix arrays in a single allocation.
+The same key sets are revisited in §3.2 (Figure 9) and §3.3 (Figure 13), showing how the KTRIE compresses them: branch nodes contain only the children that exist (bitmap-compressed), and compact nodes hold sorted suffix arrays in a single allocation.
 
 The result is an ordered associative container that approaches hash-table lookup speed while providing full key ordering, range queries, and prefix operations, with a memory footprint typically one-third that of standard alternatives through prefix compression and contiguous suffix storage.
 
@@ -528,7 +528,7 @@ The HAT-trie's leaves are unordered. Iterating in sorted order requires sorting 
 
 *Prefix queries.* The KTRIE and ART support structural prefix descent: navigate to the prefix point in the trie, then collect the subtree below. The KTRIE additionally supports prefix_split (O(1) subtree steal at branch boundaries) and prefix_copy (structural clone). HAT-trie can descend to the prefix point but must then scan unordered hash containers. Hash tables cannot perform prefix queries at all. These operations are described in §5.2; their performance is characterized analytically rather than benchmarked.
 
-*Memory.* The KTRIE compresses shared prefixes (via skip) and shared suffixes (via keysuffix sharing in KSTRIE). ART compresses prefixes via path compression but stores each key path independently. Hash tables store the full key per entry plus bucket overhead. `std::map` adds ~64 bytes of per-node structural overhead. KTRIE benchmarks show 12–18 bytes per entry for `uint64_t` keys with `int32_t` values, compared to 48–64 for `std::unordered_map` and 64 for `std::map`.
+*Memory.* The KTRIE compresses shared prefixes (via skip) and shared suffixes (via keysuffix sharing in KSTRIE). ART compresses prefixes via path compression but stores each key path independently. Hash tables store the full key per entry plus bucket overhead. `std::map` adds ~64 bytes of per-node structural overhead. KTRIE benchmarks show 12–20 bytes per entry for random `uint64_t` keys with `int32_t` values (typically 14–16 at scale), dropping to 6.2 bytes for sequential keys via bitmap leaves — compared to 48–64 for `std::unordered_map` and 64 for `std::map`.
 
 *Write performance.* Hash tables and HAT-trie achieve amortized O(1) insert. The KTRIE's insert is O(L + log C) amortized, with O(L + C) worst case when a compact node overflows and splits. The memmove cost within compact nodes (O(C) to open or close a gap) is the primary write-path expense. The KTRIE is optimized for read-heavy workloads where the compact sorted layout pays back on every subsequent lookup and iteration.
 
@@ -564,11 +564,85 @@ The SUFFIX is the remaining portion of the key after all branch levels have been
 
 The boundaries between PREFIX, BRANCH, and SUFFIX are not fixed at compile time. They are determined per-subtree by the data. A subtree where 1000 keys share the same top four bytes uses one prefix node instead of four branch levels. A subtree small enough to fit in a single compact node skips branching entirely. As entries are added or removed, the structure adapts: compact nodes overflow and split into branch subtrees, and branch subtrees coalesce back into compact nodes when the entry count drops.
 
+**Figure 4: Key decomposition** — the string key "HELPER" decomposed into PREFIX, BRANCH, and SUFFIX regions within a KTRIE containing HELLO, HELP, and HELPER. The prefix "HEL" is shared by all three keys and captured in skip comparisons (root skip "H" + branch skip "EL"). One branch byte dispatches through a bitmask node. The suffix "ER" is stored in a compact leaf.
+
+```mermaid
+block
+  columns 10
+
+  space
+  block:key_title("key = H E L P E R"):8
+    space
+  end
+  space
+  k0["H"] k1["E"] k2["L"] k3["P"] k4["E"] k5["R"] space space space space
+
+  space
+  block:decomp("decomposition"):8
+    space
+  end
+  space
+  p0["H"] p1["E"] p2["L"] b0["P"] s0["E"] s1["R"] space space space space
+
+  space
+  block:labels("region labels"):8
+    space
+  end
+  space
+  block:pfx_lbl["PREFIX — skip"]:3
+    space
+  end
+  block:br_lbl["BRANCH"]:1
+    space
+  end
+  block:sfx_lbl["SUFFIX — compact leaf"]:2
+    space
+  end
+  space space space space
+
+  space
+  block:structure("KTRIE structure"):8
+    space
+  end
+  space
+  block:skip_node["skip comparison: HEL (one comparison)"]:3
+    space
+  end
+  block:bm_node["bitmask dispatch: {L, P}"]:1
+    space
+  end
+  block:leaf_node["compact leaf: sorted suffixes"]:2
+    space
+  end
+  space space space space
+
+  style k0 fill:#836c12,color:#fff,stroke:#e67e22
+  style k1 fill:#836c12,color:#fff,stroke:#e67e22
+  style k2 fill:#836c12,color:#fff,stroke:#e67e22
+  style k3 fill:#e67e22,color:#fff,stroke:#d35400
+  style k4 fill:#3498db,color:#fff,stroke:#2980b9
+  style k5 fill:#3498db,color:#fff,stroke:#2980b9
+
+  style p0 fill:#836c12,color:#fff,stroke:#e67e22
+  style p1 fill:#836c12,color:#fff,stroke:#e67e22
+  style p2 fill:#836c12,color:#fff,stroke:#e67e22
+  style b0 fill:#e67e22,color:#fff,stroke:#d35400
+  style s0 fill:#3498db,color:#fff,stroke:#2980b9
+  style s1 fill:#3498db,color:#fff,stroke:#2980b9
+
+  style pfx_lbl fill:#836c12,color:#fff,stroke:#e67e22
+  style br_lbl fill:#e67e22,color:#fff,stroke:#d35400
+  style sfx_lbl fill:#3498db,color:#fff,stroke:#2980b9
+  style skip_node fill:#836c12,color:#fff,stroke:#e67e22
+  style bm_node fill:#e67e22,color:#fff,stroke:#d35400
+  style leaf_node fill:#3498db,color:#fff,stroke:#2980b9
+```
+
 **KNTRIE key representation.** All key types — `uint16_t`, `int32_t`, `uint64_t`, signed or unsigned — are transformed into a stored representation of the same width before any operation. The stored type is `std::make_unsigned_t<KEY>`: a `uint64_t` key stores as `uint64_t`, a `int32_t` key stores as `uint32_t`. Signed integers require a sign-bit flip (`key ^= 1 << (key_bits - 1)`) to convert two's complement ordering to unsigned ordering, mapping `INT_MIN → 0` and `INT_MAX → UINT_MAX`. Unsigned integers store as-is.
 
 Byte extraction during descent uses a running shift counter: at each branch level, the dispatch byte is `(stored >> shift) & 0xFF`, where shift starts at the most significant byte position and decrements by 8 at each level. For `uint64_t`, shift starts at 56 (byte 0 at bits 63–56), for `uint32_t` at 24, for `uint16_t` at 8. The maximum depth is bounded by key width: 2 levels for `uint16_t`, 4 for `uint32_t`, 8 for `uint64_t`.
 
-Compact nodes store the full stored key at every depth. A `uint64_t` entry stores 8 bytes regardless of how many bytes the branch structure has already consumed. This eliminates suffix extraction, key reconstruction, and depth-dependent type specialization — the key read from a compact node is always the complete stored representation. The trade-off is wider per-entry key storage at intermediate depths; this is offset by minimal node headers (16 bytes) and faster iteration, since advancing through a compact node reads the next key in one load with no reconstruction.
+Compact nodes store the full stored key at every depth. A `uint64_t` entry stores 8 bytes regardless of how many bytes the branch structure has already consumed. All operations use a single key type at all depths, and the key read from a compact node is always the complete stored representation. The trade-off is wider per-entry key storage at intermediate depths; this is offset by minimal node headers (16 bytes) and faster iteration, since advancing through a compact node reads the next key in one load.
 
 **KSTRIE key representation.** String keys are raw byte sequences. Each byte is passed through a character map — a compile-time constant `std::array<uint8_t, 256>` — before dispatch or storage. The default identity map preserves raw byte ordering. A case-insensitive map (e.g., `upper_char_map`) maps both `'a'` and `'A'` to the same value, making lookups case-insensitive. The map is a template parameter, resolved entirely at compile time with no runtime dispatch cost.
 
@@ -590,9 +664,9 @@ The three dispatch modes differ only in the final adjustment after this shared c
 
 - **BRANCHLESS** (find path): `slot &= -int(sign_bit)` — masks to 0 on miss (sentinel at slot 0), passes through the 1-based rank on hit.
 - **FAST_EXIT** (insert, erase, iteration): checks the sign bit first, returns -1 on miss. On hit, subtracts 1 for a 0-based slot index.
-- **UNFILTERED** (insert position): returns the raw popcount. If the target bit is set, the caller subtracts 1. If not set (inserting a new child), the popcount is already the correct insert position.
+- **UNFILTERED** (insert position): returns the raw popcount minus the presence bit. If the target bit is set, the subtraction yields the 0-based index of the existing entry. If not set (inserting a new child), the popcount is already the correct insert position.
 
-**Figure 9a: Dispatch — HIT (idx=5).** Bitmap {1, 3, 5, 7}, shift left by 2. Sign bit = 1 (green) → target bit found.
+**Figure 5: Dispatch — HIT (idx=5).** Bitmap {1, 3, 5, 7}, shift left by 2. Sign bit = 1 (green) → target bit found.
 
 ```mermaid
 block
@@ -699,7 +773,7 @@ block
   style muf fill:#3498db,color:#fff,stroke:#2980b9
 ```
 
-**Figure 9b: Dispatch — MISS (idx=4).** Same bitmap, shift left by 3. Sign bit = 0 (red) → target bit absent.
+**Figure 6: Dispatch — MISS (idx=4).** Same bitmap, shift left by 3. Sign bit = 0 (red) → target bit absent.
 
 ```mermaid
 block
@@ -805,9 +879,9 @@ block
 
 Hit and miss execute the same instruction sequence — no branch. The `& -int(found)` mask zeros the result on miss, routing to slot 0 (sentinel). On hit, `-int(true)` is all-ones, passing the rank through unchanged.
 
-**Scanning (find_next_set, find_prev_set).** To find the next occupied child after a given byte, mask off bits below the starting position and find the lowest set bit in the result via `countr_zero`. If the current word is exhausted, advance to the next word. The reverse operation masks off bits above the starting position and finds the highest set bit via `63 - countl_zero`. These scans drive iterator advancement: when a leaf is exhausted, the iterator walks to the parent branch node and scans the bitmap for the next (or previous) sibling.
+**Scanning (find_next_set, find_prev_set).** To find the next occupied child after a given byte, the position is incremented by one, then all bits at and below the original position are masked off; `countr_zero` finds the lowest survivor. If the current word is exhausted, advance to the next word. The reverse operation masks off bits above the starting position and finds the highest set bit via `63 - countl_zero`. These scans drive iterator advancement: when a leaf is exhausted, the iterator walks to the parent branch node and scans the bitmap for the next (or previous) sibling.
 
-**Figure 9c: find_next_set(4)** — mask off bits below 4, find lowest survivor.
+**Figure 7: find_next_set(4)** — mask off bits 0–4, find lowest survivor.
 
 ```mermaid
 block
@@ -827,11 +901,11 @@ block
   block:SMASK
     columns 8
     space
-    block:smask_lbl["mask = ~0 << 4"]:6
+    block:smask_lbl["mask = ~0 << 5"]:6
       space
     end
     space
-    sm7["1"] sm6["1"] sm5["1"] sm4["1"] sm3["0"] sm2["0"] sm1["0"] sm0["0"]
+    sm7["1"] sm6["1"] sm5["1"] sm4["0"] sm3["0"] sm2["0"] sm1["0"] sm0["0"]
   end
 
   block:SAND
@@ -861,7 +935,7 @@ block
   style sm7 fill:#836c12,color:#fff,stroke:#e67e22
   style sm6 fill:#836c12,color:#fff,stroke:#e67e22
   style sm5 fill:#836c12,color:#fff,stroke:#e67e22
-  style sm4 fill:#836c12,color:#fff,stroke:#e67e22
+  style sm4 fill:#ccc,color:#666,stroke:#aaa
   style sm3 fill:#ccc,color:#666,stroke:#aaa
   style sm2 fill:#ccc,color:#666,stroke:#aaa
   style sm1 fill:#ccc,color:#666,stroke:#aaa
@@ -879,7 +953,7 @@ block
   style sres fill:#3498db,color:#fff,stroke:#2980b9
 ```
 
-**Figure 9d: find_prev_set(4)** — mask off bits above 4, find highest survivor.
+**Figure 8: find_prev_set(4)** — mask off bits above 4, find highest survivor.
 
 ```mermaid
 block
@@ -959,6 +1033,32 @@ The bitmap operations combine into three named dispatch modes, selected at compi
 
 BRANCHLESS mode is used on the find path — the hot path. It does not check the presence bit with a branch. The target bit is shifted to the sign position, the popcount gives a 1-based rank, and the result is masked to zero on miss. A miss produces slot 0, which holds the sentinel. The find loop follows the sentinel pointer and detects the miss downstream. No conditional branch exists at the bitmap level. This matters because the find path executes millions of times per second, and a data-dependent branch at every level would stall the pipeline on unpredictable key patterns.
 
+```cpp
+// Bitmap slot lookup: three compile-time modes for different callers.
+template<slot_mode MODE>
+int find_slot(std::uint8_t index) const noexcept {
+    const int w = index >> U64_BIT_SHIFT, b = index & U64_BITS_MASK;
+    std::uint64_t before = words[w] << (U64_BITS_MASK - b);
+    if constexpr (MODE == slot_mode::FAST_EXIT) {
+        if (!tst_sign(before)) [[unlikely]] return -1;
+    }
+
+    int slot = std::popcount(before);
+    slot += std::popcount(words[0]) & -int(w > 0);
+    slot += std::popcount(words[1]) & -int(w > 1);
+    slot += std::popcount(words[2]) & -int(w > 2);
+
+    if constexpr (MODE == slot_mode::BRANCHLESS)
+        slot &= -int(tst_sign(before));
+    else if constexpr (MODE == slot_mode::FAST_EXIT)
+        slot--;
+    else
+        slot -= int(tst_sign(before));
+
+    return slot;
+}
+```
+
 FAST_EXIT mode is used by insert, erase, and iteration. It checks the presence bit first. If the child is absent, it returns -1 immediately. If present, the popcount minus 1 gives the 0-based index. The branch is acceptable here because the insert path typically expects the child to be absent (creating a new entry), and the erase path expects it to be present (removing an existing entry). The branch predictor handles these well.
 
 UNFILTERED mode is used only when computing the insertion position for a new child. It returns the rank unconditionally, without checking presence. This gives the correct position in the dense array where the new child pointer should be inserted.
@@ -973,7 +1073,7 @@ The find loop is a tight `while (!(ptr & LEAF_BIT))` loop. Each iteration tests 
 
 KSTRIE does not use tagged pointers. The node type is stored in the node's own header via a flags field: bit 0 indicates a bitmask node, bit 2 indicates the presence of a skip prefix. A header with all flags zero is a compact node with no skip. Type dispatch reads the header after following the pointer — one extra memory access compared to KNTRIE's tag-in-pointer scheme. This design avoids the address-space assumptions that tagged pointers require and simplifies the pointer representation: a child pointer is a plain `uint64_t*`.
 
-**Figure 5: KSTRIE bitmask nodes** — the same HELLO/HELP/HELPER keys after the compact node has overflowed and split. Root bitmask dispatches on H, second bitmask has skip "EL" and dispatches on L and P. Two compact leaves hold the remaining suffixes.
+**Figure 9: KSTRIE bitmask nodes** — the same HELLO/HELP/HELPER keys after the compact node has overflowed and split. Root bitmask dispatches on H, second bitmask has skip "EL" and dispatches on L and P. Two compact leaves hold the remaining suffixes.
 
 ```mermaid
 block
@@ -1012,7 +1112,7 @@ block
       block:bm0tt_lbl["total_tail"]:1
         space
       end
-      bm0_tt["6"]
+      bm0_tt["10"]
     end
 
     block:BM0_BMP
@@ -1072,7 +1172,7 @@ block
       block:bm1tt_lbl["total_tail"]:1
         space
       end
-      bm1_tt["3"]
+      bm1_tt["10"]
     end
 
     block:BM1_BMP
@@ -1221,7 +1321,7 @@ block
   style ckp_V1 fill:#2ecc71,color:#fff,stroke:#27ae60
 ```
 
-**Figure 5b: KSTRIE bitmask reconstruction** — key reconstruction walking dispatch bytes, skip bytes, and leaf suffixes.
+**Figure 10: KSTRIE bitmask reconstruction** — key reconstruction walking dispatch bytes, skip bytes, and leaf suffixes.
 
 ```mermaid
 block
@@ -1305,9 +1405,65 @@ block
   style rlks2 fill:#e74c3c,color:#fff,stroke:#c0392b
 ```
 
-**KNTRIE branch node layout.** The allocation begins with a 2-u64 header: `node[0]` is the packed 8-byte node header (§5.1), and `node[1]` is the parent pointer for bidirectional iteration. The bitmap follows, then the miss pointer (sentinel) at slot 0, then the dense child array, and finally a descendant count at the end of the allocation. The descendant count holds the exact total entry count for the subtree and drives coalesce decisions on erase. Embed chains for skip prefix compression are described in §3.4.
+**KNTRIE branch node layout.** The allocation begins with a 2-u64 header: `node[0]` is the packed 8-byte node header (§5.1), and `node[1]` is the parent pointer for bidirectional iteration. The bitmap follows, then the miss pointer (sentinel) at slot 0, then the dense child array, and finally a descendant count at the end of the allocation. The descendant count holds the exact total entry count for the subtree and drives coalesce decisions on erase. Embed chains for skip prefix compression are described in §3.4. The tagged internal pointer targets `node[2]` (the bitmap start), so the find loop uses the pointer as-is with no header adjustment.
 
-**Figure 7: KNTRIE bitmask nodes** — the same four u32 keys from Figure 2 with two levels of bitmask dispatch. Byte 0 splits {00, FE}. Byte 1 splits the 00-subtree into {00, 04}. Sentinel miss path shown with "X" edges to NOT FOUND. Suffix type narrows from u32 → u16 at depth 2.
+**Figure 11: KNTRIE branch node layout** — without embed chains (skip=0, N children) and with embed chains (skip=S, N children). Each embed block is 6 u64s: bitmap(4) + sentinel(1) + child pointer(1). The find loop traverses embed bitmaps transparently.
+
+```mermaid
+block
+  columns 1
+
+  block:SIMPLE
+    columns 8
+    space
+    block:simple_title("branch node — skip=0, N children"):6
+      space
+    end
+    space
+    s_hdr["hdr (1)"] s_par["parent (1)"] s_bmp["bitmap (4)"] s_sent["sentinel (1)"] s_ch["children (N)"] s_desc["desc (1)"] space space
+  end
+
+  block:EMBED
+    columns 8
+    space
+    block:embed_title("branch node — skip=S, N children"):6
+      space
+    end
+    space
+    e_hdr["hdr (1)"] e_par["parent (1)"] e_emb["embed₀..ₛ₋₁ (6×S)"] e_bmp["bitmap (4)"] e_sent["sentinel (1)"] e_ch["children (N)"] e_desc["desc (1)"] space
+  end
+
+  block:EBLK
+    columns 6
+    space
+    block:eblk_title("each embed block — 6 u64s"):4
+      space
+    end
+    space
+    eb_bmp["bitmap (4)"] eb_sent["sentinel (1)"] eb_child["child ptr (1)"] space space space
+  end
+
+  style s_hdr fill:#555,color:#fff,stroke:#333
+  style s_par fill:#555,color:#fff,stroke:#333
+  style s_bmp fill:#e67e22,color:#fff,stroke:#d35400
+  style s_sent fill:#888,color:#fff,stroke:#666
+  style s_ch fill:#3498db,color:#fff,stroke:#2980b9
+  style s_desc fill:#836c12,color:#fff,stroke:#e67e22
+
+  style e_hdr fill:#555,color:#fff,stroke:#333
+  style e_par fill:#555,color:#fff,stroke:#333
+  style e_emb fill:#9b59b6,color:#fff,stroke:#8e44ad
+  style e_bmp fill:#e67e22,color:#fff,stroke:#d35400
+  style e_sent fill:#888,color:#fff,stroke:#666
+  style e_ch fill:#3498db,color:#fff,stroke:#2980b9
+  style e_desc fill:#836c12,color:#fff,stroke:#e67e22
+
+  style eb_bmp fill:#9b59b6,color:#fff,stroke:#8e44ad
+  style eb_sent fill:#888,color:#fff,stroke:#666
+  style eb_child fill:#9b59b6,color:#fff,stroke:#8e44ad
+```
+
+**Figure 12: KNTRIE bitmask nodes** — the same four u32 keys from Figure 2 with two levels of bitmask dispatch. Byte 0 splits {00, FE}. Byte 1 splits the 00-subtree into {00, 04}. Sentinel miss path shown with "X" edges to NOT FOUND. Compact leaves store the full u32 stored key regardless of depth.
 
 ```mermaid
 block
@@ -1345,11 +1501,11 @@ block
     block:CK_FE
       columns 4
       space
-      block:ckfe_title("compact via FE — 1 entry, depth 1"):2
+      block:ckfe_title("compact via FE — 1 entry"):2
         space
       end
       space
-      ckfe_k0["0xEDFACE"] space ckfe_V0[["HAMBURGER"]] space 
+      ckfe_k0["0xFEEDFACE"] space ckfe_V0[["HAMBURGER"]] space 
     end
 
     space:2
@@ -1357,21 +1513,21 @@ block
     block:CK_00
       columns 4
       space
-      block:ck00_title("compact via 00→00 — 2 entries, suffix: u16"):2
+      block:ck00_title("compact via 00→00 — 2 entries"):2
         space
       end
       space
-      ck00_k0["0x0000"] ck00_k1["0x0004"] ck00_V0[["NULL"]] ck00_V1[["FOUR"]]
+      ck00_k0["0x00000000"] ck00_k1["0x00000004"] ck00_V0[["NULL"]] ck00_V1[["FOUR"]]
     end
 
     block:CK_04
       columns 4
       space
-      block:ck04_title("compact via 00→04 — 1 entry, suffix: u16"):2
+      block:ck04_title("compact via 00→04 — 1 entry"):2
         space
       end
       space
-      ck04_k0["0x01BC"] space ck04_V0[["POTITUS"]] space
+      ck04_k0["0x000401BC"] space ck04_V0[["POTITUS"]] space
     end
 
   ROOT --> BM0
@@ -1410,7 +1566,7 @@ block
 
 **KSTRIE branch node layout.** The allocation begins with an 8-byte header, followed by the parent pointer, a `total_tail` field, the bitmap, the sentinel, the dense child array, an EOS child slot, and skip bytes at the end. The EOS child slot handles keys that terminate at this branch point — for example, `"HELP"` exists alongside `"HELPER"`. When a lookup exhausts its key bytes at a branch node, it follows the EOS child rather than dispatching on a byte that does not exist.
 
-The `total_tail` field estimates the byte cost of collapsing the entire subtree back into a single compact node. The estimate accounts for three components per entry in the subtree: the keysuffix bytes stored in compact leaf children, one dispatch byte per entry for the byte consumed at this bitmask level, and, for each nested branch node with skip length S, an additional S bytes per entry passing through it. This total is maintained incrementally — insert propagates the delta upward, erase subtracts it — and the coalesce check is simply `total_tail <= COMPACT_KEYSUFFIX_LIMIT`. The estimate always overestimates: it counts each entry's contribution independently without accounting for keysuffix sharing that would reduce the actual collapsed size. This means coalesce may trigger late (missing some compression opportunities) but never too early (never producing an oversized compact node). This conservative direction avoids trial collapse: without it, the erase path would need to walk the entire subtree to determine whether it fits in a single compact node, which was a significant performance problem before this heuristic was introduced.
+The `total_tail` field estimates the byte cost of collapsing the entire subtree back into a single compact node. The estimate is computed recursively: for each compact child c, the contribution is `c.keysuffix_used + c.count × (1 + c.skip_bytes)` — the child's existing keysuffix tail bytes, plus one dispatch byte per entry (for the byte consumed to reach that child), plus the child's skip bytes per entry. For each nested bitmask child m, the contribution is `m.total_tail`. The sum of all children's contributions is then increased by `N × this_node.skip_len`, where N is the total entry count across all children. This total is maintained incrementally — insert propagates the delta upward, erase subtracts it — and the coalesce check is simply `total_tail <= COMPACT_KEYSUFFIX_LIMIT`. The estimate always overestimates: it counts each entry's contribution independently without accounting for keysuffix sharing that would reduce the actual collapsed size. This means coalesce may trigger late (missing some compression opportunities) but never too early (never producing an oversized compact node). This conservative direction avoids trial collapse: without it, the erase path would need to walk the entire subtree to determine whether it fits in a single compact node.
 
 #### 3.3 Compact Nodes
 
@@ -1418,7 +1574,7 @@ A compact node stores entries in a flat sorted array within a single contiguous 
 
 Search within a compact node uses binary search. The transition between compact nodes and branch nodes is governed by a threshold: when a compact node's content exceeds the threshold, it splits into a branch node with compact children; when a branch subtree's total content drops below the threshold, it coalesces back into a single compact node.
 
-**Figure 6: KSTRIE compact node** — the same HELLO/HELP/HELPER keys stored in a single compact node (the small-N case). Skip "HEL" captures the shared prefix. Three entries with parallel arrays L[], F[], O[] and a shared keysuffix region.
+**Figure 13: KSTRIE compact node** — the same HELLO/HELP/HELPER keys stored in a single compact node (the small-N case). Skip "HEL" captures the shared prefix. Three entries with parallel arrays L[], F[], O[] and a shared keysuffix region. (Logical layout — skip shown first for readability; the memory layout in §3.3 places skip bytes between O[] and the keysuffix region.)
 
 ```mermaid
 block
@@ -1508,7 +1664,7 @@ block
   style V2 fill:#2ecc71,color:#fff,stroke:#27ae60
 ```
 
-**Figure 6b: KSTRIE compact node reconstruction** — key reconstruction walking skip bytes, F[], and keysuffix region. O[1] = O[2] = 1 because HELP shares HELPER's offset — L=1 means zero tail bytes are read.
+**Figure 14: KSTRIE compact node reconstruction** — key reconstruction walking skip bytes, F[], and keysuffix region. O[1] = O[2] = 1 because HELP shares HELPER's offset — L=1 means zero tail bytes are read.
 
 ```mermaid
 block
@@ -1557,7 +1713,7 @@ block
     end
     ro00["H"] ro01["E"] ro02["L"] ro03["L"] ro04["O"] space
     ro10["H"] ro11["E"] ro12["L"] ro13["P"] space:2
-    ro20["H"] ro21["E"] ro22["L"] ro23["P"] ro024["E"] ro25["R"]
+    ro20["H"] ro21["E"] ro22["L"] ro23["P"] ro24["E"] ro25["R"]
   end
 
   block:NOTE
@@ -1588,7 +1744,7 @@ block
   style rk2_1 fill:#e74c3c,color:#fff,stroke:#c0392b
 ```
 
-**Figure 8: KNTRIE compact node** — the same four u32 keys stored in a single compact node (the small-N case). No skip prefix (byte 0 diverges: 0x00 vs 0xFE). Sorted array of u32 suffix/value pairs. Lookup is a branchless binary search: `bit_width(3) = 2`, count2 = 2, diff = 2, one diff comparison + one loop iteration.
+**Figure 15: KNTRIE compact node** — the same four u32 keys stored in a single compact node (the small-N case). No skip prefix (byte 0 diverges: 0x00 vs 0xFE). Sorted array of full u32 key/value pairs. Lookup is a branchless binary search: `bit_width(3) = 2`, count2 = 2, diff = 2, one diff comparison + one loop iteration.
 
 ```mermaid
 block
@@ -1631,7 +1787,29 @@ block
 
 The search handles arbitrary entry counts without requiring power-of-two padding. The algorithm computes `bit_width((count - 1) | 1u)` to find the largest power of two strictly less than `count`. The difference between `count` and that power of two determines a "diff" offset. A single branchless comparison at `base + diff` either advances the base pointer or leaves it unchanged, reducing the remaining search space to an exact power of two. The main loop then executes a standard branchless binary search, halving the count at each step via a conditional move. The diff step's comparison (`*diff_val <= key`) mirrors the loop body's comparison exactly, producing uniform codegen. The `| 1u` in the bit_width argument handles the count=1 edge case branchlessly — it folds into the `lzcnt` dependency chain with zero additional cost on x86. For exact powers of two (4, 8, 16, ...), the diff step performs one iteration's worth of meaningful work, saving one loop iteration.
 
-**Figure 10: Adaptive search walkthrough** — 20 entries, searching for position 14. Green = decision point. Purple = chosen range. Grey = eliminated. Edges trace position 14 through the entire search.
+```cpp
+// Branchless adaptive binary search.  Precondition: count > 0.
+// Do not condense: the separate variables and = assignments (not +=) are
+// deliberate — the compiler is sensitive to the exact expression structure.
+static const K* find_base(const K* base, unsigned count, K key) noexcept {
+    int bw = std::bit_width((count - 1) | 1u);
+    unsigned count2 = 1u << (bw - 1);
+    unsigned diff = count - count2;
+    const K* diff_val = base + diff;
+    bool is_diff = *diff_val <= key;
+    base = is_diff ? diff_val : base;
+    count = count2;
+    do {
+        count >>= 1;
+        const K* hi_val = base + count;
+        bool is_hi = (*hi_val <= key);
+        base = is_hi ? hi_val : base;
+    } while (count > 1);
+    return base;
+}
+```
+
+**Figure 16: Adaptive search walkthrough** — 20 entries, searching for position 14. Green = decision point. Purple = chosen range. Grey = eliminated. Edges trace position 14 through the entire search.
 
 ```mermaid
 block
@@ -1744,15 +1922,80 @@ block
 
 A variant `find_base_first` uses strict `<` instead of `<=` to find the first occurrence of a key (lower bound), used by iterator operations.
 
+```cpp
+static const K* find_base_first(const K* base, unsigned count, K key) noexcept {
+    int bw=std::bit_width((count - 1) | 1u);
+    unsigned count2=1u << (bw-1);
+    unsigned diff=count - count2;
+    const K* diff_val=base+diff;
+    bool is_diff = *diff_val < key;
+    base = is_diff ? diff_val : base;
+    count=count2;
+    do {
+        count >>= 1;
+        const K* hi_val=base+count;
+        bool is_hi=(*hi_val < key);
+        base = is_hi ? hi_val : base;
+    } while (count > 1);
+    return base;
+}
+```
+
 The compact node capacity is governed by COMPACT_MAX = 1024. This threshold balances three concerns: write performance (memmove cost is O(C) per insert/erase, so lower thresholds reduce worst-case write latency), header overhead at split (when a compact node overflows, its entries are distributed across children; the per-child header cost is amortized over more entries at higher thresholds), and binary search depth (log₂(1024) ≈ 10 comparisons). At 1024 entries with 16-byte compact headers, the header overhead at split is approximately 4 bytes per entry — comparable to tree-node overhead in balanced BSTs. On erase, when a branch subtree's descendant count drops to COMPACT_MAX or below, the entire subtree is collected into a single compact node and the branch structure is deallocated.
 
-When all branch levels have been consumed and only the final byte of the key remains, a specialized Bitmap256 leaf is used instead of a compact sorted array. Bitmap leaves are created during split when the child shift reaches zero — that is, when the branch structure has consumed all bytes except the last. Since all 256 possible byte values can be represented in a 256-bit bitmap, the key array is eliminated entirely — the bitmap *is* the key storage. Lookup reduces to a single bit test plus a popcount for the value slot index. The bitmap leaf header stores a base key (the stored key with the last byte zeroed) for key reconstruction during iteration. For `VALUE = bool`, the values are stored as a second 256-bit bitmap, giving the tightest possible representation: 14 `uint64_t`s for up to 256 boolean key/value pairs.
+When all branch levels have been consumed and only the final byte of the key remains, a specialized Bitmap256 leaf is used instead of a compact sorted array. Bitmap leaves are created during split when the child shift reaches zero — that is, when the branch structure has consumed all bytes except the last. Since all 256 possible byte values can be represented in a 256-bit bitmap, the key array is eliminated entirely — the bitmap *is* the key storage. Lookup reduces to a single bit test plus a popcount for the value slot index. The bitmap leaf header stores a base key (the stored key with the last byte zeroed) for key reconstruction during iteration. For `VALUE = bool`, the values are stored as a second 256-bit bitmap, giving the tightest possible representation: 11 `uint64_t`s for up to 256 boolean key/value pairs (3 header + 4 presence bitmap + 4 value bitmap).
 
 **KSTRIE compact nodes.** Each entry's suffix is a variable-length byte sequence, stored across three parallel arrays and a shared keysuffix region. The arrays are: L[] (suffix length, `uint8_t`), F[] (first byte of the suffix, `uint8_t`), and O[] (byte offset into the keysuffix region, `uint16_t`). Entries are maintained in lexicographic order. The keysuffix region stores the tail bytes of each suffix (all bytes after the first), packed contiguously. A compact node prefix structure (ck_prefix) at `node[1]` records the capacity, current keysuffix usage, skip data offset, and parent byte.
 
-Search in a KSTRIE compact node exploits the parallel array structure to minimize string comparisons. A binary search on F[] narrows the candidate set to entries sharing the same first byte — all other entries are eliminated without touching the keysuffix region. Among matching-F entries, length mismatches (L[] comparison) resolve without memcmp. Only entries with matching first byte and matching length require a memcmp into the keysuffix region via the O[] offset. In practice, for a node with many entries, F[] eliminates the vast majority, and the number of actual string comparisons is small.
+```
+KSTRIE compact node layout:
+[header (1 u64)][ck_prefix (1 u64)][L₀..Lₙ][F₀..Fₙ][O₀..Oₙ][skip bytes][keysuffix region][values]
+                                    uint8_t  uint8_t  uint16_t
+```
 
-**Figure 11: KSTRIE search walkthrough** — compact node with skip "api/" and 8 entries, searching for "api/config". O[] arrows show offsets into the keysuffix region. O[1]=O[2]=3: config shares configure's storage.
+Search in a KSTRIE compact node exploits the parallel array structure to minimize string comparisons. A single binary search compares entries in lexicographic order: first byte F[] eliminates most candidates without touching the keysuffix region. When F matches, the tail bytes are compared via `memcmp` over the shorter of the two suffixes. Length serves as the final tiebreaker only when tails match up to the shorter length. Zero-length suffixes (EOS entries — keys that terminate at this node's branch point) occupy position 0 and are skipped by the binary search.
+
+```cpp
+// KSTRIE compact node search — actual implementation.
+// suffix points past the skip prefix; suffix_len is the remaining length.
+static find_result find_pos(const uint64_t* node, const hdr_type& h,
+                            const uint8_t* suffix,
+                            uint32_t suffix_len) noexcept {
+    const uint8_t*  L = lengths(node, h);
+    const uint8_t*  F = firsts(node, h);
+    const ks_offset_type* O = offsets(node, h);
+    const uint8_t*  B = keysuffix(node, h);
+    int e = h.count;
+
+    bool valid_eos = (e > 0) & (L[0] == 0);
+    if (suffix_len == 0) [[unlikely]]
+        return {valid_eos, 0};           // EOS lookup
+
+    int            slen  = static_cast<int>(suffix_len);
+    int            fb    = static_cast<int>(suffix[0]);
+    int            stail = slen - 1;
+    const uint8_t* K2    = suffix + 1;   // tail bytes (after first)
+
+    int lo = valid_eos;                  // skip EOS entry at [0]
+    int hi = e;
+    while (lo < hi) [[likely]] {
+        int m  = lo + ((hi - lo) >> 1);
+        int c  = fb - static_cast<int>(F[m]);       // compare first byte
+        if (c == 0) [[unlikely]] {
+            int min_tail = std::min(stail, static_cast<int>(L[m]) - 1);
+            c = std::memcmp(K2, B + O[m], min_tail); // compare tail bytes
+            if (c == 0) [[unlikely]] {
+                c = slen - static_cast<int>(L[m]);    // length tiebreaker
+                if (c == 0) [[unlikely]] return {true, m};
+            }
+        }
+        if (c > 0) lo = m + 1; else hi = m;
+    }
+    return {false, lo};                  // not found; lo = insertion point
+}
+```
+
+**Figure 17: KSTRIE search walkthrough** — compact node with skip "api/" and 8 entries, searching for "api/config". O[] arrows show offsets into the keysuffix region. O[1]=O[2]=3: config shares configure's storage.
 
 ```mermaid
 block
@@ -1830,7 +2073,7 @@ block
     space
   end
   space
-  space space space e1_0["a"] e1_1["c"] e1_2["c"] e1_3["c"] e1_4["e≠c"] e1_5["f"] e1_6["p"] e1_7["p"] space space space
+  space space space e1_0["a"] e1_1["c"] e1_2["c"] e1_3["c"] e1_4["e≠c"] e1_5["f"] e1_6["p"] e1_7["s"] space space space
 
   space
   block:step2_title("m=2: F='c' → memcmp O[2]=3: 'onfig'='onfig' → L: 9≠6 → LEFT"):12
@@ -1914,7 +2157,7 @@ block
 
 Keysuffix sharing reduces the effective byte cost of the node. When consecutive entries share suffix tails — a common occurrence for keys with hierarchical structure like URLs or file paths — they reference the same offset in the keysuffix region. Inserting a longer key whose prefix matches an existing entry can chain from the existing suffix storage rather than duplicating the shared tail bytes.
 
-The compact node capacity is governed by a byte budget (COMPACT_KEYSUFFIX_LIMIT) rather than an entry count. Entry count is a poor proxy for node size when suffixes vary in length: 10 entries with 200-byte suffixes cost more storage than 1000 entries with 1-byte suffixes. A split is triggered when `keysuffix_used` exceeds the budget or when any individual suffix exceeds 255 bytes (the maximum representable in L[], which is `uint8_t`). On coalesce, the branch node's `total_tail` estimate determines whether the subtree fits within the budget.
+The compact node capacity is governed by a byte budget (COMPACT_KEYSUFFIX_LIMIT = 4096) rather than an entry count. Entry count is a poor proxy for node size when suffixes vary in length: 10 entries with 200-byte suffixes cost more storage than 1000 entries with 1-byte suffixes. A split is triggered when `keysuffix_used` exceeds the budget or when any individual suffix exceeds 255 bytes (the maximum representable in L[], which is `uint8_t`). The O[] offset type (`ks_offset_type`) is selected at compile time: `uint8_t` if the limit is ≤ 256, `uint16_t` otherwise. At 4096, offsets are `uint16_t` (maximum 65535), well above the budget. On coalesce, the branch node's `total_tail` estimate determines whether the subtree fits within the budget.
 
 #### 3.4 Skip Prefix
 
@@ -1944,7 +2187,7 @@ Values are handled through a compile-time trait that selects one of three storag
 
 Category A applies when the value type is trivially copyable and fits in 8 bytes or fewer. The value is stored directly in the slot array: no indirection, no heap allocation, no destructor call. Values are moved via `memcpy`. This covers the common cases — `int`, `uint64_t`, `float`, `double`, pointers, and small structs — with excellent cache behavior because values are collocated with keys in the same allocation.
 
-Category B applies when the value type is `bool`. Instead of storing one byte per boolean, values are packed into `uint64_t` words with one bit per entry. This reduces per-entry value storage from 8 bytes (a full slot) to 1/64th of a byte. In the KNTRIE's Bitmap256 leaf, where the keys are already a 256-bit bitmap, the values are stored as a second 256-bit bitmap — 14 `uint64_t`s total for up to 256 boolean key/value pairs, the tightest possible representation.
+Category B applies when the value type is `bool`. Instead of storing one byte per boolean, values are packed into `uint64_t` words with one bit per entry. This reduces per-entry value storage from 8 bytes (a full slot) to 1/64th of a byte. In the KNTRIE's Bitmap256 leaf, where the keys are already a 256-bit bitmap, the values are stored as a second 256-bit bitmap — 11 `uint64_t`s total for up to 256 boolean key/value pairs (3 header + 4 presence + 4 values).
 
 Category C applies to all remaining types: those with `sizeof > 8`, non-trivially-copyable types, or types requiring a destructor. The value is heap-allocated via the rebind allocator, constructed in place, and the 8-byte pointer is stored in the slot array. Since a pointer is trivially copyable, the compiler optimizes moves of pointer arrays to `memcpy`/`memmove` automatically. The destructor must be called on erase or node teardown, and the heap allocation must be freed.
 
@@ -1960,7 +2203,7 @@ The sentinel appears in two roles. As the empty root, it represents an empty con
 
 The concrete representation differs between the two instantiations, reflecting their different pointer schemes.
 
-In KNTRIE, the sentinel is part of the tagged pointer scheme described in §3.2.3. `SENTINEL_TAGGED` is the bit pattern `LEAF_BIT | NOT_FOUND_BIT` — bits 63 and 62 set, with no backing allocation. It is a pure constant. Slot 0 in every branch node's child array holds this value. When a branchless bitmap lookup misses (the target byte is not present in the bitmap), the popcount returns 0, the child array load reads slot 0, and the find loop receives the sentinel. The loop exits because LEAF_BIT is set, and the subsequent NOT_FOUND_BIT test detects the miss. The entire miss path is two bit tests — no pointer dereference, no indirect call, no memory allocation. The memory cost is zero.
+In KNTRIE, the sentinel is part of the tagged pointer scheme described in §3.2.3. `SENTINEL_TAGGED` is the bit pattern `LEAF_BIT | NOT_FOUND_BIT` — bits 63 and 62 set, with no backing allocation. It is a pure constant. Slot 0 in every branch node's child array holds this value. When a branchless bitmap lookup misses (the target byte is not present in the bitmap), the popcount returns 0, the child array load reads slot 0, and the find loop receives the sentinel. The loop exits because LEAF_BIT is set, and the subsequent NOT_FOUND_BIT test detects the miss. The entire miss path is two bit tests — no pointer dereference and no memory allocation. The memory cost is zero.
 
 In KSTRIE, the sentinel is a static zero-initialized compact node: four `uint64_t`s of zeros, declared `constinit` and never freed. This is necessary because KSTRIE does not use tagged pointers (§3.2.4) — node type is determined by reading the header after following the pointer. The sentinel must therefore be a valid node whose header reads as an empty compact node (`count = 0`, `flags = 0`, `skip = 0`). Any operation that reaches the sentinel finds nothing: `find` sees `count = 0` and returns nullptr; iteration sees an empty node and skips it. The four-u64 size ensures that code reading the compact node prefix at `node[1]` and the parent pointer at `node[2]` accesses valid (zero) memory. Since the sentinel is static and shared across all instances of the same type, the memory cost is a fixed 32 bytes regardless of how many KSTRIE containers exist.
 
@@ -1982,15 +2225,38 @@ Sections 3 and 4 describe the KTRIE pattern and the shared implementation. This 
 
 **Node header.** All KNTRIE nodes share a packed 8-byte header (`node_header_t`) at `node[0]`. The first byte is a flags field: bit 0 (`is_bitmap`) distinguishes bitmap leaves from compact leaves, and bits 1–3 encode a skip count (used only by branch nodes for skip chains). The remaining six bytes are three 16-bit fields: `entries_v` (entry count for compact nodes or child count for branch nodes), `alloc_u64_v` (allocation size in `uint64_t` units, which may exceed the logical size due to size-class rounding), and `parent_byte_v` (the dispatch byte in the parent branch node — enabling upward traversal for live iterators). The root node uses the sentinel value `ROOT_BYTE = 256` (outside the 0–255 byte range) to terminate the upward walk.
 
-Branch nodes use a 2-u64 header: `node[0]` is the node header and `node[1]` is the parent pointer. Compact leaf nodes also use a 2-u64 header with the same layout — no function pointers, no prefix field. Bitmap leaf nodes use a 3-u64 header: the node header, the parent pointer, and a base key field used for key reconstruction during iteration.
+```cpp
+struct node_header_t {
+    std::uint8_t  flags_v      = 0;  // bit 0: is_bitmap, bits 1-3: skip
+    std::uint8_t  reserved_v   = 0;
+    std::uint16_t entries_v    = 0;
+    std::uint16_t alloc_u64_v  = 0;
+    std::uint16_t parent_byte_v= 0;
 
-**Leaf type dispatch.** Compact and bitmap leaves are distinguished by the `is_bitmap` flag in the header. On the find path, the header is loaded once after the branch descent loop exits. The `is_bitmap` check is a single bit test on data that was just loaded; it does not introduce a new memory access. The single predictable branch dispatches to the correct leaf search with no indirect calls and no per-leaf function pointer overhead. The header load also serves as a hardware prefetch for the compact node's key array, which begins in the same or adjacent cache line.
+    static constexpr std::uint16_t ROOT_BYTE     = 256;
+    static constexpr std::uint8_t  IS_BITMAP_BIT = 0x01;
+    static constexpr std::uint8_t  SKIP_SHIFT    = 1;
+    static constexpr std::uint8_t  SKIP_MASK     = 0x07;  // 3 bits → 0-7
 
-**Root prefix capture.** The KNTRIE root is not a node — it is a lightweight structure containing a tagged child pointer (`root_ptr_v`), a prefix value (`root_prefix_v`) stored as the unsigned key type, and a skip byte count (`root_skip_bytes_v`). The root stores up to 6 prefix bytes for `uint64_t` keys (up to 2 for `uint32_t`, 0 for `uint16_t`). Every find begins with a prefix check: `(stored ^ root_prefix_v) & root_prefix_mask()`. If any prefix byte differs, the key is absent — no descent needed.
+    bool is_bitmap() const noexcept { return flags_v & IS_BITMAP_BIT; }
+    std::uint8_t skip() const noexcept {
+        return (flags_v >> SKIP_SHIFT) & SKIP_MASK;
+    }
+    unsigned entries() const noexcept { return entries_v; }
+    bool is_root() const noexcept { return parent_byte_v == ROOT_BYTE; }
+};
+static_assert(sizeof(node_header_t) == 8);
+```
+
+Branch nodes use a 2-u64 header: `node[0]` is the node header and `node[1]` is the parent pointer. Compact leaf nodes also use a 2-u64 header with the same layout. Bitmap leaf nodes use a 3-u64 header: the node header, the parent pointer, and a base key field used for key reconstruction during iteration.
+
+**Leaf type dispatch.** Compact and bitmap leaves are distinguished by the `is_bitmap` flag in the header. On the find path, the header is loaded once after the branch descent loop exits. The `is_bitmap` check is a single bit test on data that was just loaded; it does not introduce a new memory access. A single predictable branch dispatches to the correct leaf search. The header load also serves as a hardware prefetch for the compact node's key array, which begins in the same or adjacent cache line.
+
+**Root prefix capture.** The KNTRIE root is not a node — it is a lightweight structure containing a tagged child pointer (`root_ptr_v`), a prefix value (`root_prefix_v`) stored as the unsigned key type, and a skip byte count (`root_skip_bytes_v`). The maximum root skip is `KEY_BYTES − ROOT_CONSUMED_BYTES`, where `ROOT_CONSUMED_BYTES = 2`: at least one byte must remain for branch dispatch (the byte that splits entries into different subtrees) and one byte for the leaf level (bitmap leaves operate on a single byte). This gives 6 for `uint64_t` (8 − 2), 2 for `uint32_t` (4 − 2), and 0 for `uint16_t` (2 − 2, meaning both bytes are needed for dispatch and no prefix can be captured). Every find begins with a prefix check: `(stored ^ root_prefix_v) & root_prefix_mask()`. If any prefix byte differs, the key is absent — no descent needed.
 
 As entries with divergent prefixes are inserted, `reduce_root_skip` shortens the prefix to the point of divergence, creating new branch levels to fan out on the differing bytes. On erase, `normalize_root` absorbs single-child branch roots back into the root prefix, and `coalesce_bm_to_leaf` collapses the entire tree into a single compact node when the entry count drops below COMPACT_MAX.
 
-**No depth-dependent specialization.** All compact nodes store the full stored key regardless of depth. There is no suffix extraction, no key-width narrowing, and no depth-dependent template dispatch. Insert, erase, split, and coalesce operate on a single key type (`std::make_unsigned_t<KEY>`) at all depths. The code has one set of compact node operations, not one per possible suffix width. The cost is wider per-entry key storage in compact nodes at intermediate depths. The benefit is minimal node headers, simpler code paths, and substantially faster iteration — advancing through a compact node reads the next key in a single array load with no reconstruction.
+**Uniform key type.** All compact nodes store the full stored key regardless of depth. Insert, erase, split, and coalesce operate on a single key type (`std::make_unsigned_t<KEY>`) at all depths. The code has one set of compact node operations for all depths. The cost is wider per-entry key storage in compact nodes at intermediate depths. The benefit is minimal node headers, simpler code paths, and substantially faster iteration — advancing through a compact node reads the next key in a single array load.
 
 #### 5.2 KSTRIE
 
@@ -1999,6 +2265,29 @@ As entries with divergent prefixes are inserted, `reduce_root_skip` shortens the
 The `flags` field encodes the node type: bit 0 (`FLAG_BITMASK`) distinguishes bitmask nodes from compact nodes, and bit 2 (`FLAG_HAS_SKIP`) indicates whether the node has skip prefix bytes. A header with all flags zero is a compact node with no skip. There are no tagged pointers — node type dispatch reads `is_compact()` or `is_bitmap()` from the header after following the pointer.
 
 The `slots_off` field is a performance optimization: it caches the byte offset to the value slots region, which depends on the entry count, keysuffix usage, and skip length. Without this cache, every value access would need to recompute the offset from the compact node's parallel array sizes. The cache is updated on any operation that changes the layout — grow, shrink, keysuffix shuffle, or reallocation.
+
+```cpp
+struct node_header {
+    uint16_t alloc_u64;   // allocation size in u64 units
+    uint16_t count;       // compact: entry count, bitmask: child count
+    uint16_t slots_off;   // compact: values offset (u64 units), bitmask: unused
+    uint8_t  skip;        // prefix byte count (0 = no prefix)
+    uint8_t  flags;       // bit 0: bitmask, bit 2: has_skip
+
+    static constexpr uint8_t FLAG_BITMASK  = 1;  // bit 0
+    // bit 1 reserved
+    static constexpr uint8_t FLAG_HAS_SKIP = 4;  // bit 2
+
+    bool is_compact() const noexcept { return !(flags & FLAG_BITMASK); }
+    bool is_bitmap()  const noexcept { return flags & FLAG_BITMASK; }
+    bool has_skip()   const noexcept { return flags & FLAG_HAS_SKIP; }
+    uint32_t skip_bytes() const noexcept { return skip; }
+};
+static_assert(sizeof(node_header) == 8);
+
+inline constexpr uint16_t ROOT_PARENT_BYTE = 256;
+inline constexpr uint16_t EOS_PARENT_BYTE  = 257;
+```
 
 **Prefix operations.** The KSTRIE supports four structural prefix operations that exploit the branch node topology.
 
@@ -2038,11 +2327,31 @@ Find is the hot path. It begins at the root and descends through branch nodes to
 
 In KNTRIE, the find begins with a root prefix check: the stored key is XORed against the stored root prefix and masked to the skip region. If any prefix byte differs, the key is absent and find returns immediately — no descent occurs. Otherwise, `find_loop` executes a tight iteration through branch nodes. Each iteration tests the tagged pointer's sign bit (leaf vs. branch — one instruction), extracts the dispatch byte from the stored key at the current shift position via `(stored >> shift) & 0xFF`, performs a branchless bitmap lookup (§3.2.2, BRANCHLESS mode), follows the child pointer, and decrements the shift counter. When the sign bit indicates a leaf, the loop exits. A NOT_FOUND_BIT test distinguishes a miss (sentinel) from a hit (real leaf) — a single bit test with no pointer dereference. On a hit, the header is loaded (serving as a hardware prefetch for the key array in the same cache line), and a single `is_bitmap` flag test dispatches to the correct leaf search. For compact leaves (the common case), a branchless adaptive binary search (§3.3) runs over the stored key array. For bitmap leaves, a single-bit test in the 256-bit presence bitmap resolves the lookup.
 
+```cpp
+// KNTRIE find — complete hot path from root to result.
+static iter_entry_t<K> find_loop(std::uint64_t ptr, K stored,
+                                 unsigned shift) noexcept {
+    while (!(ptr & LEAF_BIT)) [[likely]] {
+        ptr = BO::bm_child(ptr, static_cast<std::uint8_t>((stored >> shift) & 0xFF));
+        // BRANCHLESS: returns child at 1-based rank (slot 0 = sentinel on miss)
+        shift -= CHAR_BIT;
+    }
+    if (ptr & NOT_FOUND_BIT) [[unlikely]] return {};
+    auto* node = untag_leaf_mut(ptr);
+    auto* hdr = get_header(node);  // prefetches cache line for compact_find
+    if (hdr->is_bitmap()) {
+        std::uint8_t byte = static_cast<std::uint8_t>((stored >> shift) & 0xFF);
+        return BO::bitmap_find_byte(node, stored, byte);
+    }
+    return CO::compact_find(node, hdr, stored);
+}
+```
+
 In KSTRIE, the find descends through a loop that tests each node's type via the header flags. At a bitmask node, find first checks the skip prefix (if any) via `match_skip_fast` — a `memcmp` that returns pass/fail. If the skip matches, the next byte is extracted from the key and dispatched through the bitmap. If the key is exhausted at a bitmask node (no more bytes to dispatch on), find follows the EOS child. If the dispatched child is the sentinel, the key is absent. At a compact node, find performs the binary search on F[] with suffix disambiguation described in §3.3.
 
 The branch descent costs O(L) — at most L levels, each consuming one byte. In practice, skip prefix compression reduces the effective number of levels: a subtree where all keys share four bytes traverses one skip comparison rather than four bitmap lookups. The compact node search costs O(log C). The total is O(L + log C).
 
-The find path involves no heap allocation, no locking, and no indirect calls. The entire descent is a tight loop with one branchless bitmap operation and one pointer follow per level. The leaf dispatch is a single predictable branch on a flag that was loaded as a side effect of the first cache-line access to the leaf. For collections below approximately one million entries, the typical find touches 2–4 pointer dereferences plus one binary search.
+The find path involves no heap allocation and no locking. The entire descent is a tight loop with one branchless bitmap operation and one pointer follow per level. The leaf dispatch is a single predictable branch on a flag that was loaded as a side effect of the first cache-line access to the leaf. For collections below approximately one million entries, the typical find touches 2–4 pointer dereferences plus one binary search.
 
 #### 6.2 Insert — O(L + log C) amortized, O(L + C) worst case
 
@@ -2050,7 +2359,7 @@ Insert descends the structure in the same manner as find, then modifies the targ
 
 The descent encounters three node types. At a sentinel (empty child slot), insert creates a new single-entry compact node via `make_single_leaf` and returns it as the new child pointer. This is O(1) — one allocation plus one key/value write.
 
-At a compact node, insert searches for the key position via binary search (O(log C)), opens a gap via `memmove` (O(C) worst case), and writes the new entry. If the compact node has room (size-class headroom from §4.3), this completes with no allocation. If the node is full, it reallocates to the next size class. If the compact node exceeds its capacity threshold (COMPACT_MAX for KNTRIE, COMPACT_KEYSUFFIX_LIMIT for KSTRIE), `convert_to_bitmask` splits it into a branch node with up to 256 children. The split is O(C) — every entry must be redistributed — but it occurs at most once per C inserts, giving amortized O(1). KNTRIE compact nodes have no skip prefix — they store the full key for every entry, so no prefix divergence check is needed at the compact level.
+At a compact node, insert searches for the key position via binary search (O(log C)), opens a gap via `memmove` (O(C) worst case), and writes the new entry. If the compact node has room (size-class headroom from §4.3), this completes with no allocation. If the node is full, it reallocates to the next size class. If the compact node exceeds its capacity threshold (COMPACT_MAX for KNTRIE, COMPACT_KEYSUFFIX_LIMIT for KSTRIE), `convert_to_bitmask` splits it into a branch node with up to 256 children. The split is O(C) — every entry must be redistributed — but it occurs at most once per C inserts, giving amortized O(1). The split partitions entries into up to 256 buckets by dispatch byte, builds a compact or bitmap leaf per non-empty bucket, allocates a branch node with the corresponding bitmap, and links all children. KNTRIE compact nodes have no skip prefix — they store the full key for every entry, so no prefix divergence check is needed at the compact level.
 
 At a branch node, insert first walks any skip bytes (embed chain in KNTRIE, stored skip in KSTRIE). If a skip byte diverges, `split_skip_at` creates a new branch node at the divergence point. Otherwise, insert performs a bitmap lookup for the dispatch byte. If the child does not exist, a new compact node is created and added to the bitmap via `add_child`. If the child exists, insert recurses into it. On the unwind path, the child pointer is updated if it changed (due to reallocation or splitting), the descendant count is incremented, and parent pointers are maintained.
 
@@ -2058,7 +2367,7 @@ After insert returns to the root level, KNTRIE's `normalize_root` checks whether
 
 The amortized cost is O(L + log C): O(L) for the descent, O(log C) for the binary search, and amortized O(1) for the memmove (since most inserts find room in the existing allocation). The worst case is O(L + C), occurring when a compact node overflows and splits.
 
-**Figure 12: KNTRIE structural evolution** — four stages of insert from empty to overflow.
+**Figure 18: KNTRIE structural evolution** — four stages of insert from empty to overflow.
 
 ```mermaid
 block
@@ -2152,10 +2461,10 @@ block
 
 1. **Empty**: root points to sentinel. All operations check sentinel before descent.
 2. **Insert 1st key**: allocate compact node with one entry. Root captures up to 6 prefix bytes (u64). Skip = full key minus the suffix stored in the leaf.
-3. **Insert 2nd key**: same compact node, two sorted entries. Root skip shrinks to the shared prefix length — if keys diverge at byte 4, skip drops from 6 to 4 and new branch levels are created.
+3. **Insert 2nd key**: same compact node, two sorted entries. Root skip shrinks to the shared prefix length — if keys diverge at byte 4, skip drops from 6 to 4 and the remaining bytes are dispatched via binary search within the compact node.
 4. **Insert COMPACT_MAX+1**: compact overflows (>1024 entries). `convert_to_bitmask` distributes entries across up to 256 children by dispatch byte. Each child holds entries sharing that byte value. Children at the final byte depth become bitmap leaves; others become compact leaves storing the full key.
 
-**Figure 13: KSTRIE structural evolution** — four stages of insert from empty to keysuffix overflow.
+**Figure 19: KSTRIE structural evolution** — four stages of insert from empty to keysuffix overflow.
 
 ```mermaid
 block
@@ -2261,7 +2570,7 @@ If the compact node becomes empty (the last entry is erased), it is deallocated 
 For compact nodes, erase shrinkage follows the hysteresis policy (§4.3): the node only reallocates to a smaller size class when the current allocation exceeds the size class for twice the needed size. Most erases compact the entry array in place without reallocation.
 
 
-**Figure 14: KNTRIE structural collapse** — four stages of erase, reversing the insert evolution.
+**Figure 20: KNTRIE structural collapse** — four stages of erase, reversing the insert evolution.
 
 ```mermaid
 block
@@ -2361,7 +2670,7 @@ block
 3. **Erase to 1**: single compact node, one entry. Root skip extends to maximum (up to 6 bytes for u64). `normalize_root` absorbs single-child roots.
 4. **Erase last**: compact node deallocated. Root reverts to sentinel.
 
-**Figure 15: KSTRIE structural collapse** — four stages of erase, reversing the insert evolution.
+**Figure 21: KSTRIE structural collapse** — four stages of erase, reversing the insert evolution.
 
 ```mermaid
 block
@@ -2465,28 +2774,103 @@ This aggressive reclamation is a deliberate design choice. It maintains the memo
 
 #### 6.4 Iteration — O(1) amortized per advance
 
-The KTRIE provides bidirectional iteration in sorted key order with O(1) amortized cost per advance. The iterator stores a pointer to the current compact node and a position within that node. In KNTRIE, it additionally caches the internal key and a value pointer. In KSTRIE, it caches the key buffer (lazily built) and the key length.
+The KTRIE provides bidirectional iteration in sorted key order with O(1) amortized cost per advance. The iterator stores a pointer to the current compact node and a position within that node. In KNTRIE, it additionally caches the stored key and a value pointer. In KSTRIE, it caches the key buffer (lazily built) and the key length.
 
-**Hot path: within-leaf advance.** The vast majority of iterator increments resolve within the same compact node. The iterator increments (or decrements) the position index and reads the next entry's key and value directly from the sorted array — a single array index operation with no search, no pointer chase, and no function call. The key is the complete stored representation, read in one load with no reconstruction. For a compact node with C entries, C − 1 consecutive advances resolve on the hot path before the leaf is exhausted. This is where the wide-node design pays off: the wider the compact node, the rarer the cold path.
+```cpp
+// KNTRIE iterator state — from kntrie.hpp.
+// UK = std::make_unsigned_t<KEY>.
+std::uint64_t* leaf_v = nullptr;  // current leaf node
+std::uint16_t  pos_v  = 0;       // slot index within leaf
+std::uint16_t  bit_v  = 0;       // byte value (bitmap leaves), unused for compact
+UK             key_v  = UK{};    // full stored key (cached, read directly from kd[])
+void*          val_v  = nullptr;  // pointer into leaf's value array (cached)
 
-In KNTRIE, the compact advance is inlined directly into the iterator's `operator++`: increment position, bounds-check against the entry count (from the header, which occupies the same cache line as the key array), read `kd[pos]`, and bump the value pointer. No function call, no struct construction. For Bitmap256 nodes, the advance scans the presence bitmap for the next (or previous) set bit via `next_bit_after` (a word-level shift and `tzcnt`), then replaces the last byte of the cached key via mask and OR. Both paths are inlined into the iterator body, with the hot/cold split (within-leaf vs. cross-leaf) visible to the optimizer for branch prediction.
+// End sentinel: leaf_v=null, val_v stashes impl* for --end()
+```
+
+**Hot path: within-leaf advance.** The vast majority of iterator increments resolve within the same compact node. The iterator increments (or decrements) the position index and reads the next entry's key and value directly from the sorted array — a single array index operation with no search and no pointer chase. The key is the complete stored representation, read in one load. For a compact node with C entries, C − 1 consecutive advances resolve on the hot path before the leaf is exhausted. This is where the wide-node design pays off: the wider the compact node, the rarer the cold path.
+
+In KNTRIE, the compact advance is inlined directly into the iterator's `operator++`: increment position, bounds-check against the entry count (from the header, which occupies the same cache line as the key array), read `kd[pos]`, and bump the value pointer. For Bitmap256 nodes, the advance scans the presence bitmap for the next (or previous) set bit via `next_bit_after` (a word-level shift and `tzcnt`), then replaces the last byte of the cached key via mask and OR. Both paths are inlined into the iterator body, with the hot/cold split (within-leaf vs. cross-leaf) visible to the optimizer for branch prediction.
+
+```cpp
+// KNTRIE iterator::operator++ — complete implementation, fully inlined.
+iterator& operator++() {
+    using namespace kntrie_detail;
+    auto* hdr = get_header(leaf_v);
+
+    if (!hdr->is_bitmap()) [[likely]] {
+        // Compact hot path: pos+1, grab key directly
+        std::uint16_t next = pos_v + 1;
+        if (next < hdr->entries()) [[likely]] {
+            pos_v = next;
+            key_v = CO::keys(leaf_v, COMPACT_HEADER_U64)[next];
+            if constexpr (!IS_BOOL)
+                val_v = static_cast<char*>(val_v) + sizeof(typename CO::VST);
+            return *this;
+        }
+    } else {
+        // Bitmap hot path: next set bit, replace last byte
+        auto r = BO::bm(leaf_v, BITMAP_LEAF_HEADER_U64).next_bit_after(
+            static_cast<std::uint8_t>(bit_v));
+        if (r.found) {
+            bit_v = r.idx;
+            key_v = (key_v & ~UK(0xFF)) | UK(r.idx);
+            if constexpr (IS_BOOL) {
+                pos_v = static_cast<std::uint16_t>(r.idx);
+            } else {
+                pos_v++;
+                val_v = static_cast<char*>(val_v) + sizeof(typename CO::VST);
+            }
+            return *this;
+        }
+    }
+    // Leaf exhausted — walk to next
+    auto e = impl_t::walk_from_leaf(leaf_v, dir_t::FWD);
+    leaf_v = e.leaf; pos_v = e.pos; bit_v = e.bit;
+    key_v = e.key; val_v = e.val;
+    return *this;
+}
+```
 
 In KSTRIE, the hot path increments `pos_v` within the compact node and invalidates the cached key buffer. The key is not rebuilt until the caller accesses it — value-only iteration never touches the key.
 
-**Cold path: parent-pointer walk.** When the compact node is exhausted (the position reaches the boundary), the iterator walks upward via parent pointers. Each compact node stores a parent pointer and a parent byte — the dispatch byte on which this node was reached in the parent branch node. The walk reads the parent's bitmap and scans for the next (or previous) sibling after the current byte using `find_next_set` or `find_prev_set`.
+**Cold path: parent-pointer walk.** When the compact node is exhausted (the position reaches the boundary), the iterator walks upward via parent pointers. Each compact node stores a parent pointer and a parent byte — the dispatch byte on which this node was reached in the parent branch node. The walk reads the parent's bitmap and scans for the next (or previous) sibling after the current byte.
 
-```
-while (byte != ROOT_BYTE):
-    sibling = find_next_set(parent_bitmap, byte + 1)
-    if sibling found:
-        descend to sibling's edge entry (minimum for forward, maximum for reverse)
-        return
-    byte = parent's parent_byte
-    parent = parent's parent
-return end
+```cpp
+// Walk from an exhausted leaf to the next (or previous) entry in the trie.
+static iter_entry_t<K> walk_from_leaf(std::uint64_t* leaf, dir_t dir) noexcept {
+    auto* hdr = get_header(leaf);
+    std::uint64_t* parent = leaf_parent(leaf);
+    if (!parent || hdr->is_root()) [[unlikely]] return {};
+    std::uint16_t byte = hdr->parent_byte();
+    return walk_bm_chain(parent, byte, dir);
+}
+
+// Recursive walk up the branch chain until a sibling is found.
+static iter_entry_t<K> walk_bm_chain(std::uint64_t* parent,
+                                     std::uint16_t byte, dir_t dir) noexcept {
+    auto* phdr = get_header(parent);
+    std::uint8_t sc = phdr->skip();
+    std::uint64_t bm_ptr = BO::node_bm_ptr(parent);
+
+    typename bitmap_256_t::adj_result adj;
+    if (dir == dir_t::FWD)
+        adj = bitmap_ref(bm_ptr).next_set_after(static_cast<std::uint8_t>(byte));
+    else
+        adj = bitmap_ref(bm_ptr).prev_set_before(static_cast<std::uint8_t>(byte));
+
+    if (adj.found) {
+        std::uint64_t child = BO::chain_child(parent, sc, adj.slot);
+        return OPS::descend_edge_loop(child, dir);
+    }
+
+    std::uint64_t* grandparent = bm_parent(parent);
+    if (!grandparent || phdr->is_root()) [[unlikely]] return {};
+    return walk_bm_chain(grandparent, phdr->parent_byte(), dir);
+}
 ```
 
-When a sibling is found, the iterator descends to its edge entry: following first (or last) children at each branch level until reaching a compact node, then taking the first (or last) entry. The cost of the cold path is one upward step per exhausted level plus one downward descent to the sibling's edge. In practice, most walks go up one level, because compact nodes hold many entries and exhaust events are rare relative to within-leaf advances.
+When a sibling is found, the iterator descends to its edge entry: following first (or last) children at each branch level until reaching a compact node, then taking the first (or last) entry. `walk_bm_chain` uses bounded recursion — at most L levels deep, same as the insert path — since each recursive call moves one level closer to the root. The cost of the cold path is one upward step per exhausted level plus one downward descent to the sibling's edge. In practice, most walks go up one level, because compact nodes hold many entries and exhaust events are rare relative to within-leaf advances.
 
 The amortized cost across a full iteration from `begin()` to `end()` is O(1) per advance: the total number of cold-path steps across all N advances is proportional to the number of branch nodes, which is O(N / C) — each branch node is entered and exited exactly once. Dividing by N advances gives O(1 / C) cold-path cost per advance, dominated by the O(1) hot-path cost. More precisely, if the minimum compact node entry count is C_min (at least 1 after a split, but typically much larger due to the hysteresis policy which delays shrinkage), then the cold-path cost per advance is bounded by O(1 / C_min). Since C_min ≥ 1, the bound is O(1); in practice C_min is hundreds or thousands, making the cold path negligible.
 
@@ -2494,7 +2878,7 @@ The amortized cost across a full iteration from `begin()` to `end()` is O(1) per
 
 For workloads that iterate over values without accessing keys — aggregation, statistics, bulk export of values — the key reconstruction cost is zero. The iterator never allocates a key buffer and never walks the parent chain.
 
-**End sentinel.** The `end()` iterator is a lightweight sentinel with a null leaf pointer. In KNTRIE, the sentinel's value pointer stashes a pointer to the impl object, enabling `--end()` to find the last entry via `descend_last_loop`. In KSTRIE, the sentinel stashes the impl pointer in the `key_cap` field (via `intptr_t`), serving the same purpose.
+**End sentinel.** The `end()` iterator is a lightweight sentinel with a null leaf pointer. In KNTRIE, the sentinel's value pointer stashes a pointer to the impl object, enabling `--end()` to find the last entry via `edge_entry(dir_t::BWD)`. In KSTRIE, the sentinel stashes the impl pointer in the `key_cap` field (via `intptr_t`), serving the same purpose.
 
 **Iterator invalidation.** KTRIE iterators are invalidated by any mutation to the container — insert, erase, or insert_or_assign. This is more restrictive than `std::map`, which preserves all iterators on insert and preserves all iterators except the erased element on erase. It is also more restrictive than `std::unordered_map`, which preserves all iterators on erase of any other element and preserves iterators on inserts that do not trigger a rehash.
 
@@ -2535,7 +2919,7 @@ The KNTRIE benchmark inserts random `uint64_t` keys mapped to `int32_t` values, 
 
 **Erase.** KNTRIE erase performance is stable across all sizes, without pronounced spikes. With COMPACT_MAX = 1024, the maximum memmove during erase is bounded to 1024 entries. Coalesce events — where a branch subtree's descendant count drops below COMPACT_MAX and the entire subtree is collected into a single compact node — still occur, but the O(1024) collection cost is small enough that the spikes are not visible at the benchmark's time scale. Between coalesce events, erase performance is competitive with `std::unordered_map`.
 
-**Memory.** KNTRIE's memory advantage is dramatic. At all sizes, KNTRIE uses approximately 12–16 bytes per entry for `uint64_t` keys with `int32_t` values — compared to ~48 bytes per entry for `std::unordered_map` (with sawtooth variation from rehash) and ~64 bytes per entry for `std::map`. Compact node headers are 16 bytes (2 × `uint64_t`): a packed 8-byte header and a parent pointer. This minimal overhead, combined with contiguous SoA layout and size-class allocation with hysteresis, keeps per-entry cost low. For dense key distributions that reach bitmap depth (such as sequential keys), the per-entry cost can drop well below the 12 bytes of raw key-value data, as bitmap leaves encode key presence in a single bit with no per-entry key storage — only the 256-bit presence bitmap and a parallel value array are needed.
+**Memory.** KNTRIE's memory advantage is dramatic. For random `uint64_t` keys with `int32_t` values, KNTRIE uses 12–20 bytes per entry, typically 14–16 at scale — compared to ~48 bytes per entry for `std::unordered_map` (with sawtooth variation from rehash) and ~64 bytes per entry for `std::map`. The upper end of the range (18–20 bytes) occurs at structural transition points: immediately after a compact node splits into a branch subtree, the per-entry header overhead is highest before the children fill. For sequential keys, where bitmap leaves dominate, memory drops to 6.2 bytes per entry at scale (Appendix A, sequential keys). A full bitmap leaf with `int32_t` values occupies 3 header u64s + 4 presence bitmap u64s + 128 value u64s = 1080 bytes for 256 entries, or 4.2 bytes per entry; the remaining 2.0 bytes per entry is branch node overhead (headers, bitmaps, child pointers, descendant counts) amortized across all entries in the subtree. This sub-raw-data memory is possible because bitmap leaves encode key presence in a single bit with no per-entry key storage. Compact node headers are 16 bytes (2 × `uint64_t`): a packed 8-byte header and a parent pointer. This minimal overhead, combined with contiguous SoA layout and size-class allocation with hysteresis, keeps per-entry cost low.
 
 Performance graphs are in Appendix A.
 
@@ -2593,7 +2977,7 @@ The design addresses the fundamental weaknesses of both parent structures. The t
 
 Two concrete instantiations demonstrate the pattern's generality. KNTRIE handles fixed-width integer keys with bounded depth, direct full-key storage in compact nodes, and a branchless adaptive binary search that handles arbitrary entry counts with zero-cost adjustment for power-of-two sizes. KSTRIE handles variable-length string keys with unbounded depth, character maps for case-insensitive or normalized containers, and keysuffix sharing — a novel technique where entries with common suffix tails reference the same storage in the compact node's keysuffix region, reducing the effective byte cost per entry.
 
-Benchmarks demonstrate that both instantiations are competitive with `std::unordered_map` on lookup speed while providing full key ordering and sorted iteration, and consistently outperform `std::map` across all operations. KNTRIE iteration is 2–4× faster than `std::map`, a direct consequence of the compact node's contiguous sorted key array — advancing reads the next key in a single load with no reconstruction. Memory consumption is typically a third or less of either standard container, with dense key distributions reaching bitmap depth showing per-entry costs well below the raw key-value data size.
+Benchmarks demonstrate that both instantiations are competitive with `std::unordered_map` on lookup speed while providing full key ordering and sorted iteration, and consistently outperform `std::map` across all operations. KNTRIE iteration is 2–4× faster than `std::map`, a direct consequence of the compact node's contiguous sorted key array — advancing reads the next key in a single load. Memory consumption is typically a third or less of either standard container, with dense key distributions reaching bitmap depth showing per-entry costs well below the raw key-value data size.
 
 The KTRIE is not a universal replacement for hash tables or balanced trees. It is optimized for read-heavy workloads with ordered access requirements over keys that share common structure. For pure unordered point lookups, hash tables remain faster. For write-heavy workloads, the compact node's sorted-array maintenance introduces overhead that hash-based leaves avoid. The KTRIE's iterator invalidation on mutation is more restrictive than both standard containers, a consequence of the aggressive memory reclamation that maintains its density advantage.
 
