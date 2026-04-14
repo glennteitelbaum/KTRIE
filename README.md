@@ -14,8 +14,8 @@ Concepts that apply to both implementations
 
 |Directory|What|Concepts|README (includes benchmark results)|
 |-------------|----|--------|------|
-|KNTRIE|Numeric Keyed Imlementation of KTRIE|[KNTRIE Concepts](KNTRIE/kntrie_concepts.md)|[KNTRIE](KNTRIE/README.md)|
-|KSTRIE|String Keyed Imlementation of KTRIE|[KSTRIE Concepts](KSTRIE/kstrie_concepts.md)|[KSTRIE](KSTRIE/README.md)|
+|**KNTRIE**|Numeric Keyed Imlementation of KTRIE|[KNTRIE Concepts](KNTRIE/kntrie_concepts.md)|[KNTRIE](KNTRIE/README.md)|
+|**KSTRIE**|String Keyed Imlementation of KTRIE|[KSTRIE Concepts](KSTRIE/kstrie_concepts.md)|[KSTRIE](KSTRIE/README.md)|
 |KTOKEN|BPE tokenizer - KTRIE Usage Example|[KTOKEN Concepts](KTOKEN/ktoken.md)|[KTOKEN](KTOKEN/README.md)|
 
 
