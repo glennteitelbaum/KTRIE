@@ -2,13 +2,17 @@
 
 > It's what would happen if a B-Tree had a child with a Trie
 
+## [ABSTRACT](./ktrie_abstract.md)
+
+A Short Abstract about KTRIE
+
 ## [KTRIE CONCEPTS](./ktrie_concepts.md)
 
-## [ABSTRACT](./ktrie_abstract.md)
+Concepts that apply to both implementations: KNTRIE (Numeric Key) and KSTRIE (String Key)
 
 ## [FULL PAPER](./ktrie.md)
 
-Concepts that apply to both implementations
+A full paper describing KTRIE as implemented in KNTRIE (Numeric Key) and KSTRIE (String Key)
 
 ## Directories
 
