@@ -564,11 +564,11 @@ The SUFFIX is the remaining portion of the key after all branch levels have been
 
 The boundaries between PREFIX, BRANCH, and SUFFIX are not fixed at compile time. They are determined per-subtree by the data. A subtree where 1000 keys share the same top four bytes uses one prefix node instead of four branch levels. A subtree small enough to fit in a single compact node skips branching entirely. As entries are added or removed, the structure adapts: compact nodes overflow and split into branch subtrees, and branch subtrees coalesce back into compact nodes when the entry count drops.
 
-**Figure 4: Key decomposition** — HELLO, HELP, and HELPER decomposed into PREFIX, BRANCH, and SUFFIX regions. The prefix "HEL" is shared by all three keys and captured in skip comparisons. The branch byte (L or P) dispatches through a bitmask node. The remaining bytes are stored in compact leaves.
+**Figure 4: Key decomposition** — HELLO, HELP, and HELPER decomposed into PREFIX, BRANCH, and SUFFIX regions. The prefix "HEL" is shared by all three keys and captured in skip comparisons. The branch byte (L or P) dispatches through a bitmask node. The remaining bytes are stored in compact leaves. ∅ marks end-of-key.
 
 ```mermaid
 block
-  columns 7
+  columns 8
 
   block:keys_lbl["KEYS"]:1
     space
@@ -579,26 +579,26 @@ block
   block:br_lbl["BRANCH"]:1
     space
   end
-  block:sfx_lbl["SUFFIX"]:2
+  block:sfx_lbl["SUFFIX"]:3
     space
   end
 
   block:k1_lbl["HELLO"]:1
     space
   end
-  h1["H"] e1["E"] l1["L"] b1["L"] s1_0["O"] s1_1[" "]
+  h1["H"] e1["E"] l1["L"] b1["L"] s1_0["O"] s1_1["∅"] s1_2[" "]
 
   block:k2_lbl["HELP"]:1
     space
   end
-  h2["H"] e2["E"] l2["L"] b2["P"] s2_0["∅"] s2_1[" "]
+  h2["H"] e2["E"] l2["L"] b2["P"] s2_0["∅"] s2_1[" "] s2_2[" "]
 
   block:k3_lbl["HELPER"]:1
     space
   end
-  h3["H"] e3["E"] l3["L"] b3["P"] s3_0["E"] s3_1["R"]
+  h3["H"] e3["E"] l3["L"] b3["P"] s3_0["E"] s3_1["R"] s3_2["∅"]
 
-  space:7
+  space:8
 
   block:struct_lbl[" "]:1
     space
@@ -609,7 +609,7 @@ block
   block:bm_node["bitmask: {L, P}"]:1
     space
   end
-  block:leaf_node["compact leaves"]:2
+  block:leaf_node["compact leaves"]:3
     space
   end
 
@@ -618,7 +618,8 @@ block
   style l1 fill:#836c12,color:#fff,stroke:#e67e22
   style b1 fill:#e67e22,color:#fff,stroke:#d35400
   style s1_0 fill:#3498db,color:#fff,stroke:#2980b9
-  style s1_1 fill:none,stroke:none
+  style s1_1 fill:#888,color:#fff,stroke:#666
+  style s1_2 fill:none,stroke:none
 
   style h2 fill:#836c12,color:#fff,stroke:#e67e22
   style e2 fill:#836c12,color:#fff,stroke:#e67e22
@@ -626,6 +627,7 @@ block
   style b2 fill:#e67e22,color:#fff,stroke:#d35400
   style s2_0 fill:#888,color:#fff,stroke:#666
   style s2_1 fill:none,stroke:none
+  style s2_2 fill:none,stroke:none
 
   style h3 fill:#836c12,color:#fff,stroke:#e67e22
   style e3 fill:#836c12,color:#fff,stroke:#e67e22
@@ -633,6 +635,7 @@ block
   style b3 fill:#e67e22,color:#fff,stroke:#d35400
   style s3_0 fill:#3498db,color:#fff,stroke:#2980b9
   style s3_1 fill:#3498db,color:#fff,stroke:#2980b9
+  style s3_2 fill:#888,color:#fff,stroke:#666
 
   style pfx_lbl fill:#836c12,color:#fff,stroke:#e67e22
   style br_lbl fill:#e67e22,color:#fff,stroke:#d35400
