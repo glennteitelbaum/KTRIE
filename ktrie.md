@@ -564,71 +564,75 @@ The SUFFIX is the remaining portion of the key after all branch levels have been
 
 The boundaries between PREFIX, BRANCH, and SUFFIX are not fixed at compile time. They are determined per-subtree by the data. A subtree where 1000 keys share the same top four bytes uses one prefix node instead of four branch levels. A subtree small enough to fit in a single compact node skips branching entirely. As entries are added or removed, the structure adapts: compact nodes overflow and split into branch subtrees, and branch subtrees coalesce back into compact nodes when the entry count drops.
 
-**Figure 4: Key decomposition** — the string key "HELPER" decomposed into PREFIX, BRANCH, and SUFFIX regions within a KTRIE containing HELLO, HELP, and HELPER. The prefix "HEL" is shared by all three keys and captured in skip comparisons (root skip "H" + branch skip "EL"). One branch byte dispatches through a bitmask node. The suffix "ER" is stored in a compact leaf.
+**Figure 4: Key decomposition** — HELLO, HELP, and HELPER decomposed into PREFIX, BRANCH, and SUFFIX regions. The prefix "HEL" is shared by all three keys and captured in skip comparisons. The branch byte (L or P) dispatches through a bitmask node. The remaining bytes are stored in compact leaves.
 
 ```mermaid
 block
-  columns 10
+  columns 7
 
-  space
-  block:key_title("key = H E L P E R"):8
+  block:keys_lbl["KEYS"]:1
     space
   end
-  space
-  k0["H"] k1["E"] k2["L"] k3["P"] k4["E"] k5["R"] space space space space
-
-  space
-  block:decomp("decomposition"):8
-    space
-  end
-  space
-  p0["H"] p1["E"] p2["L"] b0["P"] s0["E"] s1["R"] space space space space
-
-  space
-  block:labels("region labels"):8
-    space
-  end
-  space
-  block:pfx_lbl["PREFIX — skip"]:3
+  block:pfx_lbl["PREFIX"]:3
     space
   end
   block:br_lbl["BRANCH"]:1
     space
   end
-  block:sfx_lbl["SUFFIX — compact leaf"]:2
+  block:sfx_lbl["SUFFIX"]:2
     space
   end
-  space space space space
 
-  space
-  block:structure("KTRIE structure"):8
+  block:k1_lbl["HELLO"]:1
     space
   end
-  space
-  block:skip_node["skip comparison: HEL (one comparison)"]:3
-    space
-  end
-  block:bm_node["bitmask dispatch: {L, P}"]:1
-    space
-  end
-  block:leaf_node["compact leaf: sorted suffixes"]:2
-    space
-  end
-  space space space space
+  h1["H"] e1["E"] l1["L"] b1["L"] s1_0["O"] s1_1[" "]
 
-  style k0 fill:#836c12,color:#fff,stroke:#e67e22
-  style k1 fill:#836c12,color:#fff,stroke:#e67e22
-  style k2 fill:#836c12,color:#fff,stroke:#e67e22
-  style k3 fill:#e67e22,color:#fff,stroke:#d35400
-  style k4 fill:#3498db,color:#fff,stroke:#2980b9
-  style k5 fill:#3498db,color:#fff,stroke:#2980b9
+  block:k2_lbl["HELP"]:1
+    space
+  end
+  h2["H"] e2["E"] l2["L"] b2["P"] s2_0["∅"] s2_1[" "]
 
-  style p0 fill:#836c12,color:#fff,stroke:#e67e22
-  style p1 fill:#836c12,color:#fff,stroke:#e67e22
-  style p2 fill:#836c12,color:#fff,stroke:#e67e22
-  style b0 fill:#e67e22,color:#fff,stroke:#d35400
-  style s0 fill:#3498db,color:#fff,stroke:#2980b9
-  style s1 fill:#3498db,color:#fff,stroke:#2980b9
+  block:k3_lbl["HELPER"]:1
+    space
+  end
+  h3["H"] e3["E"] l3["L"] b3["P"] s3_0["E"] s3_1["R"]
+
+  space:7
+
+  block:struct_lbl[" "]:1
+    space
+  end
+  block:skip_node["skip: HEL"]:3
+    space
+  end
+  block:bm_node["bitmask: {L, P}"]:1
+    space
+  end
+  block:leaf_node["compact leaves"]:2
+    space
+  end
+
+  style h1 fill:#836c12,color:#fff,stroke:#e67e22
+  style e1 fill:#836c12,color:#fff,stroke:#e67e22
+  style l1 fill:#836c12,color:#fff,stroke:#e67e22
+  style b1 fill:#e67e22,color:#fff,stroke:#d35400
+  style s1_0 fill:#3498db,color:#fff,stroke:#2980b9
+  style s1_1 fill:none,stroke:none
+
+  style h2 fill:#836c12,color:#fff,stroke:#e67e22
+  style e2 fill:#836c12,color:#fff,stroke:#e67e22
+  style l2 fill:#836c12,color:#fff,stroke:#e67e22
+  style b2 fill:#e67e22,color:#fff,stroke:#d35400
+  style s2_0 fill:#888,color:#fff,stroke:#666
+  style s2_1 fill:none,stroke:none
+
+  style h3 fill:#836c12,color:#fff,stroke:#e67e22
+  style e3 fill:#836c12,color:#fff,stroke:#e67e22
+  style l3 fill:#836c12,color:#fff,stroke:#e67e22
+  style b3 fill:#e67e22,color:#fff,stroke:#d35400
+  style s3_0 fill:#3498db,color:#fff,stroke:#2980b9
+  style s3_1 fill:#3498db,color:#fff,stroke:#2980b9
 
   style pfx_lbl fill:#836c12,color:#fff,stroke:#e67e22
   style br_lbl fill:#e67e22,color:#fff,stroke:#d35400
@@ -636,6 +640,10 @@ block
   style skip_node fill:#836c12,color:#fff,stroke:#e67e22
   style bm_node fill:#e67e22,color:#fff,stroke:#d35400
   style leaf_node fill:#3498db,color:#fff,stroke:#2980b9
+  style k1_lbl fill:none,color:#333,stroke:none
+  style k2_lbl fill:none,color:#333,stroke:none
+  style k3_lbl fill:none,color:#333,stroke:none
+  style struct_lbl fill:none,stroke:none
 ```
 
 **KNTRIE key representation.** All key types — `uint16_t`, `int32_t`, `uint64_t`, signed or unsigned — are transformed into a stored representation of the same width before any operation. The stored type is `std::make_unsigned_t<KEY>`: a `uint64_t` key stores as `uint64_t`, a `int32_t` key stores as `uint32_t`. Signed integers require a sign-bit flip (`key ^= 1 << (key_bits - 1)`) to convert two's complement ordering to unsigned ordering, mapping `INT_MIN → 0` and `INT_MAX → UINT_MAX`. Unsigned integers store as-is.
