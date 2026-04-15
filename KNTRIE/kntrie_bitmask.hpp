@@ -531,10 +531,11 @@ struct bitmask_ops {
         constexpr size_t hs = BHS;
 
         uint8_t suffix = static_cast<uint8_t>((stored >> shift) & 0xFF);
-        const bitmap_256_t& bmp = bm(node, hs);
-        if (!bmp.has_bit(suffix)) [[unlikely]] return {};
-        int slot = bmp.find_slot<slot_mode::UNFILTERED>(suffix);
-        uint16_t ret_pos = VT::IS_BOOL ? static_cast<uint16_t>(suffix) : static_cast<uint16_t>(slot);
+        int slot = bm(node, hs).find_slot<slot_mode::FAST_EXIT>(suffix);
+        if (slot < 0) [[unlikely]] return {};
+        uint16_t ret_pos;
+        if constexpr (VT::IS_BOOL) ret_pos = static_cast<uint16_t>(suffix);
+        else                       ret_pos = static_cast<uint16_t>(slot);
         return {node, ret_pos, static_cast<uint16_t>(suffix),
                 stored, bm_val_ptr(node, hs, slot), true};
     }
@@ -547,10 +548,11 @@ struct bitmask_ops {
     static iter_entry_t<K> bitmap_find_byte(uint64_t* node, K stored,
                                             uint8_t suffix) noexcept {
         constexpr size_t hs = BHS;
-        const bitmap_256_t& bmp = bm(node, hs);
-        if (!bmp.has_bit(suffix)) [[unlikely]] return {};
-        int slot = bmp.find_slot<slot_mode::UNFILTERED>(suffix);
-        uint16_t ret_pos = VT::IS_BOOL ? static_cast<uint16_t>(suffix) : static_cast<uint16_t>(slot);
+        int slot = bm(node, hs).find_slot<slot_mode::FAST_EXIT>(suffix);
+        if (slot < 0) [[unlikely]] return {};
+        uint16_t ret_pos;
+        if constexpr (VT::IS_BOOL) ret_pos = static_cast<uint16_t>(suffix);
+        else                       ret_pos = static_cast<uint16_t>(slot);
         return {node, ret_pos, static_cast<uint16_t>(suffix),
                 stored, bm_val_ptr(node, hs, slot), true};
     }

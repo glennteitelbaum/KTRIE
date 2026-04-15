@@ -58,9 +58,7 @@ private:
     BLD           bld_v;
 
     K root_prefix_mask() const noexcept {
-        if (root_skip_bytes_v == 0) return K(0);
         unsigned shift = (sizeof(K) - root_skip_bytes_v) * CHAR_BIT;
-        if (shift >= sizeof(K) * CHAR_BIT) return ~K(0);
         return ~K(0) << shift;
     }
 
@@ -139,7 +137,10 @@ public:
     // ==================================================================
 
     iter_entry_t<K> find_entry(K stored) const noexcept {
-        if ((stored ^ root_prefix_v) & root_prefix_mask()) [[unlikely]] return {};
+        if (root_skip_bytes_v != 0) [[unlikely]] {
+            if ((stored ^ root_prefix_v) & root_prefix_mask()) [[unlikely]]
+                return {};
+        }
         return OPS::find_loop(root_ptr_v, stored, root_dispatch_shift());
     }
 
@@ -296,8 +297,10 @@ public:
 
 private:
     erase_result_t<K> erase_stored(K stored) {
-        if ((stored ^ root_prefix_v) & root_prefix_mask()) [[unlikely]]
-            return {0, false, 0, {}};
+        if (root_skip_bytes_v != 0) [[unlikely]] {
+            if ((stored ^ root_prefix_v) & root_prefix_mask()) [[unlikely]]
+                return {0, false, 0, {}};
+        }
 
         std::uint64_t old_root_ptr = root_ptr_v;
         auto r = OPS::erase_node(root_ptr_v, stored, root_dispatch_shift(), bld_v);
@@ -408,8 +411,9 @@ private:
     iter_entry_t<K> tracked_descent_fwd(K stored, LeafFn&& leaf_fn) const noexcept {
         if (size_v == 0) return {};
 
-        K diff = (stored ^ root_prefix_v) & root_prefix_mask();
-        if (diff) {
+        if (root_skip_bytes_v != 0) [[unlikely]] {
+            K diff = (stored ^ root_prefix_v) & root_prefix_mask();
+            if (diff) {
             unsigned shift_pos = TOP_SHIFT;
             for (unsigned i = 0; i < root_skip_bytes_v; ++i) {
                 std::uint8_t sb = static_cast<std::uint8_t>((stored >> shift_pos) & 0xFF);
@@ -420,6 +424,7 @@ private:
                 }
                 shift_pos -= CHAR_BIT;
             }
+        }
         }
 
         std::uint64_t ptr = root_ptr_v;

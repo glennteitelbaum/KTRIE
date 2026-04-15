@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>kntrie Benchmark</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+<style>
+  body { margin:0; background:#0f0f1a; color:#ddd; font-family:system-ui,sans-serif; }
+  .wrap { max-width:700px; margin:0 auto; padding:16px 12px; }
+  h2 { margin:0 0 4px; font-size:18px; font-weight:700; text-align:center; }
+  .sub { text-align:center; color:#777; font-size:12px; margin:0 0 12px; }
+  .btns { display:flex; justify-content:center; gap:8px; margin-bottom:16px; }
+  .btns button { padding:6px 16px; border-radius:6px; border:1px solid #444;
+    background:#1a1a2e; color:#aaa; cursor:pointer; font-size:13px; font-weight:600; }
+  .btns button.active { background:#3b82f6; color:#fff; }
+  .chart-box { margin-bottom:24px; }
+  .chart-box h3 { margin:0 0 6px; font-size:14px; font-weight:600; text-align:center; }
+  canvas { background:#12122a; border-radius:8px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h2>kntrie Benchmark (u16 &rarr; i32)</h2>
+  <p class="sub">Log-log &middot; Per-entry &middot; Lower is better &middot; FND=100% hit, NF=100% miss</p>
+  <div class="btns">
+    <button class="active" onclick="show('random')">random</button>
+    <button onclick="show('sequential')">sequential</button>
+  </div>
+  <div class="chart-box"><h3>Find (ns/entry)</h3><canvas id="c_find"></canvas></div>
+  <div class="chart-box"><h3>Iteration (ns/entry)</h3><canvas id="c_iter"></canvas></div>
+  <div class="chart-box"><h3>Insert (ns/entry)</h3><canvas id="c_insert"></canvas></div>
+  <div class="chart-box"><h3>Erase N/2 (ns/entry)</h3><canvas id="c_erase"></canvas></div>
+  <div class="chart-box"><h3>Memory (B/entry)</h3><canvas id="c_mem"></canvas></div>
+</div>
+<script>
+const RAW_DATA = [
+  {pattern:"random",N:100,kntrie_fnd:0.0012,kntrie_nf:0.0010,kntrie_insert:0.0151,kntrie_erase:0.0039,kntrie_iter:0.0006,kntrie_mem:784,map_fnd:0.0035,map_nf:0.0027,map_insert:0.0117,map_erase:0.0085,map_iter:0.0010,map_mem:4040,umap_fnd:0.0007,umap_nf:0.0009,umap_insert:0.0035,umap_erase:0.0023,umap_iter:0.0001,umap_mem:4472},
+  {pattern:"random",N:150,kntrie_fnd:0.0021,kntrie_nf:0.0016,kntrie_insert:0.0178,kntrie_erase:0.0062,kntrie_iter:0.0006,kntrie_mem:1024,map_fnd:0.0055,map_nf:0.0042,map_insert:0.0142,map_erase:0.0124,map_iter:0.0014,map_mem:6040,umap_fnd:0.0008,umap_nf:0.0011,umap_insert:0.0059,umap_erase:0.0025,umap_iter:0.0002,umap_mem:7720},
+  {pattern:"random",N:225,kntrie_fnd:0.0028,kntrie_nf:0.0023,kntrie_insert:0.0231,kntrie_erase:0.0075,kntrie_iter:0.0008,kntrie_mem:1552,map_fnd:0.0087,map_nf:0.0076,map_insert:0.0217,map_erase:0.0146,map_iter:0.0018,map_mem:9040,umap_fnd:0.0014,umap_nf:0.0020,umap_insert:0.0072,umap_erase:0.0032,umap_iter:0.0003,umap_mem:9520},
+  {pattern:"random",N:337,kntrie_fnd:0.0043,kntrie_nf:0.0039,kntrie_insert:0.0306,kntrie_erase:0.0112,kntrie_iter:0.0010,kntrie_mem:2048,map_fnd:0.0146,map_nf:0.0121,map_insert:0.0330,map_erase:0.0235,map_iter:0.0027,map_mem:13520,umap_fnd:0.0018,umap_nf:0.0023,umap_insert:0.0111,umap_erase:0.0039,umap_iter:0.0004,umap_mem:16304},
+  {pattern:"random",N:506,kntrie_fnd:0.0067,kntrie_nf:0.0058,kntrie_insert:0.0449,kntrie_erase:0.0168,kntrie_iter:0.0013,kntrie_mem:3088,map_fnd:0.0234,map_nf:0.0196,map_insert:0.0474,map_erase:0.0316,map_iter:0.0041,map_mem:20280,umap_fnd:0.0032,umap_nf:0.0044,umap_insert:0.0161,umap_erase:0.0066,umap_iter:0.0007,umap_mem:20360},
+  {pattern:"random",N:759,kntrie_fnd:0.0106,kntrie_nf:0.0101,kntrie_insert:0.0571,kntrie_erase:0.0262,kntrie_iter:0.0018,kntrie_mem:6160,map_fnd:0.0370,map_nf:0.0346,map_insert:0.0692,map_erase:0.0510,map_iter:0.0058,map_mem:30400,umap_fnd:0.0044,umap_nf:0.0070,umap_insert:0.0236,umap_erase:0.0111,umap_iter:0.0011,umap_mem:34624},
+  {pattern:"random",N:1139,kntrie_fnd:0.0158,kntrie_nf:0.0113,kntrie_insert:0.1039,kntrie_erase:0.0519,kntrie_iter:0.0175,kntrie_mem:24096,map_fnd:0.0593,map_nf:0.0551,map_insert:0.1021,map_erase:0.0772,map_iter:0.0091,map_mem:45600,umap_fnd:0.0055,umap_nf:0.0071,umap_insert:0.0337,umap_erase:0.0125,umap_iter:0.0017,umap_mem:60128},
+  {pattern:"random",N:1708,kntrie_fnd:0.0225,kntrie_nf:0.0188,kntrie_insert:0.1320,kntrie_erase:0.0687,kntrie_iter:0.0192,kntrie_mem:27920,map_fnd:0.0988,map_nf:0.0910,map_insert:0.1801,map_erase:0.1194,map_iter:0.0147,map_mem:68360,umap_fnd:0.0142,umap_nf:0.0183,umap_insert:0.0510,umap_erase:0.0215,umap_iter:0.0029,umap_mem:73784},
+  {pattern:"random",N:2562,kntrie_fnd:0.0343,kntrie_nf:0.0275,kntrie_insert:0.1775,kntrie_erase:0.0643,kntrie_iter:0.0256,kntrie_mem:31120,map_fnd:0.1767,map_nf:0.1652,map_insert:0.2593,map_erase:0.2026,map_iter:0.0235,map_mem:102520,umap_fnd:0.0138,umap_nf:0.0218,umap_insert:0.0726,umap_erase:0.0301,umap_iter:0.0052,umap_mem:127048},
+  {pattern:"random",N:3844,kntrie_fnd:0.0518,kntrie_nf:0.0441,kntrie_insert:0.2714,kntrie_erase:0.0968,kntrie_iter:0.0340,kntrie_mem:36432,map_fnd:0.2830,map_nf:0.2773,map_insert:0.4573,map_erase:0.3092,map_iter:0.0355,map_mem:153800,umap_fnd:0.0287,umap_nf:0.0412,umap_insert:0.1184,umap_erase:0.0506,umap_iter:0.0087,umap_mem:157816},
+  {pattern:"random",N:5766,kntrie_fnd:0.0812,kntrie_nf:0.0635,kntrie_insert:0.3054,kntrie_erase:0.1362,kntrie_iter:0.0367,kntrie_mem:47152,map_fnd:0.4859,map_nf:0.4775,map_insert:0.6666,map_erase:0.5228,map_iter:0.0521,map_mem:230680,umap_fnd:0.0378,umap_nf:0.0489,umap_insert:0.1704,umap_erase:0.0690,umap_iter:0.0130,umap_mem:269480},
+  {pattern:"random",N:8649,kntrie_fnd:0.1225,kntrie_nf:0.0920,kntrie_insert:0.3983,kntrie_erase:0.2159,kntrie_iter:0.0514,kntrie_mem:59088,map_fnd:0.7821,map_nf:0.7603,map_insert:0.9985,map_erase:0.7818,map_iter:0.0830,map_mem:346000,umap_fnd:0.0461,umap_nf:0.0508,umap_insert:0.2534,umap_erase:0.0907,umap_iter:0.0226,umap_mem:469744},
+  {pattern:"random",N:12974,kntrie_fnd:0.2025,kntrie_nf:0.1300,kntrie_insert:0.5800,kntrie_erase:0.3196,kntrie_iter:0.0643,kntrie_mem:80048,map_fnd:1.2148,map_nf:1.1863,map_insert:1.6351,map_erase:1.2233,map_iter:0.1436,map_mem:519000,umap_fnd:0.0849,umap_nf:0.0980,umap_insert:0.4581,umap_erase:0.1532,umap_iter:0.0406,umap_mem:573544},
+  {pattern:"random",N:19461,kntrie_fnd:0.2528,kntrie_nf:0.2034,kntrie_insert:0.8844,kntrie_erase:0.5187,kntrie_iter:0.0897,kntrie_mem:110128,map_fnd:2.1818,map_nf:2.0592,map_insert:2.8378,map_erase:2.0575,map_iter:0.2461,map_mem:778480,umap_fnd:0.1103,umap_nf:0.1140,umap_insert:0.6441,umap_erase:0.2233,umap_iter:0.0644,umap_mem:991376},
+  {pattern:"random",N:29192,kntrie_fnd:0.3986,kntrie_nf:0.3026,kntrie_insert:1.3062,kntrie_erase:0.8302,kntrie_iter:0.1513,kntrie_mem:149040,map_fnd:3.7456,map_nf:3.5738,map_insert:4.7155,map_erase:3.4795,map_iter:0.4767,map_mem:1167720,umap_fnd:0.2089,umap_nf:0.2334,umap_insert:1.0125,umap_erase:0.4026,umap_iter:0.1233,umap_mem:1224920},
+  {pattern:"random",N:43789,kntrie_fnd:0.6880,kntrie_insert:2.0715,kntrie_erase:1.2465,kntrie_iter:0.1982,kntrie_mem:207872,map_fnd:6.8315,map_insert:7.7585,map_erase:6.1617,map_iter:0.6544,map_mem:1751600,umap_fnd:0.2522,umap_insert:2.5103,umap_erase:0.5478,umap_iter:0.2701,umap_mem:2099536},
+  {pattern:"random",N:65536,kntrie_fnd:1.1391,kntrie_insert:3.1805,kntrie_erase:1.8849,kntrie_iter:0.3003,kntrie_mem:400400,map_fnd:14.0243,map_insert:15.1731,map_erase:12.7260,map_iter:1.3872,map_mem:2621480,umap_fnd:0.4900,umap_insert:2.9298,umap_erase:0.9743,umap_iter:0.3892,umap_mem:2621464},
+  {pattern:"sequential",N:100,kntrie_fnd:0.0012,kntrie_nf:0.0016,kntrie_insert:0.0164,kntrie_erase:0.0042,kntrie_iter:0.0007,kntrie_mem:784,map_fnd:0.0035,map_nf:0.0031,map_insert:0.0151,map_erase:0.0090,map_iter:0.0011,map_mem:4040,umap_fnd:0.0007,umap_nf:0.0002,umap_insert:0.0045,umap_erase:0.0023,umap_iter:0.0001,umap_mem:4472},
+  {pattern:"sequential",N:150,kntrie_fnd:0.0028,kntrie_nf:0.0024,kntrie_insert:0.0199,kntrie_erase:0.0062,kntrie_iter:0.0009,kntrie_mem:1024,map_fnd:0.0055,map_nf:0.0053,map_insert:0.0163,map_erase:0.0137,map_iter:0.0016,map_mem:6040,umap_fnd:0.0004,umap_nf:0.0008,umap_insert:0.0067,umap_erase:0.0033,umap_iter:0.0002,umap_mem:7720},
+  {pattern:"sequential",N:225,kntrie_fnd:0.0027,kntrie_nf:0.0024,kntrie_insert:0.0191,kntrie_erase:0.0077,kntrie_iter:0.0007,kntrie_mem:1552,map_fnd:0.0092,map_nf:0.0087,map_insert:0.0212,map_erase:0.0189,map_iter:0.0021,map_mem:9040,umap_fnd:0.0005,umap_nf:0.0007,umap_insert:0.0094,umap_erase:0.0027,umap_iter:0.0003,umap_mem:9520},
+  {pattern:"sequential",N:337,kntrie_fnd:0.0041,kntrie_nf:0.0048,kntrie_insert:0.0349,kntrie_erase:0.0111,kntrie_iter:0.0010,kntrie_mem:2048,map_fnd:0.0150,map_nf:0.0140,map_insert:0.0310,map_erase:0.0229,map_iter:0.0027,map_mem:13520,umap_fnd:0.0006,umap_nf:0.0018,umap_insert:0.0098,umap_erase:0.0034,umap_iter:0.0004,umap_mem:16304},
+  {pattern:"sequential",N:506,kntrie_fnd:0.0080,kntrie_nf:0.0066,kntrie_insert:0.0519,kntrie_erase:0.0174,kntrie_iter:0.0012,kntrie_mem:3088,map_fnd:0.0234,map_nf:0.0235,map_insert:0.0566,map_erase:0.0344,map_iter:0.0043,map_mem:20280,umap_fnd:0.0011,umap_nf:0.0015,umap_insert:0.0138,umap_erase:0.0060,umap_iter:0.0007,umap_mem:20360},
+  {pattern:"sequential",N:759,kntrie_fnd:0.0119,kntrie_nf:0.0158,kntrie_insert:0.0774,kntrie_erase:0.0319,kntrie_iter:0.0017,kntrie_mem:6160,map_fnd:0.0386,map_nf:0.0387,map_insert:0.0874,map_erase:0.0496,map_iter:0.0073,map_mem:30400,umap_fnd:0.0017,umap_nf:0.0047,umap_insert:0.0190,umap_erase:0.0078,umap_iter:0.0011,umap_mem:34624},
+  {pattern:"sequential",N:1139,kntrie_fnd:0.0161,kntrie_nf:0.0147,kntrie_insert:0.1206,kntrie_erase:0.0556,kntrie_iter:0.0063,kntrie_mem:6968,map_fnd:0.0700,map_nf:0.0652,map_insert:0.1268,map_erase:0.0981,map_iter:0.0108,map_mem:45600,umap_fnd:0.0034,umap_nf:0.0071,umap_insert:0.0475,umap_erase:0.0149,umap_iter:0.0021,umap_mem:60128},
+  {pattern:"sequential",N:1708,kntrie_fnd:0.0256,kntrie_nf:0.0224,kntrie_insert:0.1501,kntrie_erase:0.0658,kntrie_iter:0.0088,kntrie_mem:10672,map_fnd:0.1171,map_nf:0.1156,map_insert:0.1903,map_erase:0.1574,map_iter:0.0162,map_mem:68360,umap_fnd:0.0062,umap_nf:0.0103,umap_insert:0.0671,umap_erase:0.0224,umap_iter:0.0032,umap_mem:73784},
+  {pattern:"sequential",N:2562,kntrie_fnd:0.0407,kntrie_nf:0.0326,kntrie_insert:0.2060,kntrie_erase:0.0656,kntrie_iter:0.0132,kntrie_mem:16016,map_fnd:0.1796,map_nf:0.1852,map_insert:0.3315,map_erase:0.2431,map_iter:0.0220,map_mem:102520,umap_fnd:0.0108,umap_nf:0.0162,umap_insert:0.1003,umap_erase:0.0396,umap_iter:0.0061,umap_mem:127048},
+  {pattern:"sequential",N:3844,kntrie_fnd:0.0558,kntrie_nf:0.0404,kntrie_insert:0.2318,kntrie_erase:0.0926,kntrie_iter:0.0182,kntrie_mem:23984,map_fnd:0.2789,map_nf:0.2846,map_insert:0.4416,map_erase:0.3764,map_iter:0.0348,map_mem:153800,umap_fnd:0.0178,umap_nf:0.0215,umap_insert:0.1470,umap_erase:0.0519,umap_iter:0.0074,umap_mem:157816},
+  {pattern:"sequential",N:5766,kntrie_fnd:0.0981,kntrie_nf:0.0781,kntrie_insert:0.4039,kntrie_erase:0.1620,kntrie_iter:0.0294,kntrie_mem:35912,map_fnd:0.5577,map_nf:0.5379,map_insert:0.8850,map_erase:0.5936,map_iter:0.0770,map_mem:230680,umap_fnd:0.0230,umap_nf:0.0261,umap_insert:0.2420,umap_erase:0.0548,umap_iter:0.0167,umap_mem:269480},
+  {pattern:"sequential",N:8649,kntrie_fnd:0.1253,kntrie_nf:0.0971,kntrie_insert:0.3861,kntrie_erase:0.2257,kntrie_iter:0.0397,kntrie_mem:53696,map_fnd:0.8645,map_nf:0.7992,map_insert:1.0468,map_erase:0.8144,map_iter:0.0917,map_mem:346000,umap_fnd:0.0315,umap_nf:0.0370,umap_insert:0.2986,umap_erase:0.1196,umap_iter:0.0223,umap_mem:469744},
+  {pattern:"sequential",N:12974,kntrie_fnd:0.2385,kntrie_nf:0.1771,kntrie_insert:0.9143,kntrie_erase:0.3837,kntrie_iter:0.0677,kntrie_mem:80480,map_fnd:1.3357,map_nf:1.2914,map_insert:2.3989,map_erase:1.6573,map_iter:0.1891,map_mem:519000,umap_fnd:0.0831,umap_nf:0.0831,umap_insert:0.7149,umap_erase:0.2349,umap_iter:0.0483,umap_mem:573544},
+  {pattern:"sequential",N:19461,kntrie_fnd:0.3069,kntrie_nf:0.2229,kntrie_insert:1.0042,kntrie_erase:0.6114,kntrie_iter:0.0895,kntrie_mem:120800,map_fnd:2.6730,map_nf:2.0932,map_insert:3.2215,map_erase:2.4744,map_iter:0.2554,map_mem:778480,umap_fnd:0.0890,umap_nf:0.1368,umap_insert:0.7416,umap_erase:0.3179,umap_iter:0.0732,umap_mem:991376},
+  {pattern:"sequential",N:29192,kntrie_fnd:0.4413,kntrie_nf:0.3369,kntrie_insert:1.5466,kntrie_erase:0.7675,kntrie_iter:0.1398,kntrie_mem:180912,map_fnd:4.2708,map_nf:5.0370,map_insert:5.3458,map_erase:5.0213,map_iter:0.3838,map_mem:1167720,umap_fnd:0.2405,umap_nf:0.2553,umap_insert:1.9437,umap_erase:0.6985,umap_iter:0.1400,umap_mem:1224920},
+  {pattern:"sequential",N:43789,kntrie_fnd:0.7442,kntrie_insert:2.0716,kntrie_erase:1.4435,kntrie_iter:0.2096,kntrie_mem:267056,map_fnd:8.6202,map_insert:8.2389,map_erase:10.2756,map_iter:0.6799,map_mem:1751600,umap_fnd:0.3533,umap_insert:1.9062,umap_erase:0.6012,umap_iter:0.2816,umap_mem:2099536},
+  {pattern:"sequential",N:65536,kntrie_fnd:0.9916,kntrie_insert:4.1225,kntrie_erase:2.0686,kntrie_iter:0.3511,kntrie_mem:400400,map_fnd:17.5914,map_insert:16.4355,map_erase:12.4673,map_iter:1.3015,map_mem:2621480,umap_fnd:0.6961,umap_insert:2.6661,umap_erase:1.9770,umap_iter:0.3050,umap_mem:2621464},
+];
+
+
+const LINES_FIND = [
+  { key: "kntrie", suffix: "fnd", color: "#3b82f6", dash: [],    width: 2.5, label: "kntrie FND" },
+  { key: "kntrie", suffix: "nf", color: "#93c5fd", dash: [6,3], width: 1.5, label: "kntrie NF" },
+  { key: "map",    suffix: "fnd", color: "#ef4444", dash: [],    width: 2.5, label: "map FND" },
+  { key: "map",    suffix: "nf", color: "#fca5a5", dash: [6,3], width: 1.5, label: "map NF" },
+  { key: "umap",   suffix: "fnd", color: "#22c55e", dash: [],    width: 2.5, label: "umap FND" },
+  { key: "umap",   suffix: "nf", color: "#86efac", dash: [6,3], width: 1.5, label: "umap NF" },
+];
+
+const LINES_OP = [
+  { key: "kntrie", suffix: "insert", color: "#3b82f6", dash: [], width: 2.5, label: "kntrie" },
+  { key: "map",    suffix: "insert", color: "#ef4444", dash: [], width: 2.5, label: "map" },
+  { key: "umap",   suffix: "insert", color: "#22c55e", dash: [], width: 2.5, label: "umap" },
+];
+
+const LINES_ERASE = [
+  { key: "kntrie", suffix: "erase", color: "#3b82f6", dash: [], width: 2.5, label: "kntrie" },
+  { key: "map",    suffix: "erase", color: "#ef4444", dash: [], width: 2.5, label: "map" },
+  { key: "umap",   suffix: "erase", color: "#22c55e", dash: [], width: 2.5, label: "umap" },
+];
+
+const LINES_MEM = [
+  { key: "kntrie", suffix: "mem", color: "#3b82f6", dash: [], width: 2.5, label: "kntrie" },
+  { key: "map",    suffix: "mem", color: "#ef4444", dash: [], width: 2.5, label: "map" },
+  { key: "umap",   suffix: "mem", color: "#22c55e", dash: [], width: 2.5, label: "umap" },
+  { key: "raw",    suffix: "mem", color: "#888",    dash: [3,3], width: 1, label: "raw (16B)" },
+];
+
+const LINES_ITER = [
+  { key: "kntrie", suffix: "iter", color: "#3b82f6", dash: [], width: 2.5, label: "kntrie" },
+  { key: "map",    suffix: "iter", color: "#ef4444", dash: [], width: 2.5, label: "map" },
+  { key: "umap",   suffix: "iter", color: "#22c55e", dash: [], width: 2.5, label: "umap" },
+];
+
+const METRICS = [
+  { id: "find",   lines: LINES_FIND,  convert: (ms, n) => (ms * 1e6) / n },
+  { id: "iter",   lines: LINES_ITER,  convert: (ms, n) => (ms * 1e6) / n },
+  { id: "insert", lines: LINES_OP,    convert: (ms, n) => (ms * 1e6) / n },
+  { id: "erase",  lines: LINES_ERASE, convert: (ms, n) => (ms * 1e6) / (n / 2) },
+  { id: "mem",    lines: LINES_MEM,   convert: (b, n) => b / n },
+];
+
+function buildData(pattern, metric) {
+  return RAW_DATA
+    .filter(r => r.pattern === pattern)
+    .map(r => {
+      const pt = { N: r.N };
+      for (const l of metric.lines) {
+        if (l.key === "raw") { pt["raw_mem"] = 16; continue; }
+        const raw = r[l.key + "_" + l.suffix];
+        if (raw != null) pt[l.key + "_" + l.suffix] = metric.convert(raw, r.N);
+      }
+      return pt;
+    });
+}
+
+const charts = {};
+
+function makeChart(canvasId, metric) {
+  const ctx = document.getElementById(canvasId).getContext("2d");
+  const data = buildData("random", metric);
+
+  charts[canvasId] = new Chart(ctx, {
+    type: "line",
+    data: {
+      labels: data.map(d => d.N),
+      datasets: metric.lines.map(l => ({
+        label: l.label,
+        data: data.map(d => d[l.key === "raw" ? "raw_mem" : l.key + "_" + l.suffix] ?? null),
+        borderColor: l.color,
+        backgroundColor: l.color + "33",
+        borderWidth: l.width,
+        borderDash: l.dash,
+        pointRadius: 0,
+        pointHitRadius: 8,
+        tension: 0.2,
+        spanGaps: true,
+      })),
+    },
+    options: {
+      responsive: true,
+      interaction: { mode: "index", intersect: false },
+      plugins: {
+        legend: { display: true, labels: { color: "#bbb", font: { size: 11 }, boxWidth: 20, padding: 10 } },
+        tooltip: {
+          backgroundColor: "#1a1a2e",
+          borderColor: "#444",
+          borderWidth: 1,
+          titleColor: "#aaa",
+          bodyColor: "#ddd",
+          callbacks: {
+            title: (items) => {
+              const v = items[0].parsed.x;
+              if (v >= 1e6) return "N = " + (v/1e6).toFixed(1) + "M";
+              if (v >= 1e3) return "N = " + (v/1e3).toFixed(1) + "K";
+              return "N = " + v;
+            },
+            label: (item) => {
+              const v = item.parsed.y;
+              if (v == null) return null;
+              const s = v < 0.1 ? v.toFixed(3) : v < 10 ? v.toFixed(2) : v < 1000 ? v.toFixed(1) : v.toFixed(0);
+              return " " + item.dataset.label + ": " + s;
+            },
+          },
+        },
+      },
+      scales: {
+        x: {
+          type: "logarithmic",
+          title: { display: false },
+          ticks: { color: "#888", font: { size: 11 },
+            callback: (v) => v >= 1e6 ? (v/1e6)+"M" : v >= 1e3 ? (v/1e3)+"K" : v },
+          grid: { color: "#2a2a3e" },
+        },
+        y: {
+          type: "logarithmic",
+          ticks: { color: "#888", font: { size: 10 },
+            callback: (v) => v < 0.1 ? v.toFixed(2) : v < 10 ? v.toFixed(1) : v >= 1000 ? v.toFixed(0) : v.toFixed(1) },
+          grid: { color: "#2a2a3e" },
+        },
+      },
+    },
+  });
+  charts[canvasId]._metric = metric;
+}
+
+METRICS.forEach(m => makeChart("c_" + m.id, m));
+
+function show(pattern) {
+  document.querySelectorAll(".btns button").forEach(b => b.classList.remove("active"));
+  event.target.classList.add("active");
+  for (const [id, chart] of Object.entries(charts)) {
+    const m = chart._metric;
+    const data = buildData(pattern, m);
+    chart.data.labels = data.map(d => d.N);
+    m.lines.forEach((l, i) => {
+      chart.data.datasets[i].data = data.map(d => d[l.key === "raw" ? "raw_mem" : l.key + "_" + l.suffix] ?? null);
+    });
+    chart.update("none");
+  }
+}
+</script>
+</body>
+</html>

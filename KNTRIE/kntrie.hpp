@@ -248,7 +248,7 @@ public:
 
     mapped_ref at(const KEY& key) {
         auto r = impl_.find_entry(KO::to_stored(key));
-        if (!r.found) throw std::out_of_range("kntrie::at");
+        if (!r.found) [[unlikely]] throw std::out_of_range("kntrie::at");
         if constexpr (IS_BOOL) {
             auto* base = static_cast<std::uint64_t*>(r.val);
             return kntrie_detail::bool_ref{base + r.pos / kntrie_detail::U64_BITS,
@@ -259,7 +259,7 @@ public:
     }
     const_mapped_ref at(const KEY& key) const {
         auto r = impl_.find_entry(KO::to_stored(key));
-        if (!r.found) throw std::out_of_range("kntrie::at");
+        if (!r.found) [[unlikely]] throw std::out_of_range("kntrie::at");
         if constexpr (IS_BOOL) {
             auto* base = static_cast<std::uint64_t*>(r.val);
             return (base[r.pos / kntrie_detail::U64_BITS] >> (r.pos % kntrie_detail::U64_BITS)) & 1;
@@ -365,24 +365,24 @@ public:
 
     iterator find(const KEY& key) {
         auto r = impl_.find_entry(KO::to_stored(key));
-        if (!r.found) return end();
+        if (!r.found) [[unlikely]] return end();
         return iterator(r);
     }
     const_iterator find(const KEY& key) const {
         auto r = impl_.find_entry(KO::to_stored(key));
-        if (!r.found) return end();
+        if (!r.found) [[unlikely]] return end();
         return const_iterator(r);
     }
 
     iterator lower_bound(const KEY& key) {
         auto r = impl_.lower_bound_entry(KO::to_stored(key));
-        if (!r.found) return end();
+        if (!r.found) [[unlikely]] return end();
         return iterator(r);
     }
 
     iterator upper_bound(const KEY& key) {
         auto r = impl_.upper_bound_entry(KO::to_stored(key));
-        if (!r.found) return end();
+        if (!r.found) [[unlikely]] return end();
         return iterator(r);
     }
 

@@ -54,7 +54,7 @@ struct kntrie_ops {
         if (ptr & NOT_FOUND_BIT) [[unlikely]] return {};
         auto* node = untag_leaf_mut(ptr);
         auto* hdr = get_header(node);  // prefetches cache line for compact_find
-        if (hdr->is_bitmap()) {
+        if (hdr->is_bitmap()) [[unlikely]] {
             std::uint8_t byte = static_cast<std::uint8_t>((stored >> shift) & 0xFF);
             return BO::bitmap_find_byte(node, stored, byte);
         }
