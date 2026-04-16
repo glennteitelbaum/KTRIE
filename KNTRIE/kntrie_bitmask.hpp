@@ -253,6 +253,7 @@ struct bitmask_ops {
         constexpr size_t hs = HEADER_U64;
         size_t au64 = get_internal_u64(n_children, 0);
         uint64_t* nn = bld.alloc_node(au64);
+        std::memset(nn, 0, HEADER_U64 * U64_BYTES);  // zero header + parent ptr
         auto* nh = get_header(nn);
         nh->set_entries(n_children);
         nh->set_alloc_u64(au64);
@@ -287,6 +288,7 @@ struct bitmask_ops {
         // Allocation: header + skip_count*embed + bitmap + sentinel + children + desc
         size_t au64 = get_internal_u64(final_n_children, skip_count);
         uint64_t* nn = bld.alloc_node(au64);
+        std::memset(nn, 0, HEADER_U64 * U64_BYTES);  // zero header + parent ptr
 
         auto* nh = get_header(nn);
         nh->set_entries(final_n_children);
@@ -841,6 +843,7 @@ struct bitmask_ops {
         constexpr size_t hs = BHS;
         size_t sz = get_bitmask_leaf(static_cast<std::uint16_t>(count));
         uint64_t* node = bld.alloc_node(sz);
+        std::memset(node, 0, BHS * U64_BYTES);  // zero header + parent ptr + skip word
         auto* h = get_header(node);
         h->set_bitmap(true);
         h->set_entries(count);
@@ -871,6 +874,7 @@ struct bitmask_ops {
         constexpr size_t hs = BHS;
         size_t sz = get_bitmask_leaf(1);
         uint64_t* node = bld.alloc_node(sz);
+        std::memset(node, 0, BHS * U64_BYTES);  // zero header + parent ptr + skip word
         auto* h = get_header(node);
         h->set_bitmap(true);
         h->set_entries(1);

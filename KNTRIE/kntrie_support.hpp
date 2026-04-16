@@ -840,7 +840,6 @@ struct builder<VALUE, true, ALLOC> {
 
     std::uint64_t* alloc_node(std::size_t u64_count) {
         std::uint64_t* p = alloc_v.allocate(u64_count);
-        std::memset(p, 0, u64_count * U64_BYTES);
         return p;
     }
 

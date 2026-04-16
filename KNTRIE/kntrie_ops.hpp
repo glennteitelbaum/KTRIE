@@ -711,6 +711,7 @@ struct kntrie_ops {
         constexpr std::size_t hu = COMPACT_HEADER_U64;
         std::size_t total_u64 = CO::get_compact_u64(static_cast<std::uint16_t>(total_entries));
         std::uint64_t* leaf = bld.alloc_node(total_u64);
+        std::memset(leaf, 0, hu * U64_BYTES);  // zero header + parent ptr
         auto* lh = get_header(leaf);
         lh->set_entries(static_cast<std::uint16_t>(total_entries));
         CO::set_capacity(leaf, static_cast<std::uint16_t>(total_entries));

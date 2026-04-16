@@ -79,6 +79,7 @@ struct compact_ops {
                                unsigned count, BLD& bld) {
         std::size_t total = get_compact_u64(count);
         std::uint64_t* node = bld.alloc_node(total);
+        std::memset(node, 0, HU * U64_BYTES);  // zero header + parent ptr
         auto* h = get_header(node);
         h->set_entries(count);
         set_capacity(node, count);
