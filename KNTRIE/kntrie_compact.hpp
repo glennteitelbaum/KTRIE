@@ -10,54 +10,6 @@
 namespace gteitelbaum::kntrie_detail {
 
 // ==========================================================================
-// AdaptiveSearch  (branchless binary search for any entry count)
-//
-// Do not condense this code. The separate variables and = assignments
-// (not +=) are deliberate. Eliminating temporaries or switching to +=
-// produces worse codegen. The compiler is sensitive to the exact
-// expression structure.
-//
-// Precondition: count > 0.
-// ==========================================================================
-
-template<typename K>
-struct adaptive_search {
-    static const K* find_base(const K* base, unsigned count, K key) noexcept {
-        int bw=std::bit_width((count - 1) | 1u);
-        unsigned count2=1u << (bw-1);
-        unsigned diff=count - count2;
-        const K* diff_val=base+diff;
-        bool is_diff = *diff_val <= key;
-        base = is_diff ? diff_val : base;
-        count=count2;
-        do {
-            count >>= 1;
-            const K* hi_val=base+count;
-            bool is_hi=(*hi_val <= key);
-            base = is_hi ? hi_val : base;
-        } while (count > 1);
-        return base;
-    }
-
-    static const K* find_base_first(const K* base, unsigned count, K key) noexcept {
-        int bw=std::bit_width((count - 1) | 1u);
-        unsigned count2=1u << (bw-1);
-        unsigned diff=count - count2;
-        const K* diff_val=base+diff;
-        bool is_diff = *diff_val < key;
-        base = is_diff ? diff_val : base;
-        count=count2;
-        do {
-            count >>= 1;
-            const K* hi_val=base+count;
-            bool is_hi=(*hi_val < key);
-            base = is_hi ? hi_val : base;
-        } while (count > 1);
-        return base;
-    }
-};
-
-// ==========================================================================
 // compact_ops  -- compact leaf operations templated on K (stored key type)
 //
 // v2 layout: [header (COMPACT_HEADER_U64)][sorted_keys][values]
@@ -81,7 +33,7 @@ struct compact_ops {
         std::size_t kb = align_up(count * sizeof(K), U64_BYTES);
         std::size_t vb;
         if constexpr (VT::IS_BOOL)
-            vb = bool_slots::bytes_for(count);
+            vb = align_up(bool_slots::bytes_for(count), U64_BYTES);
         else
             vb = align_up(count * sizeof(VST), U64_BYTES);
         return hu + (kb + vb) / U64_BYTES;
@@ -103,23 +55,20 @@ struct compact_ops {
             return align_up(count * sizeof(VST), U64_BYTES) / U64_BYTES;
     }
 
-    static constexpr std::size_t capacity_for(std::size_t total_u64) noexcept {
-        std::size_t lo = 0;
-        std::size_t hi = (total_u64 - HU) * U64_BYTES / sizeof(K);
-        while (lo < hi) {
-            std::size_t mid = lo + (hi - lo + 1) / 2;
-            if (size_u64(mid) <= total_u64) lo = mid; else hi = mid - 1;
-        }
-        return lo;
+    // --- get_compact_u64: rounded allocation size for entry count ---
+    static constexpr std::size_t get_compact_u64(std::uint16_t count) noexcept {
+        std::uint16_t rc = round_up_entries(count);
+        return size_u64(rc, HU);
     }
 
+    // --- alloc_total_u64: exact u64 size from stored capacity (already rounded) ---
     static std::size_t alloc_total_u64(std::size_t cap) noexcept {
-        return round_up_u64(size_u64(cap));
+        return size_u64(cap, HU);
     }
 
-    static void set_capacity(std::uint64_t* node, std::size_t total_u64) noexcept {
-        std::size_t cap = capacity_for(total_u64);
-        get_header(node)->set_alloc_u64(static_cast<std::uint16_t>(cap));
+    // --- set_capacity: store rounded entry count directly ---
+    static void set_capacity(std::uint64_t* node, std::uint16_t count) noexcept {
+        get_header(node)->set_alloc_u64(round_up_entries(count));
     }
 
     // ==================================================================
@@ -128,11 +77,11 @@ struct compact_ops {
 
     static std::uint64_t* make_leaf(const K* sorted_keys, const VST* values,
                                unsigned count, BLD& bld) {
-        std::size_t total = round_up_u64(size_u64(count, HU));
-        std::uint64_t* node = bld.alloc_node(total, false);
+        std::size_t total = get_compact_u64(count);
+        std::uint64_t* node = bld.alloc_node(total);
         auto* h = get_header(node);
         h->set_entries(count);
-        set_capacity(node, total);
+        set_capacity(node, count);
         if (count > 0) {
             std::memcpy(keys(node, HU), sorted_keys, count * sizeof(K));
             if constexpr (VT::IS_BOOL) {
@@ -196,7 +145,7 @@ struct compact_ops {
         unsigned entries = h->entries();
         K* kd = keys(node, HU);
 
-        const K* base = adaptive_search<K>::find_base(kd, entries, stored);
+        const K* base = adaptive_search_last(kd, entries, stored);
 
         // Key exists
         if (*base == stored) [[unlikely]] {
@@ -223,12 +172,12 @@ struct compact_ops {
         // Grow if no room
         if (!has_room(entries, h)) [[unlikely]] {
             unsigned new_entries = entries + 1;
-            std::size_t total = round_up_u64(size_u64(new_entries, HU));
-            std::uint64_t* nn = bld.alloc_node(total, false);
+            std::size_t total = get_compact_u64(static_cast<std::uint16_t>(new_entries));
+            std::uint64_t* nn = bld.alloc_node(total);
             auto* nh = get_header(nn);
             copy_leaf_header(node, nn, HU);
             nh->set_entries(new_entries);
-            set_capacity(nn, total);
+            set_capacity(nn, static_cast<std::uint16_t>(new_entries));
 
             K* nk = keys(nn, HU);
             std::memcpy(nk, kd, ins * sizeof(K));
@@ -284,7 +233,7 @@ struct compact_ops {
         unsigned entries = h->entries();
         K* kd = keys(node, HU);
 
-        const K* base = adaptive_search<K>::find_base(kd, entries, stored);
+        const K* base = adaptive_search_last(kd, entries, stored);
         if (*base != stored) [[unlikely]] return {tag_leaf(node), false, 0, {}};
         unsigned idx = static_cast<unsigned>(base - kd);
 
@@ -296,17 +245,15 @@ struct compact_ops {
             return {0, true, 0, {}};
         }
 
-        // Shrink check
-        std::size_t needed_u64 = size_u64(nc, HU);
+        // Shrink check — CO stores entry capacity in alloc_u64
         std::size_t old_cap = h->alloc_u64();
-        std::size_t current_total = alloc_total_u64(old_cap);
-        if (should_shrink_u64(current_total, needed_u64)) [[unlikely]] {
-            std::size_t total = round_up_u64(needed_u64);
-            std::uint64_t* nn = bld.alloc_node(total, false);
+        if (old_cap > round_up_entries(static_cast<std::uint16_t>(nc * SHRINK_FACTOR))) [[unlikely]] {
+            std::size_t total = get_compact_u64(static_cast<std::uint16_t>(nc));
+            std::uint64_t* nn = bld.alloc_node(total);
             auto* nh = get_header(nn);
             copy_leaf_header(node, nn, HU);
             nh->set_entries(nc);
-            set_capacity(nn, total);
+            set_capacity(nn, static_cast<std::uint16_t>(nc));
 
             K* nk = keys(nn, HU);
             std::memcpy(nk, kd, idx * sizeof(K));
@@ -328,7 +275,7 @@ struct compact_ops {
                 if (tail > 0) VT::copy_uninit(ov + idx + 1, tail, nv + idx);
             }
 
-            bld.dealloc_node(node, current_total);
+            bld.dealloc_node(node, alloc_total_u64(old_cap));
             iter_entry_t<K> nx = (idx < nc) ? entry_at_pos(nn, static_cast<std::uint16_t>(idx))
                                             : iter_entry_t<K>{};
             return {tag_leaf(nn), true, nc, nx};
@@ -412,7 +359,7 @@ struct compact_ops {
         const K* kd = keys(node, HU);
         unsigned entries = hdr->entries();
 
-        const K* base = adaptive_search<K>::find_base(kd, entries, stored);
+        const K* base = adaptive_search_last(kd, entries, stored);
         std::uint16_t pos = static_cast<std::uint16_t>(base - kd);
 
         if (kd[pos] != stored) [[unlikely]] return {};

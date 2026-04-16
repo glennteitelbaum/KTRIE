@@ -536,11 +536,11 @@ private:
 
     void coalesce_bm_to_leaf() {
         constexpr std::size_t hu = COMPACT_HEADER_U64;
-        std::size_t total_u64 = round_up_u64(CO::size_u64(size_v, hu));
-        std::uint64_t* leaf = bld_v.alloc_node(total_u64, false);
+        std::size_t total_u64 = CO::get_compact_u64(static_cast<std::uint16_t>(size_v));
+        std::uint64_t* leaf = bld_v.alloc_node(total_u64);
         auto* lh = get_header(leaf);
         lh->set_entries(static_cast<std::uint16_t>(size_v));
-        CO::set_capacity(leaf, total_u64);
+        CO::set_capacity(leaf, static_cast<std::uint16_t>(size_v));
 
         K* dk = CO::keys(leaf, hu);
         std::size_t wi = 0;

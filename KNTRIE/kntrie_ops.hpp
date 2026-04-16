@@ -218,7 +218,7 @@ struct kntrie_ops {
         }
 
         // Find insertion point via adaptive binary search
-        const K* ins_base = adaptive_search<K>::find_base_first(
+        const K* ins_base = adaptive_search_first(
             old_keys, old_count, stored);
         unsigned ins = static_cast<unsigned>(ins_base - old_keys)
                      + (*ins_base < stored);
@@ -709,11 +709,11 @@ struct kntrie_ops {
 
         // Allocate compact leaf for all entries
         constexpr std::size_t hu = COMPACT_HEADER_U64;
-        std::size_t total_u64 = round_up_u64(CO::size_u64(total_entries, hu));
-        std::uint64_t* leaf = bld.alloc_node(total_u64, false);
+        std::size_t total_u64 = CO::get_compact_u64(static_cast<std::uint16_t>(total_entries));
+        std::uint64_t* leaf = bld.alloc_node(total_u64);
         auto* lh = get_header(leaf);
         lh->set_entries(static_cast<std::uint16_t>(total_entries));
-        CO::set_capacity(leaf, total_u64);
+        CO::set_capacity(leaf, static_cast<std::uint16_t>(total_entries));
 
         K* dk = CO::keys(leaf, hu);
         std::size_t wi = 0;
@@ -743,7 +743,7 @@ struct kntrie_ops {
         iter_entry_t<K> nx{};
         const K* kd = CO::keys(leaf, hu);
         unsigned entries = lh->entries();
-        const K* base = adaptive_search<K>::find_base_first(kd, entries, stored);
+        const K* base = adaptive_search_first(kd, entries, stored);
         std::uint16_t idx = static_cast<std::uint16_t>(base - kd);
         if (idx < entries)
             nx = CO::entry_at_pos(leaf, idx);
@@ -851,7 +851,7 @@ struct kntrie_ops {
         } else {
             const K* kd = CO::keys(node, COMPACT_HEADER_U64);
             unsigned entries = hdr->entries();
-            const K* base = adaptive_search<K>::find_base_first(kd, entries, stored);
+            const K* base = adaptive_search_first(kd, entries, stored);
             std::uint16_t pos = static_cast<std::uint16_t>(base - kd);
             if (pos < entries && kd[pos] < stored) ++pos;
             if (pos >= entries) return {};

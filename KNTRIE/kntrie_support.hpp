@@ -10,6 +10,7 @@
 #include <type_traits>
 #include <utility>
 #include <algorithm>
+#include <functional>
 
 namespace gteitelbaum::kntrie_detail {
 
@@ -90,26 +91,78 @@ inline bool tst_sign(std::uint64_t v) noexcept {
 }
 
 // ==========================================================================
-// Allocation size classes
+// Branchless binary search — templatized on comparison op
+//
+// Do not condense this code. The separate variables and = assignments
+// (not +=) are deliberate. Eliminating temporaries or switching to +=
+// produces worse codegen. The compiler is sensitive to the exact
+// expression structure.
+//
+// Precondition: count >= 1.
 // ==========================================================================
 
-inline constexpr std::size_t ALLOC_CLASS_TABLE[] = {
-    4, 6, 8, 10, 14, 18, 26, 34, 48, 69, 98, 128,
-    194, 256, 386, 512, 770, 1024, 1538, 2048,
-    3074, 4096, 6146, 8192, 12290, 16384
-};
-inline constexpr std::size_t NUM_ALLOC_CLASSES = sizeof(ALLOC_CLASS_TABLE) / sizeof(std::size_t);
+template<typename K, typename Compare>
+constexpr const K* adaptive_search(const K* base, unsigned count, K key, Compare cmp) noexcept {
+    int bw = std::bit_width((count - 1) | 1u);
+    unsigned count2 = 1u << (bw - 1);
+    unsigned diff = count - count2;
+    const K* diff_val = base + diff;
+    bool is_diff = cmp(*diff_val, key);
+    base = is_diff ? diff_val : base;
+    count = count2;
+    do {
+        count >>= 1;
+        const K* hi_val = base + count;
+        bool is_hi = cmp(*hi_val, key);
+        base = is_hi ? hi_val : base;
+    } while (count > 1);
+    return base;
+}
 
-inline constexpr std::size_t round_up_u64(std::size_t n) noexcept {
-    for (std::size_t i = 0; i < NUM_ALLOC_CLASSES; ++i)
-        if (n <= ALLOC_CLASS_TABLE[i]) return ALLOC_CLASS_TABLE[i];
-    return n;
+// Last position where *pos <= key.
+template<typename K>
+constexpr const K* adaptive_search_last(const K* base, unsigned count, K key) noexcept {
+    return adaptive_search(base, count, key, std::less_equal<K>{});
+}
+
+// Last position where *pos < key.
+template<typename K>
+constexpr const K* adaptive_search_first(const K* base, unsigned count, K key) noexcept {
+    return adaptive_search(base, count, key, std::less<K>{});
+}
+
+// ==========================================================================
+// Entry-count-based allocation classes
+// ==========================================================================
+
+inline constexpr std::uint16_t ENTRY_CLASSES[] = {
+    1, 2, 4, 6, 8, 12, 16, 24, 32, 48, 64, 96,
+    128, 160, 192, 256, 320, 384, 512, 640, 768, 1024
+};
+inline constexpr unsigned NUM_ENTRY_CLASSES =
+    sizeof(ENTRY_CLASSES) / sizeof(std::uint16_t);
+
+inline constexpr std::uint16_t round_up_entries(std::uint16_t n) noexcept {
+    const auto* p = adaptive_search_last(ENTRY_CLASSES, NUM_ENTRY_CLASSES, n);
+    return n >= ENTRY_CLASSES[NUM_ENTRY_CLASSES - 1] ? n
+         : (*p == n) ? *p
+         : *(p + 1);
 }
 
 inline constexpr std::size_t MAX_NODE_ALLOC_U64 = 128;
 
-inline constexpr bool should_shrink_u64(std::size_t allocated, std::size_t needed) noexcept {
-    return allocated > round_up_u64(needed * SHRINK_FACTOR);
+// ==========================================================================
+// Internal node allocation: get_internal_u64
+//
+// Not templated on KEY/VALUE — children are always u64 pointers.
+// Skip converted to embed u64s. Headroom goes into children array only.
+// ==========================================================================
+
+inline constexpr std::size_t get_internal_u64(std::uint16_t n_children,
+                                               std::uint8_t skip = 0) noexcept {
+    return HEADER_U64 + static_cast<std::size_t>(skip) * EMBED_U64
+         + BM_CHILDREN_START + round_up_entries(n_children)
+         + DESC_U64;
 }
 
 // ==========================================================================
@@ -785,11 +838,9 @@ struct builder<VALUE, true, ALLOC> {
 
     const ALLOC& get_allocator() const noexcept { return alloc_v; }
 
-    std::uint64_t* alloc_node(std::size_t& u64_count, bool pad = true) {
-        std::size_t actual = pad ? round_up_u64(u64_count) : u64_count;
-        std::uint64_t* p = alloc_v.allocate(actual);
-        std::memset(p, 0, actual * U64_BYTES);
-        u64_count = actual;
+    std::uint64_t* alloc_node(std::size_t u64_count) {
+        std::uint64_t* p = alloc_v.allocate(u64_count);
+        std::memset(p, 0, u64_count * U64_BYTES);
         return p;
     }
 
@@ -834,13 +885,13 @@ struct builder<VALUE, false, ALLOC> {
     void swap(builder& o) noexcept { base_v.swap(o.base_v); }
     const ALLOC& get_allocator() const noexcept { return base_v.get_allocator(); }
 
-    std::uint64_t* alloc_node(std::size_t& u64_count, bool pad = true) { return base_v.alloc_node(u64_count, pad); }
+    std::uint64_t* alloc_node(std::size_t u64_count) { return base_v.alloc_node(u64_count); }
     void dealloc_node(std::uint64_t* p, std::size_t u64_count) noexcept { base_v.dealloc_node(p, u64_count); }
 
     slot_type store_value(const VALUE& val) {
         if constexpr (VAL_U64 <= MAX_NODE_ALLOC_U64) {
             std::size_t sz = VAL_U64;
-            std::uint64_t* p = base_v.alloc_node(sz, false);
+            std::uint64_t* p = base_v.alloc_node(sz);
             std::construct_at(reinterpret_cast<VALUE*>(p), val);
             return reinterpret_cast<VALUE*>(p);
         } else {

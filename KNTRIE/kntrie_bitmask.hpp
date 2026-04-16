@@ -55,6 +55,19 @@ struct bitmask_ops {
         }
     }
 
+    // --- get_bitmask_leaf: rounded allocation size for bitmap leaf ---
+    static constexpr std::size_t get_bitmask_leaf(std::uint16_t count) noexcept {
+        if constexpr (VT::IS_BOOL) {
+            // Fixed size: presence bitmap + value bitmap. Count irrelevant.
+            return BHS + BITMAP_WORDS + BITMAP_WORDS;  // = 11
+        } else {
+            std::uint16_t rc = round_up_entries(count);
+            return BHS + BITMAP_WORDS
+                 + align_up(static_cast<std::size_t>(rc) * sizeof(VST), U64_BYTES)
+                   / U64_BYTES;
+        }
+    }
+
     // ==================================================================
     // Bitmask node: branchless descent (for find) — tagged version
     // Takes bitmap pointer directly (not node pointer).
@@ -238,8 +251,7 @@ struct bitmask_ops {
         bitmap_256_t bm = bitmap_256_t::from_indices(indices, n_children);
 
         constexpr size_t hs = HEADER_U64;
-        size_t needed = bitmask_size_u64(n_children, hs);
-        size_t au64 = round_up_u64(needed);
+        size_t au64 = get_internal_u64(n_children, 0);
         uint64_t* nn = bld.alloc_node(au64);
         auto* nh = get_header(nn);
         nh->set_entries(n_children);
@@ -273,9 +285,7 @@ struct bitmask_ops {
                                       unsigned final_n_children, BLD& bld,
                                       uint64_t descendants_ = 0) {
         // Allocation: header + skip_count*embed + bitmap + sentinel + children + desc
-        size_t needed = HEADER_U64 + static_cast<size_t>(skip_count) * EMBED_U64 + BM_CHILDREN_START + final_n_children
-                       + DESC_U64;
-        size_t au64 = round_up_u64(needed);
+        size_t au64 = get_internal_u64(final_n_children, skip_count);
         uint64_t* nn = bld.alloc_node(au64);
 
         auto* nh = get_header(nn);
@@ -649,7 +659,7 @@ struct bitmask_ops {
                         node, static_cast<uint16_t>(suffix)};
             }
 
-            size_t au64 = round_up_u64(new_sz);
+            size_t au64 = get_bitmask_leaf(static_cast<std::uint16_t>(nc));
             uint64_t* nn = bld.alloc_node(au64);
             auto* nh = get_header(nn);
             copy_leaf_header(node, nn, BHS);
@@ -690,7 +700,7 @@ struct bitmask_ops {
                         node, static_cast<uint16_t>(suffix)};
             }
 
-            size_t au64 = round_up_u64(new_sz);
+            size_t au64 = get_bitmask_leaf(static_cast<std::uint16_t>(nc));
             uint64_t* nn = bld.alloc_node(au64);
             auto* nh = get_header(nn);
             copy_leaf_header(node, nn, BHS);
@@ -779,19 +789,7 @@ struct bitmask_ops {
             val_bm_mut(node, hs).clear_bit(suffix);
             h->set_entries(nc);
 
-            size_t new_sz = bitmap_leaf_size_u64(nc, hs);
-            if (should_shrink_u64(h->alloc_u64(), new_sz)) {
-                size_t au64 = round_up_u64(new_sz);
-                uint64_t* nn = bld.alloc_node(au64);
-                auto* nh = get_header(nn);
-                copy_leaf_header(node, nn, BHS);
-                nh->set_alloc_u64(au64);
-                bm_mut(nn, hs) = node_bm;
-                val_bm_mut(nn, hs) = val_bm(node, hs);
-                bld.dealloc_node(node, h->alloc_u64());
-                return {tag_leaf(nn), true, nc,
-                        bitmap_next_after(nn, suffix, 0)};
-            }
+            // Bool bitmap leaf is fixed size — never shrinks.
             return {tag_leaf(node), true, nc,
                     bitmap_next_after(node, suffix, 0)};
         } else {
@@ -804,9 +802,7 @@ struct bitmask_ops {
                 return {0, true, 0, {}};
             }
 
-            size_t new_sz = bitmap_leaf_size_u64(nc, hs);
-
-            if (!should_shrink_u64(h->alloc_u64(), new_sz)) {
+            if (h->alloc_u64() <= get_bitmask_leaf(static_cast<std::uint16_t>(nc * SHRINK_FACTOR))) {
                 VST* vd = bl_vals_mut(node, hs);
                 node_bm.clear_bit(suffix);
                 std::memmove(vd + slot, vd + slot + 1, (nc - slot) * sizeof(VST));
@@ -815,7 +811,7 @@ struct bitmask_ops {
                         bitmap_next_after(node, suffix, slot)};
             }
 
-            size_t au64 = round_up_u64(new_sz);
+            size_t au64 = get_bitmask_leaf(static_cast<std::uint16_t>(nc));
             uint64_t* nn = bld.alloc_node(au64);
             auto* nh = get_header(nn);
             copy_leaf_header(node, nn, BHS);
@@ -843,7 +839,7 @@ struct bitmask_ops {
                                        const VST* values, unsigned count,
                                        K base_key, BLD& bld) {
         constexpr size_t hs = BHS;
-        size_t sz = round_up_u64(bitmap_leaf_size_u64(count));
+        size_t sz = get_bitmask_leaf(static_cast<std::uint16_t>(count));
         uint64_t* node = bld.alloc_node(sz);
         auto* h = get_header(node);
         h->set_bitmap(true);
@@ -873,7 +869,7 @@ struct bitmask_ops {
     static uint64_t* make_single_bitmap(uint8_t suffix, VST value,
                                          K base_key, BLD& bld) {
         constexpr size_t hs = BHS;
-        size_t sz = round_up_u64(bitmap_leaf_size_u64(1));
+        size_t sz = get_bitmask_leaf(1);
         uint64_t* node = bld.alloc_node(sz);
         auto* h = get_header(node);
         h->set_bitmap(true);
@@ -989,7 +985,7 @@ private:
 
         // Realloc
         uint64_t saved = *descendants_ptr(node, hs, oc);
-        size_t au64 = round_up_u64(needed);
+        size_t au64 = get_internal_u64(static_cast<std::uint16_t>(nc), h->skip());
         uint64_t* nn = bld.alloc_node(au64);
 
         // Copy header + embeds/bitmap + sentinel (everything before children)
@@ -1025,10 +1021,8 @@ private:
             return nullptr;
         }
 
-        size_t needed = bitmask_size_u64(nc, hs);
-
         // In-place — no parent changes needed (removed child is freed)
-        if (!should_shrink_u64(h->alloc_u64(), needed)) {
+        if (h->alloc_u64() <= get_internal_u64(static_cast<std::uint16_t>(nc * SHRINK_FACTOR), h->skip())) {
             uint64_t saved = *descendants_ptr(node, hs, oc);
 
             bitmap_256_t::arr_remove(bm_mut(node, hs), real_children_mut(node, hs),
@@ -1041,7 +1035,7 @@ private:
 
         // Realloc
         uint64_t saved = *descendants_ptr(node, hs, oc);
-        size_t au64 = round_up_u64(needed);
+        size_t au64 = get_internal_u64(static_cast<std::uint16_t>(nc), h->skip());
         uint64_t* nn = bld.alloc_node(au64);
 
         // Copy header + embeds/bitmap + sentinel
