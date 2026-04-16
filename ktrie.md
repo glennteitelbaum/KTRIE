@@ -12,7 +12,7 @@ KNTRIE is specialized for fixed-width integer keys (16-, 32-, and 64-bit), provi
 
 KSTRIE is specialized for variable-length string keys, addressing the challenges of unbounded key length and unpredictable depth. KSTRIE extends prefix compression into the suffix leaves themselves via keysuffix sharing, with leaf capacity governed by a compressed suffix byte budget.
 
-Benchmarks demonstrate that across all operations, both KNTRIE and KSTRIE are competitive with `std::unordered_map` while providing full ordering, and consistently outperform `std::map`. By exploiting prefix compression, KNTRIE and KSTRIE typically occupy a third or less of the space of `std::map` and `std::unordered_map` — KNTRIE uses 12–20 bytes per entry for `uint64_t` keys with `int32_t` values under random keys (typically 14–16 at scale), compared to ~48 bytes for `std::unordered_map` and ~64 bytes for `std::map`. For dense key distributions that reach bitmap depth, KNTRIE drops to 6.2 bytes per entry — roughly half the 12 bytes of raw key-value data — as bitmap leaves encode key presence in a single bit with no per-entry key storage.
+Benchmarks demonstrate that across all operations, both KNTRIE and KSTRIE are competitive with `std::unordered_map` while providing full ordering, and consistently outperform `std::map`. By exploiting prefix compression, KNTRIE and KSTRIE typically occupy a third or less of the space of `std::map` and `std::unordered_map` — KNTRIE uses 12–18 bytes per entry for `uint64_t` keys with `int32_t` values under random keys (typically 13–16 at scale), compared to ~48 bytes for `std::unordered_map` and ~64 bytes for `std::map`. For dense key distributions like sequential data that reach bitmap depth, KNTRIE drops to 4.5 bytes per entry — well under the 12 bytes of raw key-value data — as bitmap leaves encode key presence in a single bit with no per-entry key storage.
 
 **Keywords:** trie, B-tree, ordered associative container, prefix/suffix decomposition, keysuffix sharing, cache locality, bitmap indexing, branchless search, variable-length keys
 
@@ -2201,13 +2201,21 @@ In KSTRIE, the sentinel is a static zero-initialized compact node: four `uint64_
 
 #### 4.3 Memory Hysteresis
 
-Node allocations use size classes to provide headroom for in-place mutations. A fixed table provides 26 size classes from 4 to 16,384 `uint64_t`s, growing by approximately 1.5× per step: 4, 6, 8, 10, 14, 18, 26, 34, 48, 69, 98, 128, 194, 256, and so on up to 16,384. Beyond the table, exact sizes are used. The worst-case overhead from rounding up to the next size class is approximately 50%.
+Node allocations snap to entry-count size classes. A fixed table of 22 classes governs how many entries a node is allocated for: {1, 2, 4, 6, 8, 12, 16, 24, 32, 48, 64, 96, 128, 160, 192, 256, 320, 384, 512, 640, 768, 1024}. Adjacent classes grow by at most 1.5×, bounding worst-case waste at approximately 33%. The classes 1, 2, 256, and 1024 are exact (zero waste at single-entry, bitmap-full, and compact-max operating points).
 
-This padding creates room for in-place insert and erase. A node allocated at 48 `uint64_t`s when it only needs 34 has extra slots that can absorb several inserts without triggering a reallocation. The allocation check on insert compares the needed size against the current allocation size — if there is room, the insert proceeds with a `memmove` to open a gap, and no allocation occurs.
+The table rounds entry counts, not byte sizes. Three per-node-type functions convert rounded counts to exact `uint64_t` allocation sizes:
 
-Shrink hysteresis prevents oscillation at size-class boundaries. A node only shrinks — reallocating to a smaller size class — when its current allocation exceeds the size class for twice the needed size. Without this hysteresis, a node sitting near a size-class boundary would reallocate on every alternating insert and erase: insert pushes it to the larger class, erase drops it to the smaller class, and the next insert pushes it back. The 2× factor ensures that a node must shrink significantly before it reallocates downward, absorbing small fluctuations without overhead.
+- **`get_internal_u64(n_children, skip)`** — branch nodes. Each skip level contributes a fixed 6 u64s (one embed block: bitmap + sentinel + child pointer). These are exact — embeds have no variability and no in-place mutation, so they need no headroom. Only the children array is rounded via the entry-count table, since children are added and removed in place. The total is: header + parent pointer + skip × 6 + bitmap + sentinel + `round_up_entries(n_children)` + descendant counter.
+- **`get_bitmask_leaf(count)`** — bitmap leaves. For `bool` values, returns a fixed size (11 u64s) regardless of count. For other values, rounds the count and computes the exact value block.
+- **`get_compact_u64(count)`** — compact leaves. Rounds the count and computes key block + value block for the specific `K`/`VALUE` combination.
 
-This policy applies to both compact nodes and branch nodes. For compact nodes, the relevant size is the entry count (KNTRIE) or the keysuffix byte usage (KSTRIE). For branch nodes, the relevant size is the child count plus fixed overhead (header, bitmap, sentinel, skip bytes). The allocator itself is the user-supplied allocator — all node allocations flow through `std::allocator_traits`, enabling custom allocators for arena allocation, memory tracking, or pool management.
+This eliminates cross-type waste: the same entry count produces different `uint64_t` sizes for different key/value combinations, but all share the same entry-class rounding.
+
+**Shrink hysteresis.** A node only shrinks when its allocated capacity exceeds the class for `2× the current entry count`. The check is inlined per node type — compact leaves compare entry capacities; branch nodes compute the exact `uint64_t` size for the shrunk child count including skip overhead; boolean bitmap leaves never shrink (fixed size). This prevents oscillation at class boundaries without a generic shrink function.
+
+**Compact leaves** store the rounded entry count as capacity in `alloc_u64_v`. The `has_room` check is a direct comparison: `entries + 1 <= capacity`. Deallocation recovers the exact `uint64_t` size from the stored capacity via `size_u64(capacity, HU)`.
+
+This policy applies to both compact nodes and branch nodes. For compact nodes, the relevant metric is the entry count (KNTRIE) or the keysuffix byte usage (KSTRIE). For branch nodes, the relevant metric is the child count. The allocator itself is the user-supplied allocator — all node allocations flow through `std::allocator_traits`, enabling custom allocators for arena allocation, memory tracking, or pool management.
 
 ### 5 Instantiation-Specific Details
 
@@ -2215,7 +2223,7 @@ Sections 3 and 4 describe the KTRIE pattern and the shared implementation. This 
 
 #### 5.1 KNTRIE
 
-**Node header.** All KNTRIE nodes share a packed 8-byte header (`node_header_t`) at `node[0]`. The first byte is a flags field: bit 0 (`is_bitmap`) distinguishes bitmap leaves from compact leaves, and bits 1–3 encode a skip count (used only by branch nodes for skip chains). The remaining six bytes are three 16-bit fields: `entries_v` (entry count for compact nodes or child count for branch nodes), `alloc_u64_v` (allocation size in `uint64_t` units, which may exceed the logical size due to size-class rounding), and `parent_byte_v` (the dispatch byte in the parent branch node — enabling upward traversal for live iterators). The root node uses the sentinel value `ROOT_BYTE = 256` (outside the 0–255 byte range) to terminate the upward walk.
+**Node header.** All KNTRIE nodes share a packed 8-byte header (`node_header_t`) at `node[0]`. The first byte is a flags field: bit 0 (`is_bitmap`) distinguishes bitmap leaves from compact leaves, and bits 1–3 encode a skip count (used only by branch nodes for skip chains). The remaining six bytes are three 16-bit fields: `entries_v` (entry count for compact nodes or child count for branch nodes), `alloc_u64_v` (allocation size in `uint64_t` units for branch and bitmap nodes, or entry capacity for compact leaves — derived from entry-count class rounding), and `parent_byte_v` (the dispatch byte in the parent branch node — enabling upward traversal for live iterators). The root node uses the sentinel value `ROOT_BYTE = 256` (outside the 0–255 byte range) to terminate the upward walk.
 
 ```cpp
 struct node_header_t {

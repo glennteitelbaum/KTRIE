@@ -85,13 +85,19 @@ slot_type      = IS_INLINE ? VALUE : VALUE*                   // A: VALUE   B: b
 
 ### 1.3 Memory Hysteresis
 
-Node allocations snap to size classes. A fixed table provides 26 size classes from 4 to 16,384 u64s, growing by approximately 1.5× per step: {4, 6, 8, 10, 14, 18, 26, 34, 48, 69, 98, 128, 194, 256, 386, 512, ...16384}. Beyond the table, exact sizes are used. The worst-case overhead is about 50%.
+Node allocations snap to entry-count size classes. A fixed table of 22 classes governs how many entries a node is allocated for: {1, 2, 4, 6, 8, 12, 16, 24, 32, 48, 64, 96, 128, 160, 192, 256, 320, 384, 512, 640, 768, 1024}. Adjacent classes grow by at most 1.5×, bounding worst-case waste at approximately 33%. The classes 1, 2, 256, and 1024 are exact (zero waste at single-entry, bitmap-full, and compact-max operating points).
 
-This padding creates room for in-place insert and erase operations. A node allocated at 48 u64s when it only needs 34 has extra slots that can absorb mutations without reallocation.
+The table rounds entry counts, not byte sizes. Three per-node-type functions convert rounded counts to exact `uint64_t` allocation sizes:
 
-**Shrink hysteresis.** A node only shrinks when its allocated size exceeds the size class for `2× the needed size`. This prevents oscillation: if a node sits near a boundary, alternating insert/erase won't trigger repeated realloc cycles.
+- **`get_internal_u64(n_children, skip)`** — branch nodes. Each skip level contributes a fixed 6 u64s (one embed block: bitmap + sentinel + child pointer). These are exact — embeds have no variability and no in-place mutation, so they need no headroom. Only the children array is rounded via the entry-count table, since children are added and removed in place. The total is: header + parent pointer + skip × 6 + bitmap + sentinel + `round_up_entries(n_children)` + descendant counter.
+- **`get_bitmask_leaf(count)`** — bitmap leaves. For `bool` values, returns a fixed size (11 u64s) regardless of count. For other values, rounds the count and computes the exact value block.
+- **`get_compact_u64(count)`** — compact leaves. Rounds the count and computes key block + value block for the specific `K`/`VALUE` combination.
 
-**Compact leaves** use size-class allocation. The entry count is exact — no padding slots. Size-class rounding provides headroom for in-place inserts when the allocation has spare capacity.
+This eliminates cross-type waste: the same entry count produces different `uint64_t` sizes for different key/value combinations, but all share the same entry-class rounding.
+
+**Shrink hysteresis.** A node only shrinks when its allocated capacity exceeds the class for `2× the current entry count`. The check is inlined per node type — compact leaves compare entry capacities; branch nodes compute the exact `uint64_t` size for the shrunk child count including skip overhead; boolean bitmap leaves never shrink (fixed size). This prevents oscillation at class boundaries without a generic shrink function.
+
+**Compact leaves** store the rounded entry count as capacity in `alloc_u64_v`. The `has_room` check is a direct comparison: `entries + 1 <= capacity`. Deallocation recovers the exact `uint64_t` size from the stored capacity via `size_u64(capacity, HU)`.
 
 ## 2 Node Concepts
 
@@ -120,7 +126,7 @@ All allocated nodes in the kntrie share a common 8-byte header (`node_header_t`)
 | `flags_v` | 8 | Bit 0: `is_bitmap` (leaf type); bits 1–3: `skip` (branch chain only) |
 | `reserved_v` | 8 | Reserved |
 | `entries_v` | 16 | Entry/child count |
-| `alloc_u64_v` | 16 | Allocation size in u64s (capacity for compact leaves) |
+| `alloc_u64_v` | 16 | Allocation size in u64s (branch/bitmap nodes) or entry capacity (compact leaves) |
 | `parent_byte_v` | 16 | Dispatch byte in parent bitmask node (ROOT_BYTE = 256 for root) |
 
 `entries_v` answers "how many items are directly stored here": for leaf nodes, it is the count of stored key/value pairs; for internal nodes, it is the count of child pointers.
